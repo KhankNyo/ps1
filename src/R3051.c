@@ -57,6 +57,7 @@ typedef union R3051CP0
 #define R3051_PIPESTAGE_COUNT 5
 typedef void (*R3051Write)(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size);
 typedef u32 (*R3051Read)(void *UserData, u32 Addr, R3051_DataSize Size);
+typedef Bool8 (*R3051AddrVerifyFn)(void *UserData, u32 Addr);
 typedef struct R3051 
 {
     u32 R[32];
@@ -79,16 +80,19 @@ typedef struct R3051
     void *UserData;
     R3051Read ReadFn;
     R3051Write WriteFn;
+    R3051AddrVerifyFn VerifyInstructionAddr;
+    R3051AddrVerifyFn VerifyDataAddr;
+
 
     R3051CP0 CP0;
 } R3051;
 
 R3051 R3051_Init(
     void *UserData, 
-    R3051Read ReadFn, R3051Write WriteFn
+    R3051Read ReadFn, R3051Write WriteFn,
+    R3051AddrVerifyFn DataAddrVerifier, R3051AddrVerifyFn InstructionAddrVerifier
 );
 void R3051_StepClock(R3051 *This);
-void R3051_RaiseExternalException(R3051 *This, R3051_Exception Exception);
 
 
 
@@ -127,7 +131,8 @@ void R3051_RaiseExternalException(R3051 *This, R3051_Exception Exception);
 
 R3051 R3051_Init(
     void *UserData, 
-    R3051Read ReadFn, R3051Write WriteFn
+    R3051Read ReadFn, R3051Write WriteFn,
+    R3051AddrVerifyFn DataAddrVerifier, R3051AddrVerifyFn InstructionAddrVerifier
 )
 {
     u32 ResetVector = 0xBFC00000;
@@ -140,6 +145,8 @@ R3051 R3051_Init(
         .UserData = UserData,
         .WriteFn = WriteFn,
         .ReadFn = ReadFn,
+        .VerifyDataAddr = DataAddrVerifier,
+        .VerifyInstructionAddr = InstructionAddrVerifier,
 
         .CP0 = {
             .PrID = 0x00000001,
@@ -180,12 +187,11 @@ static void R3051_ScheduleWriteback(R3051 *This, u32 *Location, u32 Data, int St
 
 
 
-static void R3051_RaiseInternalException(R3051 *This, R3051_Exception Exception, int Stage)
+static void R3051_SetException(R3051 *This, R3051_Exception Exception, int Stage)
 {
     int LastStage = Stage - 1;
     if (LastStage < 0)
         LastStage = R3051_PIPESTAGE_COUNT - 1;
-    This->ExceptionRaised = true;
 
     /* set EPC */
     if (This->InstructionIsBranch[LastStage])
@@ -204,8 +210,23 @@ static void R3051_RaiseInternalException(R3051 *This, R3051_Exception Exception,
     /* pushes new kernel mode and interrupt flag
      * bit 1 = 0 for kernel mode, 
      * bit 0 = 0 for interrupt disable */
-    u32 NewStatus = (This->CP0.Status & 0xF) << 2 | 0x00;
-    MASKED_LOAD(This->CP0.Status, NewStatus, 0x3F);
+    u32 NewStatusStack = (This->CP0.Status & 0xF) << 2 | 0x00;
+    MASKED_LOAD(This->CP0.Status, NewStatusStack, 0x3F);
+}
+
+
+static void R3051_RaiseInternalException(R3051 *This, R3051_Exception Exception, int Stage)
+{
+    This->ExceptionRaised = true;
+    R3051_SetException(This, Exception, Stage);
+}
+
+static void R3051_RaiseMemoryException(R3051 *This, R3051_Exception Exception, u32 Addr)
+{
+    int Stage = R3051_CurrentPipeStage(This, MEMORY_STAGE);
+    This->ExceptionRaised = true;
+    This->CP0.BadVAddr = Addr;
+    R3051_SetException(This, Exception, Stage);
 }
 
 /* sets PC to the appropriate exception routine, 
@@ -216,7 +237,7 @@ static void R3051_HandleException(R3051 *This)
     ASSERT(This->ExceptionRaised);
     ASSERT(This->ExceptionCyclesLeft == 0);
     This->ExceptionRaised = false;
-    /* General exception */
+    /* General exception vector */
     This->PC = 0x80000080;
 }
 
@@ -265,6 +286,8 @@ static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction, Bool8 *ExceptionR
     int CurrentStage = R3051_CurrentPipeStage(This, DECODE_STAGE);
     Bool8 IsValidInstruction = true;
     *ExceptionRaisedThisStage = false;
+    *IsBranchingInstruction = false;
+
     switch (FUNCT_GROUP(Instruction))
     {
     case 0: /* invalid shift instructions */
@@ -287,14 +310,15 @@ static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction, Bool8 *ExceptionR
             u32 Rs = This->R[REG(Instruction, RS)];
             u32 *Rd = &This->R[REG(Instruction, RD)];
 
-            Bool8 TargetAddrIsValid = false; /* TODO: check this? */
-            if ((Rs & 0x3) && !TargetAddrIsValid)
+            Bool8 TargetAddrIsValid = This->VerifyInstructionAddr(This->UserData, Rs); /* TODO: check this? */
+            if ((Rs & 0x3) || !TargetAddrIsValid)
             {
                 R3051_RaiseInternalException(
                     This, 
                     EXCEPTION_ADEL, 
                     CurrentStage
                 );
+                *ExceptionRaisedThisStage = true;
             }
             else
             {
@@ -362,6 +386,7 @@ static Bool8 R3051_Decode(R3051 *This)
     /* NOTE: decode stage determines next PC value and checks for illegal instruction  */
     u32 NextInstructionAddr = This->PC;
     u32 Instruction = R3051_InstructionAt(This, DECODE_STAGE);
+    int CurrentStage = R3051_CurrentPipeStage(This, DECODE_STAGE);
     u32 Rs = This->R[REG(Instruction, RS)];
     u32 Rt = This->R[REG(Instruction, RT)];
     Bool8 InstructionIsIllegal = false;
@@ -437,9 +462,22 @@ j:
         {
         case 06: /* coprocessor load group */
         case 07: /* coprocessor store group */
+        {
+            if (OpMode == 2) /* TODO: check if CP2 is usable */
+            {
+                /* instruction is ok */
+            }
+            else if (OpMode == 3) /* CP3 always triggers illegal instruction */
+            {
+                InstructionIsIllegal = true;
+            }
+            else /* other coprocessor triggers coprocessor unusable */
+            {
+                R3051_RaiseInternalException(This, EXCEPTION_CPU, CurrentStage);
+            }
+        } break;
         case 02: /* coprocessor misc group */
         {
-            /* only has CP0 and CP2 (GTE) */
             if (OpMode == 0) /* CP0 */
             {
                 Bool8 IsRFE = (REG(Instruction, RS) & 0x10) && 0x10 == FUNCT(Instruction);
@@ -461,17 +499,16 @@ j:
     } break;
     }
 
-    int Stage = R3051_CurrentPipeStage(This, DECODE_STAGE);
     if (InstructionIsIllegal)
     {
         R3051_RaiseInternalException(
             This, 
             EXCEPTION_RI, 
-            Stage
+            CurrentStage
         );
         ExceptionRaisedThisStage = true;
     }
-    This->InstructionIsBranch[Stage] = IsBranchingInstruction;
+    This->InstructionIsBranch[CurrentStage] = IsBranchingInstruction;
     return ExceptionRaisedThisStage;
 #undef BRANCH_IF 
 }
@@ -719,7 +756,6 @@ static Bool8 R3051_Execute(R3051 *This)
                 EXCEPTION_OVF, 
                 R3051_CurrentPipeStage(This, EXECUTE_STAGE)
             );
-            Rt = NULL;
             return true;
         }
         else
@@ -784,6 +820,7 @@ static Bool8 R3051_Execute(R3051 *This)
     } break;
     case 022: /* COP2 */
     {
+        /* TODO: COP2 instructions */
         switch (REG(Instruction, RS))
         {
         case 0x00:
@@ -805,7 +842,7 @@ static Bool8 R3051_Execute(R3051 *This)
         }
     } break;
 
-    default: Rt = NULL; return false;
+    default: return false;
     }
 
     if (Rt)
@@ -831,10 +868,16 @@ static Bool8 R3051_Memory(R3051 *This)
     u32 *Rt = &This->R[REG(Instruction, RT)];
     u32 DataRead = 0;
 
-    /* NOTE: mem stage does not perform writeback to rt immediately, 
-     * it leaves the content of rt intact until the writeback stage, 
-     * this is different from the decode and execute stage because 
-     * decode happens before execute */
+    /* verify memory addr */
+    if (!This->VerifyDataAddr(This->UserData, Addr))
+    {
+        if ((OP(Instruction) & 070) == 4) /* load instruction */
+            goto LoadAddrError;
+        else goto StoreAddrError;
+    }
+
+    /* NOTE: load instructions do not perform writeback to rt immediately, 
+     * it leaves the content of rt intact until the writeback stage */
     switch (OP(Instruction))
     {
     case 040: /* lb */
@@ -849,20 +892,20 @@ static Bool8 R3051_Memory(R3051 *This)
     case 041: /* lh */
     {
         if (Addr & 1)
-            goto AddrErrorException;
+            goto LoadAddrError;
         DataRead = (i32)(i16)READ_HALF(Addr);
     } break;
     case 045: /* lhu */
     {
         if (Addr & 1)
-            goto AddrErrorException;
+            goto LoadAddrError;
         DataRead = READ_HALF(Addr);
     } break;
 
     case 043: /* lw */
     {
         if (Addr & 3)
-            goto AddrErrorException;
+            goto LoadAddrError;
         DataRead = READ_WORD(Addr);
     } break;
 
@@ -870,21 +913,21 @@ static Bool8 R3051_Memory(R3051 *This)
     case 050: /* sb */
     {
         WRITE_BYTE(Addr, *Rt & 0xFF);
-        Rt = NULL;
+        return false;
     } break;
     case 051: /* sh */
     {
         if (Addr & 1)
-            goto AddrErrorException;
+            goto StoreAddrError;
         WRITE_HALF(Addr, *Rt & 0xFFFF);
-        Rt = NULL;
+        return false;
     } break;
     case 053: /* sw */
     {
         if (Addr & 3)
-            goto AddrErrorException;
+            goto StoreAddrError;
         WRITE_WORD(Addr, *Rt);
-        Rt = NULL;
+        return false;
     } break;
 
 
@@ -924,7 +967,7 @@ static Bool8 R3051_Memory(R3051 *This)
             WRITE_BYTE(Addr, Src & 0xFF);
             Src >>= 8;
         } while (Addr++ & 0x3);
-        Rt = NULL;
+        return false;
     } break;
     case 056: /* swr */
     {
@@ -935,7 +978,7 @@ static Bool8 R3051_Memory(R3051 *This)
             WRITE_BYTE(Addr, (Src >> 24) & 0xFF);
             Src <<= 8;
         } while (--Addr & 0x3);
-        Rt = NULL;
+        return false;
     } break;
 
     default: return false;
@@ -944,7 +987,11 @@ static Bool8 R3051_Memory(R3051 *This)
     R3051_ScheduleWriteback(This, Rt, DataRead, MEMORY_STAGE);
     return false;
 
-AddrErrorException:
+LoadAddrError:
+    R3051_RaiseMemoryException(This, EXCEPTION_ADEL, Addr);
+    return true;
+StoreAddrError:
+    R3051_RaiseMemoryException(This, EXCEPTION_ADES, Addr);
     return true;
 }
 
@@ -1028,7 +1075,7 @@ void R3051_StepClock(R3051 *This)
     }
 
 
-    int StageToInvalidate; /* leave it unitialize will make the compiler emit better warnings */
+    int StageToInvalidate;
     Bool8 HasException;
     R3051_AdvancePipeStage(This);
     if (This->ExceptionRaised)
@@ -1186,6 +1233,11 @@ static u32 MipsRead(void *UserData, u32 Addr, R3051_DataSize Size)
     return Data;
 }
 
+static Bool8 MipsVerify(void *UserData, u32 Addr)
+{
+    return true;
+}
+
 
 static Bool8 ProcessCLI(R3051 *Mips)
 {
@@ -1282,7 +1334,8 @@ int main(int argc, char **argv)
 
     R3051 Mips = R3051_Init(
         &Buf, 
-        MipsRead, MipsWrite
+        MipsRead, MipsWrite,
+        MipsVerify, MipsVerify
     );
 
     Bool8 ShouldContinue = true;
