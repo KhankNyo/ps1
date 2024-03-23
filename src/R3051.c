@@ -9,30 +9,63 @@ typedef enum R3051_DataSize
     DATA_HALF = sizeof(u16),
     DATA_WORD = sizeof(u32),
 } R3051_DataSize;
+
+
+typedef enum R3051_Exception 
+{
+    EXCEPTION_INT = 0, /* INTerrrupt */
+    /* NOTE: 1..3 are TLB exception, 
+     * but not immplemented because the PS1 does not have virtual addr */
+    EXCEPTION_ADEL = 4, /* Address Error on Load */
+    EXCEPTION_ADES, /* Address Error on Store */
+    EXCEPTION_IBE,  /* Instruction Bus Error */
+    EXCEPTION_DBE,  /* Data Bus Error */
+    EXCEPTION_SYS,  /* SYScall */
+    EXCEPTION_BP,   /* BreakPoint */
+    EXCEPTION_RI,   /* Reserved Instruction */
+    EXCEPTION_CPU,  /* CoProcessor Unusable */
+    EXCEPTION_OVF,  /* arithmetic OVerFlow */
+} R3051_Exception;
+
+
+typedef union R3051CP0
+{
+    u32 R[32];
+    struct {
+        u32 Reserved0[3];
+        u32 BPC;                /* breakpoint on execute */
+
+        u32 Reserved1;
+        u32 BDA;                /* breakpoint on data access */
+        u32 JumpDest;           /* random memorized jump addr */
+        u32 DCIC;               /* breakpoint ctrl */
+
+        u32 BadVAddr;           /* bad virtual addr */
+        u32 BDAM;               /* data access breakpoint mask */
+        u32 Reserved2;
+        u32 BPCM;               /* execute breakpoint mask */
+
+        u32 Status;
+        u32 Cause;
+        u32 EPC;
+        u32 PrID;
+    };
+} R3051CP0;
+
+
+
+#define R3051_PIPESTAGE_COUNT 5
 typedef void (*R3051Write)(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size);
 typedef u32 (*R3051Read)(void *UserData, u32 Addr, R3051_DataSize Size);
-
-
-typedef struct R3051_Coprocessor0
-{
-    u32 PRId;
-    u32 SR;
-    u32 Cause;
-    u32 EPC;
-    u32 BadVAddr;
-    /* rest in the docs is R3041 or R3081 */
-} R3051_Coprocessor0;
-
-#define R3051_REG_COUNT 32
-#define R3051_PIPESTAGE_COUNT 5
 typedef struct R3051 
 {
-    u32 R[R3051_REG_COUNT];
+    u32 R[32];
     u32 Hi, Lo;
 
     u32 PC;
     u32 PCSave[R3051_PIPESTAGE_COUNT];
     u32 Instruction[R3051_PIPESTAGE_COUNT];
+    Bool8 InstructionIsBranch[R3051_PIPESTAGE_COUNT];
     struct {
         u32 *RegRef;
         u32 Data;
@@ -47,7 +80,7 @@ typedef struct R3051
     R3051Read ReadFn;
     R3051Write WriteFn;
 
-    R3051_Coprocessor0 CP0;
+    R3051CP0 CP0;
 } R3051;
 
 R3051 R3051_Init(
@@ -55,6 +88,7 @@ R3051 R3051_Init(
     R3051Read ReadFn, R3051Write WriteFn
 );
 void R3051_StepClock(R3051 *This);
+void R3051_RaiseExternalException(R3051 *This, R3051_Exception Exception);
 
 
 
@@ -106,6 +140,11 @@ R3051 R3051_Init(
         .UserData = UserData,
         .WriteFn = WriteFn,
         .ReadFn = ReadFn,
+
+        .CP0 = {
+            .PrID = 0x00000001,
+            .Status = 1 << 22, /* set BEV bit */
+        },
     };
     return Mips;
 }
@@ -140,6 +179,73 @@ static void R3051_ScheduleWriteback(R3051 *This, u32 *Location, u32 Data, int St
 
 
 
+
+static void R3051_RaiseInternalException(R3051 *This, R3051_Exception Exception, int Stage)
+{
+    int LastStage = Stage - 1;
+    if (LastStage < 0)
+        LastStage = R3051_PIPESTAGE_COUNT - 1;
+    This->ExceptionRaised = true;
+
+    /* set EPC */
+    if (This->InstructionIsBranch[LastStage])
+    {
+        This->CP0.EPC = This->PCSave[LastStage];
+        This->CP0.Cause |= 1ul << 31; /* set BD bit */
+    }
+    else
+    {
+        This->CP0.EPC = This->PCSave[Stage];
+    }
+
+    /* write exception code to Cause register */
+    MASKED_LOAD(This->CP0.Cause, Exception << 1, 0x1F << 1);
+
+    /* pushes new kernel mode and interrupt flag
+     * bit 1 = 0 for kernel mode, 
+     * bit 0 = 0 for interrupt disable */
+    u32 NewStatus = (This->CP0.Status & 0xF) << 2 | 0x00;
+    MASKED_LOAD(This->CP0.Status, NewStatus, 0x3F);
+}
+
+/* sets PC to the appropriate exception routine, 
+ * sets CP0 to the appriate state for the exception, 
+ * caller decides whether or not to start fetching from that addr */
+static void R3051_HandleException(R3051 *This)
+{
+    ASSERT(This->ExceptionRaised);
+    ASSERT(This->ExceptionCyclesLeft == 0);
+    This->ExceptionRaised = false;
+    /* General exception */
+    This->PC = 0x80000080;
+}
+
+
+static u32 R3051CP0_Read(const R3051 *This, uint RegIndex)
+{
+    switch (RegIndex)
+    {
+    case 3: return This->CP0.BPC;
+    case 5: return This->CP0.BDA;
+    case 6: return This->CP0.JumpDest;
+    case 8: return This->CP0.BadVAddr;
+    case 9: return This->CP0.BDAM;
+    case 11: return This->CP0.BPCM;
+    case 12: return This->CP0.Status;
+    case 13: return This->CP0.Cause;
+    case 14: return This->CP0.EPC;
+    case 15: return 0x00000001; /* PrID, always 1 */
+    default: return This->CP0.R[RegIndex];
+    }
+}
+
+static void R3051CP0_Write(R3051 *This, u32 RdIndex, u32 Data)
+{
+    This->CP0.R[RdIndex % STATIC_ARRAY_SIZE(This->CP0.R)] = Data;
+}
+
+
+
 /* =============================================================================================
  *                                         FETCH STAGE
  *=============================================================================================*/
@@ -154,9 +260,11 @@ static void R3051_Fetch(R3051 *This)
 
 
 
-static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction)
+static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction, Bool8 *ExceptionRaisedThisStage, Bool8 *IsBranchingInstruction)
 {
+    int CurrentStage = R3051_CurrentPipeStage(This, DECODE_STAGE);
     Bool8 IsValidInstruction = true;
+    *ExceptionRaisedThisStage = false;
     switch (FUNCT_GROUP(Instruction))
     {
     case 0: /* invalid shift instructions */
@@ -172,16 +280,21 @@ static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction)
             /* NOTE: unaligned exception is only raised during fetch stage, 
              * unlike jalr where it is raised before execution of the instruction in the branch delay slot */
             This->PC = This->R[REG(Instruction, RS)];
+            *IsBranchingInstruction = true;
         } break;
         case 1: /* jalr */
         {
             u32 Rs = This->R[REG(Instruction, RS)];
             u32 *Rd = &This->R[REG(Instruction, RD)];
 
-            if (Rs & 0x3) /* unaligned addr, TODO: also check for valid jump addr */
+            Bool8 TargetAddrIsValid = false; /* TODO: check this? */
+            if ((Rs & 0x3) && !TargetAddrIsValid)
             {
-                /* TODO: bad addr exception, 
-                 * NOTE: instruction in branch delay slot will not be executed */
+                R3051_RaiseInternalException(
+                    This, 
+                    EXCEPTION_ADEL, 
+                    CurrentStage
+                );
             }
             else
             {
@@ -189,14 +302,25 @@ static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction)
                 This->PC = Rs;
                 R3051_ScheduleWriteback(This, Rd, *Rd, DECODE_STAGE);
             }
+            *IsBranchingInstruction = true;
         } break;
         case 5: /* syscall */
         {
-            /* TODO: syscall */
+            R3051_RaiseInternalException(
+                This, 
+                EXCEPTION_SYS, 
+                CurrentStage
+            );
+            *ExceptionRaisedThisStage = true;
         } break;
         case 6: /* break */
         {
-            /* TODO: break */
+            R3051_RaiseInternalException(
+                This, 
+                EXCEPTION_BP, 
+                CurrentStage
+            );
+            *ExceptionRaisedThisStage = true;
         } break;
         default: IsValidInstruction = false; break;
         }
@@ -241,14 +365,19 @@ static Bool8 R3051_Decode(R3051 *This)
     u32 Rs = This->R[REG(Instruction, RS)];
     u32 Rt = This->R[REG(Instruction, RT)];
     Bool8 InstructionIsIllegal = false;
+    Bool8 IsBranchingInstruction = false;
+    Bool8 ExceptionRaisedThisStage = false;
 
     switch (OP(Instruction))
     {
     case 000: /* special */
     {
-        InstructionIsIllegal = !R3051_DecodeSpecial(This, Instruction);
-        if (This->ExceptionRaised)
-            return true;
+        InstructionIsIllegal = !R3051_DecodeSpecial(
+            This, 
+            Instruction, 
+            &ExceptionRaisedThisStage, 
+            &IsBranchingInstruction
+        );
     } break;
 
     case 001: /* bcond */
@@ -277,6 +406,7 @@ static Bool8 R3051_Decode(R3051 *This)
         }
 
         BRANCH_IF(ShouldBranch);
+        IsBranchingInstruction = true;
     } break;
 
     case 003: /* jal (jump and link) */
@@ -292,12 +422,13 @@ j:
         u32 AddrMask = 0x03FFFFFF;
         u32 Immediate = (Instruction & AddrMask) << 2;
         This->PC = (This->PC & 0xF0000000) | Immediate;
+        IsBranchingInstruction = true;
     } break;
 
-    case 004: /* beq */  BRANCH_IF(Rs == Rt); break;
-    case 005: /* bne */  BRANCH_IF(Rs != Rt); break;
-    case 006: /* blez */ BRANCH_IF((i32)Rs <= 0); break;
-    case 007: /* bgtz */ BRANCH_IF((i32)Rs > 0); break;
+    case 004: /* beq */  BRANCH_IF(Rs == Rt); IsBranchingInstruction = true; break;
+    case 005: /* bne */  BRANCH_IF(Rs != Rt); IsBranchingInstruction = true; break;
+    case 006: /* blez */ BRANCH_IF((i32)Rs <= 0); IsBranchingInstruction = true; break;
+    case 007: /* bgtz */ BRANCH_IF((i32)Rs > 0); IsBranchingInstruction = true; break;
 
     default: 
     {
@@ -306,7 +437,22 @@ j:
         {
         case 06: /* coprocessor load group */
         case 07: /* coprocessor store group */
-        case 02: InstructionIsIllegal = OpMode > 3; break; /* coprocessor group */
+        case 02: /* coprocessor misc group */
+        {
+            /* only has CP0 and CP2 (GTE) */
+            if (OpMode == 0) /* CP0 */
+            {
+                Bool8 IsRFE = (REG(Instruction, RS) & 0x10) && 0x10 == FUNCT(Instruction);
+                Bool8 IsMFC0 = (REG(Instruction, RS) & ~1u) == 00;
+                Bool8 IsMTC0 = (REG(Instruction, RS) & ~1u) == 04;
+                InstructionIsIllegal = !(IsRFE || IsMFC0 || IsMTC0);
+            }
+            else if (OpMode != 2) /* CP2 (GTE) */
+            {
+                /* TODO: check GTE */
+                InstructionIsIllegal = true;
+            }
+        } break;
 
         case 03: InstructionIsIllegal = true; break; /* illegal */
         case 04: InstructionIsIllegal = OpMode == 07; break; /* load group */
@@ -315,18 +461,25 @@ j:
     } break;
     }
 
+    int Stage = R3051_CurrentPipeStage(This, DECODE_STAGE);
     if (InstructionIsIllegal)
     {
-        /* TODO: raise exception */
-        return true;
+        R3051_RaiseInternalException(
+            This, 
+            EXCEPTION_RI, 
+            Stage
+        );
+        ExceptionRaisedThisStage = true;
     }
-    return false;
+    This->InstructionIsBranch[Stage] = IsBranchingInstruction;
+    return ExceptionRaisedThisStage;
 #undef BRANCH_IF 
 }
 
 
-static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
+static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, Bool8 *ExceptionRaisedThisStage)
 {
+    *ExceptionRaisedThisStage = false;
     u32 *Rd = &This->R[REG(Instruction, RD)];
     switch (FUNCT(Instruction)) 
     {
@@ -455,7 +608,12 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
         u32 Result = Rs + Rt;
         if (OVERFLOW_I32(Result, Rs, Rt))
         {
-            /* TODO: overflow exception */
+            R3051_RaiseInternalException(
+                This, 
+                EXCEPTION_OVF, 
+                R3051_CurrentPipeStage(This, EXECUTE_STAGE)
+            );
+            *ExceptionRaisedThisStage = true;
             return NULL;
         }
         else
@@ -473,7 +631,12 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
         u32 Result = Rs + NegatedRt;
         if (OVERFLOW_I32(Result, Rs, NegatedRt))
         {
-            /* TODO: overflow exception */
+            R3051_RaiseInternalException(
+                This, 
+                EXCEPTION_OVF, 
+                R3051_CurrentPipeStage(This, EXECUTE_STAGE)
+            );
+            *ExceptionRaisedThisStage = true;
             return NULL;
         }
         else
@@ -535,14 +698,14 @@ static Bool8 R3051_Execute(R3051 *This)
     u32 SignedImm = (i32)(i16)(Instruction & 0xFFFF);
     u32 UnsignedImm = Instruction & 0xFFFF;
 
+    Bool8 ExceptionRaisedThisStage = false;
+
     /* only care about ALU ops */
     switch (OP(Instruction)) /* group and mode of op */
     {
     case 000:
     {
-        Rt = R3051_ExecuteSpecial(This, Instruction, *Rt, Rs);
-        if (This->ExceptionRaised)
-            return true;
+        Rt = R3051_ExecuteSpecial(This, Instruction, *Rt, Rs, &ExceptionRaisedThisStage);
     } break;
 
     /* group 1: alu immediate */
@@ -551,7 +714,11 @@ static Bool8 R3051_Execute(R3051 *This)
         u32 Result = Rs + SignedImm;
         if (OVERFLOW_I32(Result, Rs, SignedImm))
         {
-            /* TODO: overflow exception */
+            R3051_RaiseInternalException(
+                This, 
+                EXCEPTION_OVF, 
+                R3051_CurrentPipeStage(This, EXECUTE_STAGE)
+            );
             Rt = NULL;
             return true;
         }
@@ -589,12 +756,61 @@ static Bool8 R3051_Execute(R3051 *This)
         *Rt = UnsignedImm << 16;
     } break;
 
+    case 020: /* COP0 */
+    {
+        /* TODO: load delay for MFC0 */
+        if ((REG(Instruction, RS) & 0x10) && FUNCT(Instruction) == 0x10) /* RFE */
+        {
+            /* restore KUp, IEp and KUc, IEc */
+            MASKED_LOAD(This->CP0.Status, This->CP0.Status >> 2, 0xF);
+            Rt = NULL;
+        }
+        else switch (REG(Instruction, RS))
+        {
+        case 0x00:
+        case 0x01: /* MFC0 */
+        {
+            u32 *Rd = &This->R[REG(Instruction, RD)];
+            *Rd = R3051CP0_Read(This, REG(Instruction, RT));
+            Rt = Rd;
+        } break;
+        case 0x04:
+        case 0x05: /* MTC0 */
+        {
+            R3051CP0_Write(This, REG(Instruction, RD), *Rt);
+            Rt = NULL;
+        } break;
+        }
+    } break;
+    case 022: /* COP2 */
+    {
+        switch (REG(Instruction, RS))
+        {
+        case 0x00:
+        case 0x01:
+        {
+        } break;
+        case 0x02:
+        case 0x03:
+        {
+        } break;
+        case 0x04:
+        case 0x05:
+        {
+        } break;
+        case 0x06:
+        case 0x07:
+        {
+        } break;
+        }
+    } break;
+
     default: Rt = NULL; return false;
     }
 
     if (Rt)
         R3051_ScheduleWriteback(This, Rt, *Rt, EXECUTE_STAGE);
-    return false;
+    return ExceptionRaisedThisStage;
 }
 
 
@@ -783,6 +999,13 @@ static void R3051_Writeback(R3051 *This)
 
 
 
+static void R3051_AdvancePipeStage(R3051 *This)
+{
+    This->PipeStage++;
+    if (This->PipeStage >= R3051_PIPESTAGE_COUNT)
+        This->PipeStage = 0;   
+}
+
 
 void R3051_StepClock(R3051 *This)
 {
@@ -796,7 +1019,7 @@ void R3051_StepClock(R3051 *This)
     if (This->HiLoCyclesLeft)
     {
         This->HiLoCyclesLeft--;
-        if (This->HiLoBlocking)
+        if (This->HiLoBlocking) /* suspend execution if we're waiting for hi/lo result */
         {
             if (This->HiLoCyclesLeft == 0)
                 This->HiLoBlocking = false;
@@ -807,52 +1030,40 @@ void R3051_StepClock(R3051 *This)
 
     int StageToInvalidate; /* leave it unitialize will make the compiler emit better warnings */
     Bool8 HasException;
-    /*
-     * NOTE: because Mips is pipelined, some exceptions can occur early on in the pipeline than others, 
-     * but Mips guarantees that exceptions are in instruction order, not pipeline order 
-     */
+    R3051_AdvancePipeStage(This);
     if (This->ExceptionRaised)
     {
-        /* TODO: modify pipeline correctly */
-        This->PipeStage = This->ExceptionCyclesLeft;
-        if (0 == This->ExceptionCyclesLeft)
+        if (This->ExceptionCyclesLeft) /* needs to empty all instruction in the pipeline */
         {
-            This->ExceptionRaised = false;
-            /* TODO: execute exception handler routine */
-        }
-        else 
-        {
-            /* fallthrough is because mips is pipelined */
-            switch (R3051_PIPESTAGE_COUNT - This->ExceptionCyclesLeft)
-            {
-            case WRITEBACK_STAGE:
-            {
-                R3051_Writeback(This);
-            } FALL_THROUGH;
-            case MEMORY_STAGE:
-            {
-                HasException = R3051_Memory(This);
-                INVALIDATE_PIPELINE_IF(HasException, WRITEBACK_STAGE);
-            } FALL_THROUGH;
-            case EXECUTE_STAGE:
-            {
-                HasException = R3051_Execute(This);
-                INVALIDATE_PIPELINE_IF(HasException, MEMORY_STAGE);
-            } FALL_THROUGH;
-            case DECODE_STAGE:      
-            {
-                HasException = R3051_Decode(This);
-                INVALIDATE_PIPELINE_IF(HasException, EXECUTE_STAGE);
-            } break;
-            }
+            /* don't do fetch when emptying out instructions in the pipeline, 
+             * put nops in their place instead */
 
+            int FetchStage = R3051_CurrentPipeStage(This, FETCH_STAGE);
+            This->Instruction[FetchStage] = 0;
             This->ExceptionCyclesLeft--;
-            return;
         }
+        else /* emptied all instructions in the pipeline */
+        {
+            R3051_HandleException(This);
+            /* starts fetching from the exception handler */
+            R3051_Fetch(This);
+        }
+    }
+    else /* no exception, normal fetching */
+    {
+        R3051_Fetch(This);
     }
 
 
-    R3051_Fetch(This);
+    /*
+     * NOTE: this weird pipeline ordering is because Mips exception has to follow instruction order, 
+     * but because of Mip's pipelined nature, 
+     * some instructions can trigger exception before instructions behind it can even execute.
+     * So the solution is to execute the stages of earlier instructions first, 
+     * so they can have a chance to trigger exceptions before the instructions after them.
+     * This also helps with forwarding, especially the fact that execute stage can forward their result to the decode stage, 
+     * e.g. an alu instruction followed by a branch/jump consuming the result of the alu instruction.
+     */
     R3051_Writeback(This);
 
     HasException = R3051_Memory(This);
@@ -863,11 +1074,6 @@ void R3051_StepClock(R3051 *This)
 
     HasException = R3051_Decode(This);
     INVALIDATE_PIPELINE_IF(HasException, FETCH_STAGE);
-
- 
-    This->PipeStage++;
-    if (This->PipeStage >= R3051_PIPESTAGE_COUNT)
-        This->PipeStage = 0;   
     return;
 
 
@@ -998,7 +1204,7 @@ static void DumpState(const R3051 *Mips)
     static R3051 LastState;
     /* dump regs */
     printf("========== Registers =========:\n");
-    for (int i = 0; i < R3051_REG_COUNT; i++)
+    for (int i = 0; i < (int)STATIC_ARRAY_SIZE(Mips->R); i++)
     {
         if (Mips->R[i] == LastState.R[i])
             printf(" R%02d %08x ", i, Mips->R[i]);
