@@ -25,6 +25,12 @@ typedef unsigned uint;
 #  define true 1
 #endif /* true */
 
+typedef struct StringView 
+{
+    const char *Ptr;
+    int Len;
+} StringView;
+
 
 #define STRFY_2(x) #x
 #define STRFY_1(x) STRFY_2(x)
