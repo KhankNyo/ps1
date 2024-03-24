@@ -279,6 +279,42 @@ void R3051_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
     } break;
     case 2: /* coprocessor */
     {
+        if (OpcodeMode == 0) /* CP0 */
+        {
+            static const char *CP0Register[32] = {
+                "r0", "r1", "r2", "BPC", 
+                "r4", "BDA", "JUMPDEST", "DCIC", 
+                "BadVAddr", "BDAM", "r10", "BPCM", 
+                "SR", "CAUSE", "EPC", "PRID", 
+                "r16", "r17", "r18", "r19",
+                "r20", "r21", "r22", "r23",
+                "r24", "r25", "r26", "r27",
+                "r28", "r29", "r30", "r31"
+            };
+            switch (REG(Instruction, RS))
+            {
+            case 0x00:
+            case 0x01: /* mcf0 */
+            {
+                const char *Rt = RegName[REG(Instruction, RT)];
+                const char *Rd = CP0Register[REG(Instruction, RD)];
+                snprintf(OutBuffer, OutBufferSize, "mfc0 %s, cp0_%s", Rt, Rd);
+            } break;
+            case 0x04:
+            case 0x05: /* mtc0 */
+            {
+                const char *Rt = RegName[REG(Instruction, RT)];
+                const char *Rd = CP0Register[REG(Instruction, RD)];
+                snprintf(OutBuffer, OutBufferSize, "mtc0 %s, cp0_%s", Rt, Rd);
+            } break;
+            default: goto UnknownOpcode;
+            }
+        }
+        else if (OpcodeMode == 2) /* CP2 */
+        {
+            TODO("Disassemble CP2");
+        }
+        else goto UnknownOpcode;
     } break;
     case 4: /* load */
     {
@@ -288,7 +324,7 @@ void R3051_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
         };
         const char *Base = RegName[REG(Instruction, RS)];
         const char *Rt = RegName[REG(Instruction, RT)];
-        u32 Offset = (i32)(i16)(Instruction & 0xFFFF);
+        i32 Offset = (i32)(i16)(Instruction & 0xFFFF);
         if (OpcodeMode == 7)
             goto UnknownOpcode;
 
@@ -312,15 +348,12 @@ void R3051_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
             MnemonicTable[OpcodeMode], Rt, Offset, Base
         );
     } break;
-    case 6: /* load (coprocessor) */
-    {
-    } break;
-    case 7: /* store (coprocessor) */
-    {
-    } break;
 
 UnknownOpcode:
     case 3:
+    /* since the ps1 does not have these instruction, disassemble them as unknowns */
+    case 6: /* load (coprocessor) */
+    case 7: /* store (coprocessor) */
     default:
     {
         snprintf(OutBuffer, OutBufferSize, "???");
