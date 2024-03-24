@@ -794,8 +794,10 @@ static Bool8 R3051_Execute(R3051 *This)
 
     case 020: /* COP0 */
     {
-        /* TODO: load delay for MFC0 */
-        if ((REG(Instruction, RS) & 0x10) && FUNCT(Instruction) == 0x10) /* RFE */
+        /* RFE, the manual shows that the bits in the middle are zero, 
+         * but does it really need to be zero?
+         * does the opcode need to be 0x42000010 exactly? */
+        if ((REG(Instruction, RS) & 0x10) && FUNCT(Instruction) == 0x10) 
         {
             /* restore KUp, IEp and KUc, IEc */
             MASKED_LOAD(This->CP0.Status, This->CP0.Status >> 2, 0xF);
@@ -806,14 +808,16 @@ static Bool8 R3051_Execute(R3051 *This)
         case 0x00:
         case 0x01: /* MFC0 */
         {
-            u32 *Rd = &This->R[REG(Instruction, RD)];
-            *Rd = R3051CP0_Read(This, REG(Instruction, RT));
-            Rt = Rd;
+            u32 CP0RegisterContent = R3051CP0_Read(This, REG(Instruction, RT));
+            R3051_ScheduleWriteback(This, Rt, CP0RegisterContent, EXECUTE_STAGE);
+            TODO("Check if coprocessor is usable for MFC0");
+            Rt = NULL;
         } break;
         case 0x04:
         case 0x05: /* MTC0 */
         {
             R3051CP0_Write(This, REG(Instruction, RD), *Rt);
+            TODO("Check if coprocessor is usable for MTC0");
             Rt = NULL;
         } break;
         }
