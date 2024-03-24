@@ -2,6 +2,8 @@
 #define COMMON_H
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 typedef uint64_t u64;
 typedef int64_t i64;
@@ -29,6 +31,10 @@ typedef unsigned uint;
 #define STRFY(x) STRFY_1(x)
 
 #define FALL_THROUGH do { } while (0) 
+#define TODO(Msg) do {\
+    fprintf(stderr, "TODO in %s in '%s' on line %d: \n"Msg, __func__, __FILE__, __LINE__);\
+    abort();\
+} while (0)
 #define IN_RANGE(lower, n, upper) ((lower) <= (n) && (n) <= (upper))
 #define MASKED_LOAD(dst, src, mask) (dst = ((dst) & ~(mask)) | ((src) & (mask)))
 #define STATIC_ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
@@ -38,8 +44,6 @@ typedef unsigned uint;
 
 
 #ifdef DEBUG
-#   include <stdio.h>
-#   include <stdlib.h>
 #   define ASSERT(expr) do {\
         if (!(expr)) {\
             fprintf(stderr, "ASSERTION FAILED in "__FILE__\
