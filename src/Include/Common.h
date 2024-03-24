@@ -37,10 +37,6 @@ typedef struct StringView
 #define STRFY(x) STRFY_1(x)
 
 #define FALL_THROUGH do { } while (0) 
-#define TODO(Msg) do {\
-    fprintf(stderr, "TODO in %s in '%s' on line %d: \n"Msg, __func__, __FILE__, __LINE__);\
-    abort();\
-} while (0)
 #define IN_RANGE(lower, n, upper) ((lower) <= (n) && (n) <= (upper))
 #define MASKED_LOAD(dst, src, mask) (dst = ((dst) & ~(mask)) | ((src) & (mask)))
 #define STATIC_ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
@@ -49,6 +45,14 @@ typedef struct StringView
 #define MB (1024*1024)
 
 
+#define TODO(Msg) do {\
+    fprintf(stderr, "TODO in function %s of %s on line %d: \n"Msg"\n", __func__, __FILE__, __LINE__);\
+    abort();\
+} while (0)
+#define UNREACHABLE(Msg) do {\
+    fprintf(stderr, "Unreachable in function %s of %s on line %d: \n"Msg"\n", __func__, __FILE__, __LINE__);\
+    abort();\
+} while (0)
 #ifdef DEBUG
 #   define ASSERT(expr) do {\
         if (!(expr)) {\

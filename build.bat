@@ -22,11 +22,13 @@ if "clean"=="%1" (
             cl /Zi ..\%UNITY_BUILD_FILE% /Fe%APPNAME% %MSVC_INC%
             cl /Zi /DSTANDALONE ..\src\Disassembler.c /FeDisassembler.exe %MSVC_INC%
             cl /Zi /DSTANDALONE ..\src\R3051.c /FeR3051.exe %MSVC_INC%
+            cl /Zi /DSTANDALONE ..\src\Assembler.c /FeAssembler.exe %MSVC_INC%
         popd 
     ) else (
         %CC_CMD% %CC_INC% %UNITY_BUILD_FILE% -o bin\%APPNAME%
         %CC_CMD% %CC_INC% -DSTANDALONE src\Disassembler.c -o bin\Disassembler.exe
         %CC_CMD% %CC_INC% -DSTANDALONE src\R3051.c -o bin\R3051.exe
+        %CC_CMD% %CC_INC% -DSTANDALONE src\Assembler.c -o bin\Assembler.exe
     )
 
     echo:
