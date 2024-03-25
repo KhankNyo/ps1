@@ -30,6 +30,8 @@ typedef enum AsmTokenType
     TOK_EOF,
 
     TOK_INT, 
+    TOK_IDENTIFIER,
+
     TOK_PLUS, 
     TOK_MINUS, 
     TOK_STAR, 
@@ -48,8 +50,34 @@ typedef enum AsmTokenType
     TOK_LPAREN,
     TOK_RPAREN,
 
+    TOK_INS_I_TYPE_ALU,
+    TOK_INS_I_TYPE_RT,
+    TOK_INS_I_TYPE_MEM,
+    TOK_INS_I_TYPE_BR1,
+    TOK_INS_I_TYPE_BR2,
+
+    TOK_INS_J_TYPE,
+
+    TOK_INS_R_TYPE_3,
+    TOK_INS_R_TYPE_RSRT,
+    TOK_INS_R_TYPE_RDRS,
+    TOK_INS_R_TYPE_RTRD,
+    TOK_INS_R_TYPE_RD,
+    TOK_INS_R_TYPE_RS,
+    TOK_INS_R_TYPE_SHAMT,
+
+    TOK_INS_NO_ARG,
+
     TOK_COUNT,
 } AsmTokenType;
+
+typedef struct AsmKeyword 
+{
+    u8 Len;
+    const char Str[15];
+    AsmTokenType Type;
+    u32 Opcode;
+} AsmKeyword;
 
 typedef struct AsmToken 
 {
@@ -59,6 +87,7 @@ typedef struct AsmToken
     AsmTokenType Type;
     union {
         u64 Int;
+        u32 Opcode;
         const char *Str;
     } As;
 } AsmToken;
@@ -256,6 +285,184 @@ static AsmToken AsmConsumeNumber(Assembler *Asm)
     return Token;
 }
 
+
+static Bool8 AsmStrEqual(const char *A, const char *B, iSize Len)
+{
+    while (Len > 0)
+    {
+        if (*A != *B)
+            return false;
+        A++;
+        B++;
+        Len--;
+    }
+    return true;
+}
+
+static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
+{
+    if (Len < 1)
+        return NULL;
+
+#define INS(Mne, Typ, Opc) (AsmKeyword) {\
+        .Len = sizeof(Mne) - 1, \
+        .Str = Mne,\
+        .Type = TOK_INS_##Typ,\
+        .Opcode = Opc\
+    }
+    static const AsmKeyword Keywords[128][20] = {
+        ['a'] = {
+            INS("add",      R_TYPE_3,       0x00000020),
+            INS("addi",     I_TYPE_ALU,     0x20000000),
+            INS("addiu",    I_TYPE_ALU,     0x24000000),
+            INS("addu",     R_TYPE_3,       0x00000021),
+            INS("and",      R_TYPE_3,       0x00000024),
+            INS("andi",     I_TYPE_ALU,     0x30000000),
+        },
+        ['b'] = {
+            INS("beq",      I_TYPE_BR2,     0x10000000),
+            INS("bgez",     I_TYPE_BR1,     0x04010000),
+            INS("bgezal",   I_TYPE_BR1,     0x04110000),
+            INS("bgtz",     I_TYPE_BR1,     0x1C000000),
+            INS("blez",     I_TYPE_BR1,     0x18000000),
+            INS("bltz",     I_TYPE_BR1,     0x04000000),
+            INS("bltzal",   I_TYPE_BR1,     0x04100000),
+            INS("bne",      I_TYPE_BR2,     0x14000000),
+            INS("break",    NO_ARG,         0x0000000D),
+        },
+        ['c'] = {
+            /* TODO: CFCz */
+            /* TODO: COPz */
+            /* TODO: CTCz */
+            0
+        },
+        ['d'] = {   
+            INS("div",      R_TYPE_RSRT,    0x0000001A),
+            INS("divu",     R_TYPE_RSRT,    0x0000001B),
+        },
+        ['j'] = {
+            INS("j",        J_TYPE,         0x08000000),
+            INS("jal",      J_TYPE,         0x0C000000),
+            INS("jalr",     R_TYPE_RDRS,    0x00000009),
+            INS("jr",       R_TYPE_RS,      0x00000008),
+        },
+        ['l'] = {
+            INS("lb",       I_TYPE_MEM,     0x80000000),
+            INS("lbu",      I_TYPE_MEM,     0x90000000),
+            INS("lh",       I_TYPE_MEM,     0x84000000),
+            INS("lhu",      I_TYPE_MEM,     0x94000000),
+            INS("lui",      I_TYPE_RT,      0x3C000000),
+            INS("lw",       I_TYPE_MEM,     0x8C000000),
+            /* TODO: LWCz */
+            INS("lwl",      I_TYPE_MEM,     0x88000000),
+            INS("lwr",      I_TYPE_MEM,     0x98000000),
+        },
+        ['m'] = {
+            INS("mfc0",     R_TYPE_RTRD,    0x40000000),
+            INS("mfc1",     R_TYPE_RTRD,    0x44000000),
+            INS("mfc2",     R_TYPE_RTRD,    0x48000000),
+            INS("mfc3",     R_TYPE_RTRD,    0x4C000000),
+
+            INS("mfhi",     R_TYPE_RD,      0x00000010),
+            INS("mflo",     R_TYPE_RD,      0x00000012),
+
+            INS("mtc0",     R_TYPE_RTRD,    0x40800000),
+            INS("mtc1",     R_TYPE_RTRD,    0x44800000),
+            INS("mtc2",     R_TYPE_RTRD,    0x48800000),
+            INS("mtc3",     R_TYPE_RTRD,    0x4C800000),
+
+            INS("mthi",     R_TYPE_RS,      0x00000011),
+            INS("mtlo",     R_TYPE_RS,      0x00000013),
+
+            INS("mult",     R_TYPE_RSRT,    0x00000018),
+            INS("multu",    R_TYPE_RSRT,    0x00000019),
+        },
+        ['n'] = {
+            INS("nor",      R_TYPE_3,       0x00000027),
+        },
+        ['o'] = {
+            INS("or",       R_TYPE_3,       0x00000025),
+            INS("ori",      I_TYPE_ALU,     0x34000000),
+        },
+        ['s'] = {
+            INS("sb",       I_TYPE_MEM,     0xA0000000),
+            INS("sh",       I_TYPE_MEM,     0xA4000000),
+            INS("sw",       I_TYPE_MEM,     0xAC000000),
+            /* TODO: SWCz */
+            INS("swl",      I_TYPE_MEM,     0xA8000000),
+            INS("swr",      I_TYPE_MEM,     0xB8000000),
+
+            INS("sll",      R_TYPE_SHAMT,   0x00000000),
+            INS("sllv",     R_TYPE_3,       0x00000004),
+            INS("sra",      R_TYPE_SHAMT,   0x00000003),
+            INS("srav",     R_TYPE_3,       0x00000007),
+            INS("srl",      R_TYPE_SHAMT,   0x00000002),
+            INS("srlv",     R_TYPE_3,       0x00000006),
+
+            INS("sub",      R_TYPE_3,       0x00000022),
+            INS("subu",     R_TYPE_3,       0x00000023),
+
+            INS("slt",      R_TYPE_3,       0x0000002A),
+            INS("slti",     I_TYPE_ALU,     0x28000000),
+            INS("sltiu",    I_TYPE_ALU,     0x2C000000),
+            INS("sltu",     R_TYPE_3,       0x0000002B),
+
+            INS("syscall",  NO_ARG,         0x0000000C),
+        },
+        ['x'] = {
+            INS("xor",      R_TYPE_3,       0x00000026),
+            INS("xori",     I_TYPE_ALU,     0x38000000),
+        },
+        ['r'] = {
+            INS("rfe",      NO_ARG,         0x42000010),
+        },
+    };
+#undef INS
+
+    if (Iden[0] == '_')
+        return NULL;
+
+    unsigned char Key = Iden[0] % STATIC_ARRAY_SIZE(Keywords);
+    const AsmKeyword *PotentialKeywords = Keywords[Key];
+    for (int i = 0; i < (int)STATIC_ARRAY_SIZE(Keywords[Key]); i++)
+    {
+        const AsmKeyword *Entry = PotentialKeywords + i;
+        if (Entry->Len == Len 
+        && AsmStrEqual(Entry->Str, Iden, Len))
+        {
+            return Entry;
+        }
+    }
+    return NULL;
+}
+
+static AsmToken AsmConsumeIdentifier(Assembler *Asm)
+{
+    char Ch = *Asm->End;
+    while ('_' == Ch 
+        || IN_RANGE('a', Ch, 'z') 
+        || IN_RANGE('A', Ch, 'Z') 
+        || IN_RANGE('0', Ch, '9'))
+    {
+        Ch = AsmConsumeChar(Asm);
+    }
+
+    const AsmKeyword *KeywordInfo = AsmGetKeywordInfo(
+        Asm->Begin, 
+        Asm->End - Asm->Begin
+    );
+    if (NULL != KeywordInfo) /* is a keyword */
+    {
+        AsmToken Token = AsmCreateToken(Asm, KeywordInfo->Type);
+        Token.As.Opcode = KeywordInfo->Opcode;
+        return Token;
+    }
+    else /* is an identifier */
+    {
+        return AsmCreateToken(Asm, TOK_IDENTIFIER);
+    }
+}
+
 static AsmToken AsmTokenize(Assembler *Asm)
 {
     AsmSkipSpace(Asm);
@@ -264,6 +471,10 @@ static AsmToken AsmTokenize(Assembler *Asm)
     if (IN_RANGE('0', Ch, '9'))
     {
         return AsmConsumeNumber(Asm);
+    }
+    if ('_' == Ch || IN_RANGE('a', Ch, 'z') || IN_RANGE('A', Ch, 'Z'))
+    {
+        return AsmConsumeIdentifier(Asm);
     }
 
     switch (Ch)
