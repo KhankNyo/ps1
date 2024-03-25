@@ -5,14 +5,14 @@
 
 /* returns true on success, false on failure */
 typedef void (*AsmErrorLoggingFn)(void *Context, const char *ErrorMessage, iSize MessageSizeBytes);
-typedef void (*AsmEmitterFn)(void *Context, const void *Data, iSize DataSizeBytes);
+typedef void (*AsmAllocatorFn)(void *Context, const void *Data, iSize DataSizeBytes);
 
 Bool8 R3051_Assemble(
     const char *Source, 
     void *ErrorLoggingContext, 
     AsmErrorLoggingFn Logger,
     void *EmitterContext, 
-    AsmEmitterFn Emitter
+    AsmAllocatorFn Allocator
 );
 
 
@@ -146,9 +146,13 @@ typedef struct Assembler
 
     void *LoggerContext;
     AsmErrorLoggingFn Logger;
-    void *EmitterContext;
-    AsmEmitterFn Emitter;
+    void *AllocatorContext;
+    AsmAllocatorFn Allocator;
     u32 CurrentVirtualLocation;
+
+    u8 *Buffer;
+    iSize BufferSize;
+    iSize BufferCap;
 
     Bool8 Panic;
     Bool8 Error;
@@ -1056,6 +1060,18 @@ static AsmExpression AsmConsumeExpr(Assembler *Asm)
     return AsmParsePrecedence(Asm, PREC_ANY);
 }
 
+static void AsmPushIncompleteExpr(Assembler *Asm, AsmExpression Expr, AsmPatchType PatchType);
+static u64 AsmConsumeOrSaveExpr(Assembler *Asm, AsmPatchType PatchType)
+{
+    AsmExpression Expr = AsmConsumeExpr(Asm);
+    if (Expr.Incomplete)
+    {
+        AsmPushIncompleteExpr(Asm, Expr, PatchType);
+        return 0;
+    }
+    return Expr.Value;
+}
+
 
 
 
@@ -1127,6 +1143,12 @@ static void AsmIdentifierStmt(Assembler *Asm)
     }
 }
 
+static uint AsmConsumeGPRegister(Assembler *Asm, const char *Name)
+{
+    AsmConsumeTokenOrError(Asm, TOK_REG, "Expected %s register.", Name);
+    return Asm->CurrentToken.As.Reg;
+}
+
 static void AsmJType(Assembler *Asm)
 {
     /* j addr */
@@ -1152,20 +1174,18 @@ static void AsmJType(Assembler *Asm)
     AsmEmit(Asm, Opcode);
 }
 
-static void AsmRTypeWith3Operands(Assembler *Asm)
+static void AsmRType3Operands(Assembler *Asm)
 {
     /* instruction rd, rs, rt
      * instruction rd, reg      (rt = rd) */
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
     /* RD */
-    AsmConsumeTokenOrError(Asm, TOK_REG, "Expected destination register.");
-    uint Rd = Asm->CurrentToken.As.Reg;
+    uint Rd = AsmConsumeGPRegister(Asm, "destination");
     AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after destination register.");
 
     /* RS */
-    AsmConsumeTokenOrError(Asm, TOK_REG, "Expected source register.");
-    uint Rs = Asm->CurrentToken.As.Reg;
+    uint Rs = AsmConsumeGPRegister(Asm, "source");
 
     /* RT */
     uint Rt = Rd;
@@ -1181,18 +1201,17 @@ static void AsmRTypeWith3Operands(Assembler *Asm)
     AsmEmit(Asm, Opcode);
 }
 
-static void AsmRTypeSingleOperand(Assembler *Asm, const char *RegisterType, int Offset)
+static void AsmRType1Operand(Assembler *Asm, const char *RegisterType, int Offset)
 {
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
-    AsmConsumeTokenOrError(Asm, TOK_REG, "Expected %s register.", RegisterType);
-    uint Rd = Asm->CurrentToken.As.Reg;
+    uint Rd = AsmConsumeGPRegister(Asm, "destination");
 
     Opcode |= (Rd & 0x1F) << Offset;
     AsmEmit(Asm, Opcode);
 }
 
-static void AsmRTypeTwoOperands(
+static void AsmRType2Operands(
     Assembler *Asm, 
     const char *First, const char *Second, 
     int Offset1, int Offset2
@@ -1200,12 +1219,9 @@ static void AsmRTypeTwoOperands(
 {
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
-    AsmConsumeTokenOrError(Asm, TOK_REG, "Expected %s register.", First);
-    uint R1 = Asm->CurrentToken.As.Reg;
+    uint R1 = AsmConsumeGPRegister(Asm, First);
     AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after register.");
-
-    AsmConsumeTokenOrError(Asm, TOK_REG, "Expected %s register.", Second);
-    uint R2 = Asm->CurrentToken.As.Reg;
+    uint R2 = AsmConsumeGPRegister(Asm, Second);
 
     Opcode |= (R1 & 0x1F) << Offset1;
     Opcode |= (R2 & 0x1F) << Offset2;
@@ -1216,10 +1232,8 @@ static void AsmRTypeShift(Assembler *Asm)
 {
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
-    AsmConsumeTokenOrError(Asm, TOK_REG, "Expected destination register.");
-    uint Rd = Asm->CurrentToken.As.Reg;
+    uint Rd = AsmConsumeGPRegister(Asm, "destination");
     AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after destination register.");
-
     uint Rt = Rd;
     if (AsmConsumeIfNextTokenIs(Asm, TOK_REG))
     {
@@ -1227,20 +1241,82 @@ static void AsmRTypeShift(Assembler *Asm)
         AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after source register.");
     }
 
-    uint Shamt = 0;
-    AsmExpression Expr = AsmConsumeExpr(Asm);
-    if (Expr.Incomplete)
-    {
-        AsmPushIncompleteExpr(Asm, Expr, PATCH_SHAMT);
-    }
-    else
-    {
-        Shamt = Expr.Value;
-    }
+    u64 Shamt = AsmConsumeOrSaveExpr(Asm, PATCH_SHAMT);
 
     Opcode |= (Rd & 0x1F) << RD;
     Opcode |= (Rt & 0x1F) << RT;
     Opcode |= (Shamt & 0x1F) << 6;
+    AsmEmit(Asm, Opcode);
+}
+
+static void AsmIType2Operands(Assembler *Asm, const char *OperandName, int Offset)
+{
+    u32 Opcode = Asm->CurrentToken.As.Opcode;
+
+    uint Reg = AsmConsumeGPRegister(Asm, OperandName);
+    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after %s register.", OperandName);
+    u64 Immediate = AsmConsumeOrSaveExpr(Asm, PATCH_U16);
+
+    Opcode |= (Reg & 0x1F) << Offset;
+    Opcode |= Immediate & 0xFFFF;
+    AsmEmit(Asm, Opcode);
+}
+
+static void AsmIType3Operands(Assembler *Asm)
+{
+    u32 Opcode = Asm->CurrentToken.As.Opcode;
+
+    uint Rt = AsmConsumeGPRegister(Asm, "destination");
+    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after register.");
+
+    uint Rs = Rt;
+    if (AsmConsumeIfNextTokenIs(Asm, TOK_REG))
+    {
+        Rs = Asm->CurrentToken.As.Reg;
+        AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after register.");
+    }
+
+    u64 Immediate = AsmConsumeOrSaveExpr(Asm, PATCH_U16);
+
+    Opcode |= (Rt & 0x1F) << RT;
+    Opcode |= (Rs & 0x1F) << Rs;
+    Opcode |= Immediate & 0xFFFF;
+    AsmEmit(Asm, Opcode);
+}
+
+static void AsmITypeMemory(Assembler *Asm)
+{
+    u32 Opcode = Asm->CurrentToken.As.Opcode;
+
+    uint Rt = AsmConsumeGPRegister(Asm, "a");
+    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after register.");
+
+    u64 Offset = AsmConsumeOrSaveExpr(Asm, PATCH_U16);
+    AsmConsumeTokenOrError(Asm, TOK_LPAREN, "Expected '('.");
+    uint Base = AsmConsumeGPRegister(Asm, "base");
+    AsmConsumeTokenOrError(Asm, TOK_LPAREN, "Expected ')'.");
+
+    Opcode |= (Base & 0x1F) << RT;
+    Opcode |= (Rt & 0x1F) << RS;
+    Opcode |= Offset & 0xFFFF;
+    AsmEmit(Asm, Opcode);
+}
+
+static void AsmITypeBranch(Assembler *Asm, int RegisterArgumentCount)
+{
+    u32 Opcode = Asm->CurrentToken.As.Opcode;
+
+    uint FirstReg = AsmConsumeGPRegister(Asm, "a");
+    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after register.");
+    if (RegisterArgumentCount != 1)
+    {
+        uint SecondReg = AsmConsumeGPRegister(Asm, "a");
+        Opcode |= (SecondReg & 0x1F) << RT;
+    }
+
+    u64 Immediate = AsmConsumeOrSaveExpr(Asm, PATCH_BRANCH);
+    Opcode |= (FirstReg & 0x1F) << RS;
+    Opcode |= 0xFFFF & (Immediate >> 2);
     AsmEmit(Asm, Opcode);
 }
 
@@ -1253,13 +1329,19 @@ static void AsmConsumeStmt(Assembler *Asm)
 
     case TOK_INS_NO_ARG:        AsmEmit(Asm, Asm->CurrentToken.As.Opcode); break;
     case TOK_INS_J_TYPE:        AsmJType(Asm); break;
-    case TOK_INS_R_TYPE_3:      AsmRTypeWith3Operands(Asm); break;
-    case TOK_INS_R_TYPE_RD:     AsmRTypeSingleOperand(Asm, "destination", RD); break;
-    case TOK_INS_R_TYPE_RS:     AsmRTypeSingleOperand(Asm, "source", RS); break;
-    case TOK_INS_R_TYPE_RDRS:   AsmRTypeTwoOperands(Asm, "destination", "source", RD, RS); break;
-    case TOK_INS_R_TYPE_RTRD:   AsmRTypeTwoOperands(Asm, "general", "coprocessor", RT, RD); break;
-    case TOK_INS_R_TYPE_RSRT:   AsmRTypeTwoOperands(Asm, "a", "a second", RS, RT); break;
+    case TOK_INS_R_TYPE_3:      AsmRType3Operands(Asm); break;
+    case TOK_INS_R_TYPE_RD:     AsmRType1Operand(Asm, "destination", RD); break;
+    case TOK_INS_R_TYPE_RS:     AsmRType1Operand(Asm, "source", RS); break;
+    case TOK_INS_R_TYPE_RDRS:   AsmRType2Operands(Asm, "destination", "source", RD, RS); break;
+    case TOK_INS_R_TYPE_RTRD:   AsmRType2Operands(Asm, "general", "coprocessor", RT, RD); break;
+    case TOK_INS_R_TYPE_RSRT:   AsmRType2Operands(Asm, "a", "a second", RS, RT); break;
     case TOK_INS_R_TYPE_SHAMT:  AsmRTypeShift(Asm); break;
+
+    case TOK_INS_I_TYPE_ALU:    AsmIType3Operands(Asm); break;
+    case TOK_INS_I_TYPE_RT:     AsmIType2Operands(Asm, "destination", RT); break;
+    case TOK_INS_I_TYPE_MEM:    AsmITypeMemory(Asm); break;
+    case TOK_INS_I_TYPE_BR1:    AsmITypeBranch(Asm, 1); break;
+    case TOK_INS_I_TYPE_BR2:    AsmITypeBranch(Asm, 2); break;
     }
 }
 
