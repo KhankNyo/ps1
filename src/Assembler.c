@@ -4,12 +4,23 @@
 #include "Common.h"
 
 /* returns true on success, false on failure */
-typedef void (*AsmErrorLoggingFn)(void *Context, const char *ErrorMessage, iSize MessageSizeBytes);
-typedef void (*AsmAllocatorFn)(void *Context, const void *Data, iSize DataSizeBytes);
+typedef void (*AsmErrorLoggingFn)(void *Context, const char *ErrorMessage, uint MessageSizeBytes);
+/* 
+ * if OldPtr == NULL, should acts like malloc, 
+ * if SizeBytes == NULL, should act like free (never used)
+ * else should act like realloc */
+typedef void *(*AsmAllocatorFn)(void *Context, void *OldPtr, u32 SizeBytes);
 
-Bool8 R3051_Assemble(
+typedef struct ButeBuffer 
+{
+    u8 *Ptr;
+    iSize Size;
+} ByteBuffer;
+
+/* if failed, Ptr is NULL */
+ByteBuffer R3051_Assemble(
     const char *Source, 
-    void *ErrorLoggingContext, 
+    void *LoggerContext, 
     AsmErrorLoggingFn Logger,
     void *EmitterContext, 
     AsmAllocatorFn Allocator
@@ -25,7 +36,6 @@ Bool8 R3051_Assemble(
 
 #include <inttypes.h> /* PRIi64 */
 #include <stdarg.h> 
-#define ASM_TMP_ERR_BUFFER_SIZE 2048
 
 typedef enum AsmTokenType 
 {
@@ -156,6 +166,8 @@ typedef struct Assembler
 
     Bool8 Panic;
     Bool8 Error;
+    Bool8 FatalError;
+    Bool8 ErrorOnUndefinedLabel;
 
     AsmToken CurrentToken, NextToken;
     i32 Line;
@@ -169,6 +181,11 @@ typedef struct Assembler
 } Assembler;
 
 
+
+static Bool8 AsmIsAlpha(char Ch)
+{
+    return '_' == Ch || IN_RANGE('a', Ch, 'z') || IN_RANGE('A', Ch, 'Z');
+}
 
 static Bool8 AsmIsAtEnd(const Assembler *Asm)
 {
@@ -304,7 +321,7 @@ static AsmToken AsmConsumeNumber(Assembler *Asm)
             Ch = AsmConsumeChar(Asm);
         } while (!AsmIsAtEnd(Asm));
 
-        if (IN_RANGE('a', Ch, 'z') || IN_RANGE('A', Ch, 'Z') || IN_RANGE('2', Ch, '9'))
+        if (AsmIsAlpha(Ch) || IN_RANGE('2', Ch, '9'))
             return AsmErrorToken(Asm, "Invalid character in binary number");
     }
     /* decimal */
@@ -327,7 +344,7 @@ static AsmToken AsmConsumeNumber(Assembler *Asm)
             Ch = AsmConsumeChar(Asm);
         } while (!AsmIsAtEnd(Asm));
 
-        if (IN_RANGE('a', Ch, 'z') || IN_RANGE('A', Ch, 'Z'))
+        if (AsmIsAlpha(Ch))
             return AsmErrorToken(Asm, "Invalid character in number");
     }
 
@@ -355,7 +372,7 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
     if (Len < 1)
         return NULL;
 
-#define INS(Mne, Typ, Opc) (AsmKeyword) {\
+#define INS(Mne, Typ, Opc) {\
         .Len = sizeof(Mne) - 1, \
         .Str = Mne,\
         .Type = TOK_INS_##Typ,\
@@ -487,10 +504,19 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
     return NULL;
 }
 
-static AsmToken AsmCreateRegisterToken(Assembler *Asm, const char *Str, iSize Len)
+static AsmToken AsmCreateRegisterToken(Assembler *Asm)
 {
     uint RegisterNumber = 0;
     AsmTokenType RegisterType = TOK_REG;
+    const char *Str = Asm->Begin + 1;
+    int Len = 0;
+    char Ch = *Asm->End;
+    while (!AsmIsAtEnd(Asm) && (AsmIsAlpha(Ch) || IN_RANGE('0', Ch, '9')))
+    {
+        Ch = AsmConsumeChar(Asm);
+        Len++;
+    }
+
     if (Len >= 1 && IN_RANGE('0', Str[0], '6')) /* register 0..64 */
     {
         /* example syntax: $12, $31 */
@@ -606,14 +632,6 @@ static AsmToken AsmConsumeIdentifier(Assembler *Asm)
         Token.As.Opcode = KeywordInfo->Opcode;
         return Token;
     }
-    else if ('$' == *Asm->Begin) /* register */
-    {
-        return AsmCreateRegisterToken(
-            Asm, 
-            Asm->Begin + 1, 
-            Asm->End - Asm->Begin - 1
-        );
-    }
     else /* is an identifier */
     {
         return AsmCreateToken(Asm, TOK_IDENTIFIER);
@@ -636,6 +654,7 @@ static AsmToken AsmTokenize(Assembler *Asm)
 
     switch (Ch)
     {
+    case '$': return AsmCreateRegisterToken(Asm);
     case '+': return AsmCreateToken(Asm, TOK_PLUS);
     case '-': return AsmCreateToken(Asm, TOK_MINUS);
     case '/': return AsmCreateToken(Asm, TOK_SLASH);
@@ -774,10 +793,12 @@ static void AsmErrorAtArgs(
     int LineNumber, int Offset,
     const char *cFmt, va_list Args)
 {
+#define ASM_TMP_ERR_BUFFER_SIZE 2048
     char Buffer[ASM_TMP_ERR_BUFFER_SIZE];
-    Asm->Panic = true;
-    if (NULL == Asm->Logger)
+    if (NULL == Asm->Logger || Asm->Panic)
         return;
+
+    Asm->Panic = true;
 
 #define PRINT_AND_UPDATE_PTR(...) ((Len += snprintf(Ptr, sizeof Buffer - Len, __VA_ARGS__)), Ptr = Buffer + Len)
     char *Ptr = Buffer;
@@ -807,6 +828,7 @@ static void AsmErrorAtArgs(
 
     Asm->Logger(Asm->LoggerContext, Buffer, Len);
 #undef PRINT_AND_UPDATE_PTR
+#undef ASM_TMP_ERR_BUFFER_SIZE
 }
 
 
@@ -868,6 +890,7 @@ typedef struct AsmParseRule
     InfixParseFn Infix;
 } AsmParseRule;
 
+static AsmLabel *AsmFindIdentifier(Assembler *Asm, StringView Str);
 static const AsmParseRule *AsmGetParseRule(AsmTokenType Token);
 static AsmExpression AsmParsePrecedence(Assembler *Asm, AsmInfixPrecedence Prec);
 
@@ -884,13 +907,24 @@ static AsmExpression AsmTokenToExpr(const AsmToken *Token, Bool8 Incomplete, u64
 
 static AsmExpression AsmCombineExpr(AsmExpression A, AsmExpression B, u64 Value)
 {
+    const char *First = A.Str.Ptr;
+    int Offset = A.Offset;
+    int Line = A.Line;
+    iSize CombinedExprLen = B.Str.Len + (B.Str.Ptr - First);
+    if (B.Str.Ptr < First)
+    {
+        First = B.Str.Ptr;
+        Offset = B.Offset;
+        Line = B.Line;
+        CombinedExprLen = A.Str.Len + (A.Str.Ptr - First);
+    }
     return (AsmExpression) {
         .Str = {
-            .Ptr = A.Str.Ptr,
-            .Len = B.Str.Len + (B.Str.Ptr - A.Str.Ptr),
+            .Ptr = First,
+            .Len = CombinedExprLen,
         },
-        .Line = A.Line,
-        .Offset = A.Offset,
+        .Line = Line,
+        .Offset = Offset,
         .Incomplete = A.Incomplete || B.Incomplete,
         .Value = Value,
     };
@@ -904,6 +938,20 @@ static AsmExpression AsmParseNumber(Assembler *Asm)
         false, 
         Asm->CurrentToken.As.Int
     );
+}
+
+
+static AsmExpression AsmParseIden(Assembler *Asm)
+{
+    ASSERT(Asm->CurrentToken.Type == TOK_IDENTIFIER);
+
+    AsmLabel *Label = AsmFindIdentifier(Asm, Asm->CurrentToken.Str);
+    if (NULL != Label)
+        return AsmTokenToExpr(&Asm->CurrentToken, false, Label->Value);
+
+    if (Asm->ErrorOnUndefinedLabel)
+        AsmErrorAtToken(Asm, &Asm->CurrentToken, "Undefined identifier.");
+    return AsmTokenToExpr(&Asm->CurrentToken, true, 0);
 }
 
 static AsmExpression AsmBinaryExpr(Assembler *Asm, AsmExpression Lhs)
@@ -1014,6 +1062,7 @@ static const AsmParseRule *AsmGetParseRule(AsmTokenType Token)
     static const AsmParseRule AsmPrecedenceTable[TOK_COUNT] = {
         [TOK_INT]               = { PREC_NONE,      AsmParseNumber, NULL },
         [TOK_LPAREN]            = { PREC_NONE,      AsmParenExpr,   NULL },
+        [TOK_IDENTIFIER]        = { PREC_NONE,      AsmParseIden,   NULL },
 
         [TOK_PLUS]              = { PREC_ADDSUB,    AsmPrefixExpr,  AsmBinaryExpr },
         [TOK_MINUS]             = { PREC_ADDSUB,    AsmPrefixExpr,  AsmBinaryExpr },
@@ -1075,10 +1124,35 @@ static u64 AsmConsumeOrSaveExpr(Assembler *Asm, AsmPatchType PatchType)
 
 
 
-
-static void AsmEmit(Assembler *Asm, u32 Word)
+static Bool8 AsmResizeBuffer(Assembler *Asm, iSize NewSizeBytes)
 {
-    Asm->Emitter(Asm->EmitterContext, &Word, sizeof Word);
+    void *NewBuffer = Asm->Allocator(Asm->AllocatorContext, Asm->Buffer, NewSizeBytes);
+    if (NULL == NewBuffer)
+    {
+        Asm->FatalError = true;
+        Asm->Allocator(Asm->AllocatorContext, Asm->Buffer, 0); /* free the old buffer */
+        Asm->Logger(Asm->LoggerContext, "Out of memory", 13);
+        return false;
+    }
+    Asm->Buffer = NewBuffer;
+    return true;
+}
+
+static void AsmEmit32(Assembler *Asm, u32 Word)
+{
+    /* resize */
+    if (Asm->BufferSize + 4 >= Asm->BufferCap)
+    {
+        if (!AsmResizeBuffer(Asm, Asm->BufferSize*4 + 8))
+            return;
+    }
+
+    /* TODO: endianess */
+    for (uint i = 0; i < sizeof Word; i++)
+    {
+        Asm->Buffer[Asm->BufferSize++] = Word;
+        Word >>= 8;
+    }
     Asm->CurrentVirtualLocation += sizeof Word;
 }
 
@@ -1110,6 +1184,20 @@ static void AsmPushLabel(Assembler *Asm, AsmToken Token, u64 Value)
         .Value = Value,
     };
 }
+
+static AsmLabel *AsmFindIdentifier(Assembler *Asm, StringView Str)
+{
+    for (uint i = 0; i < Asm->LabelCount; i++)
+    {
+        AsmLabel *Entry = &Asm->Labels[i];
+        if (AsmStrEqual(Str.Ptr, Entry->Token.Str.Ptr, Str.Len))
+        {
+            return Entry;
+        }
+    }
+    return NULL;
+}
+
 
 static void AsmIdentifierStmt(Assembler *Asm)
 {
@@ -1149,6 +1237,9 @@ static uint AsmConsumeGPRegister(Assembler *Asm, const char *Name)
     return Asm->CurrentToken.As.Reg;
 }
 
+#define ASM_CONSUME_COMMA(pAsm, ...) \
+    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after "__VA_ARGS__);
+
 static void AsmJType(Assembler *Asm)
 {
     /* j addr */
@@ -1171,7 +1262,7 @@ static void AsmJType(Assembler *Asm)
         Opcode |= JumpAddr >> 2;
     }
 
-    AsmEmit(Asm, Opcode);
+    AsmEmit32(Asm, Opcode);
 }
 
 static void AsmRType3Operands(Assembler *Asm)
@@ -1182,7 +1273,7 @@ static void AsmRType3Operands(Assembler *Asm)
 
     /* RD */
     uint Rd = AsmConsumeGPRegister(Asm, "destination");
-    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after destination register.");
+    ASM_CONSUME_COMMA(Asm, "destination register.");
 
     /* RS */
     uint Rs = AsmConsumeGPRegister(Asm, "source");
@@ -1198,17 +1289,16 @@ static void AsmRType3Operands(Assembler *Asm)
     Opcode |= (Rd & 0x1F) << RD;
     Opcode |= (Rs & 0x1F) << RS;
     Opcode |= (Rt & 0x1F) << RT;
-    AsmEmit(Asm, Opcode);
+    AsmEmit32(Asm, Opcode);
 }
 
 static void AsmRType1Operand(Assembler *Asm, const char *RegisterType, int Offset)
 {
     u32 Opcode = Asm->CurrentToken.As.Opcode;
+    uint Reg = AsmConsumeGPRegister(Asm, RegisterType);
 
-    uint Rd = AsmConsumeGPRegister(Asm, "destination");
-
-    Opcode |= (Rd & 0x1F) << Offset;
-    AsmEmit(Asm, Opcode);
+    Opcode |= (Reg & 0x1F) << Offset;
+    AsmEmit32(Asm, Opcode);
 }
 
 static void AsmRType2Operands(
@@ -1220,12 +1310,12 @@ static void AsmRType2Operands(
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
     uint R1 = AsmConsumeGPRegister(Asm, First);
-    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after register.");
+    ASM_CONSUME_COMMA(Asm, "register.");
     uint R2 = AsmConsumeGPRegister(Asm, Second);
 
     Opcode |= (R1 & 0x1F) << Offset1;
     Opcode |= (R2 & 0x1F) << Offset2;
-    AsmEmit(Asm, Opcode);
+    AsmEmit32(Asm, Opcode);
 }
 
 static void AsmRTypeShift(Assembler *Asm)
@@ -1233,20 +1323,21 @@ static void AsmRTypeShift(Assembler *Asm)
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
     uint Rd = AsmConsumeGPRegister(Asm, "destination");
-    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after destination register.");
+    ASM_CONSUME_COMMA(Asm, "destination register.");
     uint Rt = Rd;
     if (AsmConsumeIfNextTokenIs(Asm, TOK_REG))
     {
         Rt = Asm->CurrentToken.As.Reg;
-        AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after source register.");
+        ASM_CONSUME_COMMA(Asm, "source register.");
     }
 
     u64 Shamt = AsmConsumeOrSaveExpr(Asm, PATCH_SHAMT);
+    TODO("check if shamt is in range");
 
     Opcode |= (Rd & 0x1F) << RD;
     Opcode |= (Rt & 0x1F) << RT;
     Opcode |= (Shamt & 0x1F) << 6;
-    AsmEmit(Asm, Opcode);
+    AsmEmit32(Asm, Opcode);
 }
 
 static void AsmIType2Operands(Assembler *Asm, const char *OperandName, int Offset)
@@ -1254,12 +1345,13 @@ static void AsmIType2Operands(Assembler *Asm, const char *OperandName, int Offse
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
     uint Reg = AsmConsumeGPRegister(Asm, OperandName);
-    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after %s register.", OperandName);
+    ASM_CONSUME_COMMA(Asm, "%s register.", OperandName);
     u64 Immediate = AsmConsumeOrSaveExpr(Asm, PATCH_U16);
+    TODO("check if immediate is in range");
 
     Opcode |= (Reg & 0x1F) << Offset;
     Opcode |= Immediate & 0xFFFF;
-    AsmEmit(Asm, Opcode);
+    AsmEmit32(Asm, Opcode);
 }
 
 static void AsmIType3Operands(Assembler *Asm)
@@ -1267,21 +1359,22 @@ static void AsmIType3Operands(Assembler *Asm)
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
     uint Rt = AsmConsumeGPRegister(Asm, "destination");
-    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after register.");
+    ASM_CONSUME_COMMA(Asm, "destination register.");
 
     uint Rs = Rt;
     if (AsmConsumeIfNextTokenIs(Asm, TOK_REG))
     {
         Rs = Asm->CurrentToken.As.Reg;
-        AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after register.");
+        ASM_CONSUME_COMMA(Asm, "register.");
     }
 
     u64 Immediate = AsmConsumeOrSaveExpr(Asm, PATCH_U16);
+    TODO("check if immediate is in range");
 
     Opcode |= (Rt & 0x1F) << RT;
     Opcode |= (Rs & 0x1F) << Rs;
     Opcode |= Immediate & 0xFFFF;
-    AsmEmit(Asm, Opcode);
+    AsmEmit32(Asm, Opcode);
 }
 
 static void AsmITypeMemory(Assembler *Asm)
@@ -1289,9 +1382,10 @@ static void AsmITypeMemory(Assembler *Asm)
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
     uint Rt = AsmConsumeGPRegister(Asm, "a");
-    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after register.");
+    ASM_CONSUME_COMMA(Asm, "register.");
 
     u64 Offset = AsmConsumeOrSaveExpr(Asm, PATCH_U16);
+    TODO("check if memory offset is in range");
     AsmConsumeTokenOrError(Asm, TOK_LPAREN, "Expected '('.");
     uint Base = AsmConsumeGPRegister(Asm, "base");
     AsmConsumeTokenOrError(Asm, TOK_LPAREN, "Expected ')'.");
@@ -1299,7 +1393,7 @@ static void AsmITypeMemory(Assembler *Asm)
     Opcode |= (Base & 0x1F) << RT;
     Opcode |= (Rt & 0x1F) << RS;
     Opcode |= Offset & 0xFFFF;
-    AsmEmit(Asm, Opcode);
+    AsmEmit32(Asm, Opcode);
 }
 
 static void AsmITypeBranch(Assembler *Asm, int RegisterArgumentCount)
@@ -1307,28 +1401,37 @@ static void AsmITypeBranch(Assembler *Asm, int RegisterArgumentCount)
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
     uint FirstReg = AsmConsumeGPRegister(Asm, "a");
-    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after register.");
-    if (RegisterArgumentCount != 1)
+    ASM_CONSUME_COMMA(Asm, "register.");
+    if (RegisterArgumentCount == 2)
     {
         uint SecondReg = AsmConsumeGPRegister(Asm, "a");
+        ASM_CONSUME_COMMA(Asm, "register.");
         Opcode |= (SecondReg & 0x1F) << RT;
     }
 
-    u64 Immediate = AsmConsumeOrSaveExpr(Asm, PATCH_BRANCH);
+    u32 BranchTarget = AsmConsumeOrSaveExpr(Asm, PATCH_BRANCH);
+    i32 BranchOffset = (i32)(BranchTarget - (Asm->CurrentVirtualLocation + 4)) / 4;
+    TODO("check if branch target is in range");
+
     Opcode |= (FirstReg & 0x1F) << RS;
-    Opcode |= 0xFFFF & (Immediate >> 2);
-    AsmEmit(Asm, Opcode);
+    Opcode |= 0xFFFF & BranchOffset;
+    AsmEmit32(Asm, Opcode);
 }
+
+#undef ASM_CONSUME_COMMA
+
 
 static void AsmConsumeStmt(Assembler *Asm)
 {
-    AsmTokenType CurrentToken = AsmConsumeToken(Asm);
-    switch (CurrentToken)
+    switch (AsmConsumeToken(Asm))
     {
     case TOK_IDENTIFIER:        AsmIdentifierStmt(Asm); break;
 
-    case TOK_INS_NO_ARG:        AsmEmit(Asm, Asm->CurrentToken.As.Opcode); break;
+
+    case TOK_INS_NO_ARG:        AsmEmit32(Asm, Asm->CurrentToken.As.Opcode); break;
+
     case TOK_INS_J_TYPE:        AsmJType(Asm); break;
+
     case TOK_INS_R_TYPE_3:      AsmRType3Operands(Asm); break;
     case TOK_INS_R_TYPE_RD:     AsmRType1Operand(Asm, "destination", RD); break;
     case TOK_INS_R_TYPE_RS:     AsmRType1Operand(Asm, "source", RS); break;
@@ -1345,14 +1448,27 @@ static void AsmConsumeStmt(Assembler *Asm)
     }
 }
 
+static Bool8 AsmTokenIsInstruction(AsmTokenType Token)
+{
+    return IN_RANGE(TOK_INS_I_TYPE_ALU, Token, TOK_INS_NO_ARG);
+}
+
+static void AsmRecoverFromPanic(Assembler *Asm)
+{
+    Asm->Panic = false;
+    while (!AsmIsAtEnd(Asm) && !AsmTokenIsInstruction(Asm->NextToken.Type))
+    {
+        AsmConsumeToken(Asm);
+    }
+}
 
 
-Bool8 R3051_Assemble(
+ByteBuffer R3051_Assemble(
     const char *Source, 
-    void *ErrorLoggingContext, 
+    void *LoggerContext, 
     AsmErrorLoggingFn Logger,
-    void *EmitterContext, 
-    AsmEmitterFn Emitter
+    void *AllocatorContext, 
+    AsmAllocatorFn Allocator
 )
 {
     Assembler Asm = {
@@ -1362,36 +1478,82 @@ Bool8 R3051_Assemble(
         .LineStart = Source,
         .Line = 1,
 
-        .LoggerContext = ErrorLoggingContext,
+        .LoggerContext = LoggerContext,
         .Logger = Logger,
 
-        .EmitterContext = EmitterContext,
-        .Emitter = Emitter,
+        .AllocatorContext = AllocatorContext,
+        .Allocator = Allocator,
         .CurrentVirtualLocation = 0,
     };
-    AsmConsumeToken(&Asm);
+    if (!AsmResizeBuffer(&Asm, 1024*4))
+        return (ByteBuffer) { 0 };
 
+    AsmConsumeToken(&Asm);
     while (TOK_EOF != Asm.NextToken.Type)
     {
         AsmConsumeStmt(&Asm);
+        if (Asm.Panic)
+            AsmRecoverFromPanic(&Asm);
+        if (Asm.FatalError)
+            return (ByteBuffer) { 0 };
     }
-    return true;
+
+    ByteBuffer Buffer = {
+        .Ptr = Asm.Buffer,
+        .Size = Asm.BufferSize,
+    };
+    return Buffer;
 }
 
 
 
 #ifdef STANDALONE
-static void Log(void *Context, const char *ErrorMessage, iSize Length)
+#undef STANDALONE
+#include <stdio.h>
+#include "Disassembler.c"
+
+static void Log(void *Context, const char *ErrorMessage, uint Length)
 {
     (void)Context;
     fprintf(stderr, "Test: %.*s", (int)Length, ErrorMessage);
 }
 
+static void *Allocator(void *Context, void *OldPtr, u32 SizeBytes)
+{
+    (void)Context;
+    return realloc(OldPtr, SizeBytes);
+}
+
 int main(int argc, char **argv)
 {
-    R3051_Assemble("-2 >- 1", 
-        NULL, Log
+    const char *TestProgram = 
+        "location: \n"
+        "  beq $0, $0, location\n"
+    ;
+
+    ByteBuffer Buffer = R3051_Assemble(
+        TestProgram, 
+        NULL, Log,
+        NULL, Allocator
     );
+    if (NULL == Buffer.Ptr)
+    {
+        return 1;
+    }
+
+    u32 *Instructions = (u32 *)Buffer.Ptr;
+    for (iSize i = 0; i < Buffer.Size / 4; i++)
+    {
+        char Mnemonic[128];
+        R3051_Disasm(
+            Instructions[i], 
+            i, 
+            DISASM_IMM16_AS_HEX, 
+            Mnemonic, 
+            sizeof Mnemonic
+        );
+        printf("%8x: %08x   %s\n", (u32)i, Instructions[i], Mnemonic);
+    }
     return 0;
 }
 #endif /* STANDALONE */
