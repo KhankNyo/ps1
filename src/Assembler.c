@@ -125,25 +125,27 @@ typedef struct AsmLabel
     u64 Value;
 } AsmLabel;
 
-typedef struct AsmIncompleteLabel 
+typedef struct AsmIncompleteDefinition
 {
     AsmToken Token;
     AsmExpression Expr;
-} AsmIncompleteLabel;
+} AsmIncompleteDefinition;
 
 typedef enum AsmPatchType 
 {
     PATCH_U32, 
-    PATCH_U16, 
-    PATCH_SHAMT,
-    PATCH_JUMP,
-    PATCH_BRANCH,
+    PATCH_OPC_U16, 
+    PATCH_OPC_I16, 
+    PATCH_OPC_SHAMT,
+    PATCH_OPC_JUMP,
+    PATCH_OPC_BRANCH,
 } AsmPatchType;
 
 typedef struct AsmIncompleteExpr 
 {
     AsmExpression Expr;
     u32 Location;
+    u32 VirtualLocation;
     AsmPatchType PatchType;
 } AsmIncompleteExpr;
 
@@ -174,8 +176,8 @@ typedef struct Assembler
 
     AsmLabel Labels[2048];
     uint LabelCount;
-    AsmIncompleteLabel IncompleteLabels[1024];
-    uint IncompleteLabelCount;
+    AsmIncompleteDefinition IncompleteDefinitions[1024];
+    uint IncompleteDefinitionCount;
     AsmIncompleteExpr IncompleteExprs[1024];
     uint IncompleteExprCount;
 } Assembler;
@@ -1163,14 +1165,15 @@ static void AsmPushIncompleteExpr(Assembler *Asm, AsmExpression Expr, AsmPatchTy
     Asm->IncompleteExprs[Asm->IncompleteExprCount++] = (AsmIncompleteExpr) {
         .Expr = Expr,
         .Location = Asm->BufferSize,
+        .VirtualLocation = Asm->CurrentVirtualLocation,
         .PatchType = PatchType,
     };
 }
 
-static void AsmPushIncompleteLabel(Assembler *Asm, AsmToken Token, AsmExpression Expr)
+static void AsmPushIncompleteDefinition(Assembler *Asm, AsmToken Token, AsmExpression Expr)
 {
-    ASSERT(Asm->IncompleteLabelCount < STATIC_ARRAY_SIZE(Asm->IncompleteLabels));
-    Asm->IncompleteLabels[Asm->IncompleteLabelCount++] = (AsmIncompleteLabel) {
+    ASSERT(Asm->IncompleteDefinitionCount < STATIC_ARRAY_SIZE(Asm->IncompleteDefinitions));
+    Asm->IncompleteDefinitions[Asm->IncompleteDefinitionCount++] = (AsmIncompleteDefinition) {
         .Token = Token,
         .Expr = Expr,
     };
@@ -1200,6 +1203,77 @@ static AsmLabel *AsmFindIdentifier(Assembler *Asm, StringView Str)
     return NULL;
 }
 
+static Bool8 AsmCheckShamt(Assembler *Asm, const AsmExpression *ShamtExpr)
+{
+    if (!IN_RANGE(0, (i64)ShamtExpr->Value, 31))
+    {
+        AsmErrorAtExpr(Asm, ShamtExpr, 
+            "Shift amount must be in between 0 and 31, got %"PRIi64" instead.", 
+            ShamtExpr->Value
+        );
+        return false;
+    }
+    return true;
+}
+
+static Bool8 AsmCheckBranchOffset(Assembler *Asm, u32 PC, const AsmExpression *BranchTarget)
+{
+    i32 Offset = ((i32)BranchTarget->Value - (i32)(PC + 4)) / 4;
+    /* TODO: should we warn about alignment? */
+    if (!IN_RANGE(INT16_MIN, Offset, INT16_MAX))
+    {
+        AsmErrorAtExpr(Asm, BranchTarget, 
+            "Branch offset must be in between %d and %d, got %d (from %08x to %08x) instead.",
+            (int)INT16_MIN, (int)INT16_MAX, 
+            Offset, PC, (u32)BranchTarget->Value
+        );
+        return false;
+    }
+    return true;
+}
+
+static Bool8 AsmCheckSignedImmediate(Assembler *Asm, const char *ImmediateType, const AsmExpression *Immediate)
+{
+    if (!IN_RANGE(INT16_MIN, (i64)Immediate->Value, INT16_MAX))
+    {
+        AsmErrorAtExpr(Asm, Immediate, 
+            "%s must be in between %d and %d, got %"PRIi64" instead.", 
+            ImmediateType, (int)INT16_MIN, (int)INT16_MAX, (i64)Immediate->Value
+        );
+        return false;
+    }
+    return true;
+}
+
+static Bool8 AsmCheckUnsignedImmediate(Assembler *Asm, const char *ImmediateType, const AsmExpression *Immediate)
+{
+    if (Immediate->Value <= 0xFFFF)
+    {
+        AsmErrorAtExpr(Asm, Immediate, 
+            "%s must be in between %d and %d, got %"PRIu64" instead.", 
+            ImmediateType, 0, 0xFFFF, (u64)Immediate->Value
+        );
+        return false;
+    }
+    return true;
+}
+
+
+
+static Bool8 AsmCheckJumpTarget(Assembler *Asm, u32 PC, const AsmExpression *JumpTarget)
+{
+    /* TODO: check alignment? */
+    if ((PC >> 26) != ((u32)JumpTarget->Value >> 26))
+    {
+        AsmErrorAtExpr(Asm, JumpTarget, 
+            "Bits 26 to 31 of jump target does not match PC (%08x and %08x).",
+            (u32)JumpTarget->Value, PC 
+        );
+        return false;
+    }
+    return true;
+}
+
 
 static void AsmIdentifierStmt(Assembler *Asm)
 {
@@ -1210,7 +1284,7 @@ static void AsmIdentifierStmt(Assembler *Asm)
         AsmExpression Expression = AsmConsumeExpr(Asm);
         if (Expression.Incomplete)
         {
-            AsmPushIncompleteLabel(Asm, 
+            AsmPushIncompleteDefinition(Asm, 
                 Identifier, 
                 Expression
             );
@@ -1250,20 +1324,14 @@ static void AsmJType(Assembler *Asm)
     AsmExpression AddrExpr = AsmConsumeExpr(Asm);
     if (AddrExpr.Incomplete)
     {
-        AsmPushIncompleteExpr(Asm, AddrExpr, PATCH_JUMP);
+        AsmPushIncompleteExpr(Asm, AddrExpr, PATCH_OPC_JUMP);
     }
     else
     {
-        if ((AddrExpr.Value ^ Asm->CurrentVirtualLocation) & 0xF0000000)
-        {
-            AsmErrorAtExpr(Asm, &AddrExpr, 
-                "Bits 28 to 31 of jump address does not match that of PC."
-            );
-        }
-        u32 JumpAddr = AddrExpr.Value & 0x0FFFFFFF;
-        Opcode |= JumpAddr >> 2;
+        AsmCheckJumpTarget(Asm, Asm->CurrentVirtualLocation, &AddrExpr);
     }
 
+    Opcode |= (AddrExpr.Value & 0x0FFFFFFF) >> 2;
     AsmEmit32(Asm, Opcode);
 }
 
@@ -1333,12 +1401,19 @@ static void AsmRTypeShift(Assembler *Asm)
         ASM_CONSUME_COMMA(Asm, "source register.");
     }
 
-    u64 Shamt = AsmConsumeOrSaveExpr(Asm, PATCH_SHAMT);
-    TODO("check if shamt is in range");
+    AsmExpression ShamtExpr = AsmConsumeExpr(Asm);
+    if (ShamtExpr.Incomplete)
+    {
+        AsmPushIncompleteExpr(Asm, ShamtExpr, PATCH_OPC_SHAMT);
+    }
+    else
+    {
+        AsmCheckShamt(Asm, &ShamtExpr);
+    }
 
     Opcode |= (Rd & 0x1F) << RD;
     Opcode |= (Rt & 0x1F) << RT;
-    Opcode |= (Shamt & 0x1F) << 6;
+    Opcode |= (ShamtExpr.Value & 0x1F) << 6;
     AsmEmit32(Asm, Opcode);
 }
 
@@ -1348,11 +1423,19 @@ static void AsmIType2Operands(Assembler *Asm, const char *OperandName, int Offse
 
     uint Reg = AsmConsumeGPRegister(Asm, OperandName);
     ASM_CONSUME_COMMA(Asm, "%s register.", OperandName);
-    u64 Immediate = AsmConsumeOrSaveExpr(Asm, PATCH_U16);
-    TODO("check if immediate is in range");
+
+    AsmExpression ImmediateExpr = AsmConsumeExpr(Asm);
+    if (ImmediateExpr.Incomplete)
+    {
+        AsmPushIncompleteExpr(Asm, ImmediateExpr, PATCH_OPC_I16);
+    }
+    else
+    {
+        AsmCheckUnsignedImmediate(Asm, "Immediate", &ImmediateExpr);
+    }
 
     Opcode |= (Reg & 0x1F) << Offset;
-    Opcode |= Immediate & 0xFFFF;
+    Opcode |= ImmediateExpr.Value & 0x0000FFFF;
     AsmEmit32(Asm, Opcode);
 }
 
@@ -1370,12 +1453,19 @@ static void AsmIType3Operands(Assembler *Asm)
         ASM_CONSUME_COMMA(Asm, "register.");
     }
 
-    u64 Immediate = AsmConsumeOrSaveExpr(Asm, PATCH_U16);
-    TODO("check if immediate is in range");
+    AsmExpression ImmediateExpr = AsmConsumeExpr(Asm);
+    if (ImmediateExpr.Incomplete)
+    {
+        AsmPushIncompleteExpr(Asm, ImmediateExpr, PATCH_OPC_I16);
+    }
+    else
+    {
+        AsmCheckSignedImmediate(Asm, "Immediate", &ImmediateExpr);
+    }
 
     Opcode |= (Rt & 0x1F) << RT;
     Opcode |= (Rs & 0x1F) << Rs;
-    Opcode |= Immediate & 0xFFFF;
+    Opcode |= ImmediateExpr.Value & 0x0000FFFF;
     AsmEmit32(Asm, Opcode);
 }
 
@@ -1386,15 +1476,23 @@ static void AsmITypeMemory(Assembler *Asm)
     uint Rt = AsmConsumeGPRegister(Asm, "a");
     ASM_CONSUME_COMMA(Asm, "register.");
 
-    u64 Offset = AsmConsumeOrSaveExpr(Asm, PATCH_U16);
-    TODO("check if memory offset is in range");
+    AsmExpression OffsetExpr = AsmConsumeExpr(Asm);
+    if (OffsetExpr.Incomplete)
+    {
+        AsmPushIncompleteExpr(Asm, OffsetExpr, PATCH_OPC_I16);
+    }
+    else
+    {
+        AsmCheckSignedImmediate(Asm, "Immediate", &OffsetExpr);
+    }
+
     AsmConsumeTokenOrError(Asm, TOK_LPAREN, "Expected '('.");
     uint Base = AsmConsumeGPRegister(Asm, "base");
-    AsmConsumeTokenOrError(Asm, TOK_LPAREN, "Expected ')'.");
+    AsmConsumeTokenOrError(Asm, TOK_RPAREN, "Expected ')'.");
 
     Opcode |= (Base & 0x1F) << RT;
     Opcode |= (Rt & 0x1F) << RS;
-    Opcode |= Offset & 0xFFFF;
+    Opcode |= OffsetExpr.Value & 0x0000FFFF;
     AsmEmit32(Asm, Opcode);
 }
 
@@ -1411,12 +1509,19 @@ static void AsmITypeBranch(Assembler *Asm, int RegisterArgumentCount)
         Opcode |= (SecondReg & 0x1F) << RT;
     }
 
-    u32 BranchTarget = AsmConsumeOrSaveExpr(Asm, PATCH_BRANCH);
-    i32 BranchOffset = (i32)(BranchTarget - (Asm->CurrentVirtualLocation + 4)) / 4;
-    TODO("check if branch target is in range");
+    AsmExpression BranchTargetExpr = AsmConsumeExpr(Asm);
+    if (BranchTargetExpr.Incomplete)
+    {
+        AsmPushIncompleteExpr(Asm, BranchTargetExpr, PATCH_OPC_BRANCH);
+    }
+    else
+    {
+        AsmCheckBranchOffset(Asm, Asm->CurrentVirtualLocation, &BranchTargetExpr);
+    }
+    i32 BranchOffset = ((i32)BranchTargetExpr.Value - (i32)(Asm->CurrentVirtualLocation + 4)) / 4;
 
     Opcode |= (FirstReg & 0x1F) << RS;
-    Opcode |= 0xFFFF & BranchOffset;
+    Opcode |= BranchOffset & 0x0000FFFF;
     AsmEmit32(Asm, Opcode);
 }
 
@@ -1447,6 +1552,7 @@ static void AsmConsumeStmt(Assembler *Asm)
     case TOK_INS_I_TYPE_MEM:    AsmITypeMemory(Asm); break;
     case TOK_INS_I_TYPE_BR1:    AsmITypeBranch(Asm, 1); break;
     case TOK_INS_I_TYPE_BR2:    AsmITypeBranch(Asm, 2); break;
+    default:                    AsmErrorAtToken(Asm, &Asm->CurrentToken, "Unexpected token.");
     }
 }
 
@@ -1461,6 +1567,92 @@ static void AsmRecoverFromPanic(Assembler *Asm)
     while (!AsmIsAtEnd(Asm) && !AsmTokenIsInstruction(Asm->NextToken.Type))
     {
         AsmConsumeToken(Asm);
+    }
+}
+
+
+
+static void AsmResolveIncompleteDefinitions(Assembler *Asm)
+{
+    for (uint i = 0; i < Asm->IncompleteDefinitionCount; i++)
+    {
+        AsmIncompleteDefinition *Entry = &Asm->IncompleteDefinitions[i];
+        Asm->Begin = Entry->Expr.Str.Ptr;
+        Asm->End = Entry->Expr.Str.Ptr;
+
+        AsmConsumeToken(Asm);
+        AsmExpression Expr = AsmConsumeExpr(Asm);
+        /* assumed that error is reported */
+        AsmPushLabel(Asm, Entry->Token, Expr.Value);
+    }
+}
+
+static void AsmMemcpy(void *Dst, const void *Src, iSize BytesToCopy)
+{
+    u8 *DstPtr = Dst;
+    const u8 *SrcPtr = Src;
+    while (BytesToCopy --> 0)
+    {
+        *DstPtr++ = *SrcPtr++;
+    }
+}
+
+static void AsmResolveIncompleteExprs(Assembler *Asm)
+{
+    for (uint i = 0; i < Asm->IncompleteExprCount; i++)
+    {
+        Asm->Panic = false;
+
+        AsmIncompleteExpr *Entry = &Asm->IncompleteExprs[i];
+        ASSERT(Entry->Location + 4 <= Asm->BufferSize);
+        Asm->Begin = Entry->Expr.Str.Ptr;
+        Asm->End = Entry->Expr.Str.Ptr;
+
+        AsmConsumeToken(Asm);
+        AsmExpression NewExpr = AsmConsumeExpr(Asm);
+
+        u8 *Location = &Asm->Buffer[Entry->Location];
+        u32 Word;
+        AsmMemcpy(&Word, Location, sizeof Word);
+        switch (Entry->PatchType)
+        {
+        case PATCH_U32:
+        {
+            Word = NewExpr.Value;
+        } break;
+        case PATCH_OPC_I16:
+        {
+            Word &= 0xFFFF0000;
+            AsmCheckSignedImmediate(Asm, "Immediate", &NewExpr);
+            Word |= 0x0000FFFF & NewExpr.Value;
+        } break;
+        case PATCH_OPC_U16:
+        {
+            Word &= 0xFFFF0000;
+            AsmCheckUnsignedImmediate(Asm, "Immediate", &NewExpr);
+            Word |= 0x0000FFFF & NewExpr.Value;
+        } break;
+        case PATCH_OPC_JUMP:
+        {
+            Word &= 0xFC000000;
+            AsmCheckJumpTarget(Asm, Entry->VirtualLocation, &NewExpr);
+            Word |= 0x03FFFFFF & NewExpr.Value;
+        } break;
+        case PATCH_OPC_SHAMT:
+        {
+            Word &= ~(0x1F << 6);
+            AsmCheckShamt(Asm, &NewExpr);
+            Word |= (0x1F & NewExpr.Value) << 6;
+        } break;
+        case PATCH_OPC_BRANCH:
+        {
+            Word &= 0xFFFF0000;
+            i32 BranchOffset = ((i32)NewExpr.Value - (i32)(Entry->Location + 4)) / 4;
+            AsmCheckBranchOffset(Asm, Entry->VirtualLocation, &NewExpr);
+            Word |= 0x0000FFFF & BranchOffset;
+        } break;
+        }
+        AsmMemcpy(Location, &Word, sizeof Word);
     }
 }
 
@@ -1490,14 +1682,26 @@ ByteBuffer R3051_Assemble(
     if (!AsmResizeBuffer(&Asm, 1024*4))
         return (ByteBuffer) { 0 };
 
+
     AsmConsumeToken(&Asm);
-    while (TOK_EOF != Asm.NextToken.Type)
+    while (TOK_EOF != Asm.NextToken.Type && !Asm.FatalError)
     {
         AsmConsumeStmt(&Asm);
         if (Asm.Panic)
             AsmRecoverFromPanic(&Asm);
-        if (Asm.FatalError)
-            return (ByteBuffer) { 0 };
+    }
+    if (Asm.FatalError)
+        return (ByteBuffer) { 0 };
+
+
+    Asm.ErrorOnUndefinedLabel = true;
+    if (Asm.IncompleteDefinitionCount)
+    {
+        AsmResolveIncompleteDefinitions(&Asm);
+    }
+    if (Asm.IncompleteExprCount)
+    {
+        AsmResolveIncompleteExprs(&Asm);
     }
 
     ByteBuffer Buffer = {
@@ -1529,8 +1733,10 @@ static void *Allocator(void *Context, void *OldPtr, u32 SizeBytes)
 int main(int argc, char **argv)
 {
     const char *TestProgram = 
+        "  beq $2, $1, location\n"
+        "  sll $3, $4, 0\n"
+        "  lw $5, 54($6)\n"
         "location: \n"
-        "  beq $0, $0, location\n"
     ;
 
     ByteBuffer Buffer = R3051_Assemble(
@@ -1554,7 +1760,7 @@ int main(int argc, char **argv)
             Mnemonic, 
             sizeof Mnemonic
         );
-        printf("%8x: %08x   %s\n", (u32)i, Instructions[i], Mnemonic);
+        printf("%8x: %08x   %s\n", (u32)i*4, Instructions[i], Mnemonic);
     }
     return 0;
 }
