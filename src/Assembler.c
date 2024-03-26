@@ -1190,7 +1190,9 @@ static AsmLabel *AsmFindIdentifier(Assembler *Asm, StringView Str)
     for (uint i = 0; i < Asm->LabelCount; i++)
     {
         AsmLabel *Entry = &Asm->Labels[i];
-        if (AsmStrEqual(Str.Ptr, Entry->Token.Str.Ptr, Str.Len))
+        if (Str.Len == Entry->Token.Str.Len 
+        && Str.Ptr[0] == Entry->Token.Str.Ptr[0]
+        && AsmStrEqual(Str.Ptr, Entry->Token.Str.Ptr, Str.Len))
         {
             return Entry;
         }
