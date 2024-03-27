@@ -79,5 +79,4 @@ LL:
 multiple lines", 0 
 not_string:
 
-.define:
 
