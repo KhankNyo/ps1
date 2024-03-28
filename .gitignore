@@ -3,4 +3,5 @@ bin
 obj
 *.swp
 compile_commands.json
+*.bin
 
