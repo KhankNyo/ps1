@@ -258,19 +258,30 @@ void R3051_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
 
         if (OpcodeMode == 7) /* lui doesn't have rs */
         {
-            snprintf(OutBuffer, OutBufferSize, "lui %s, 0x%08x", Rt, (u32)Immediate);
+            snprintf(OutBuffer, OutBufferSize, "lui %s, 0x%04x", Rt, Immediate & 0xFFFF);
         }
         else
         {
             const char *Rs = RegName[REG(Instruction, RS)];
+
             if (Flags & DISASM_IMM16_AS_HEX)
             {
-                snprintf(OutBuffer, OutBufferSize, "%s %s, %s, 0x%08x", 
+                const char *FormatString = "%s %s, %s 0x%08x";
+                if (OpcodeMode >= 4)
+                {
+                    FormatString = "%s %s, %s 0x%04x";
+                    Immediate &= 0xFFFF;
+                }
+                snprintf(OutBuffer, OutBufferSize, FormatString, 
                     Mnemonic, Rt, Rs, (u32)Immediate
                 );
             }
             else
             {
+                if (OpcodeMode >= 4)
+                {
+                    Immediate &= 0xFFFF;
+                }
                 snprintf(OutBuffer, OutBufferSize, "%s %s, %s, %d", 
                     Mnemonic, Rt, Rs, (i32)Immediate
                 );

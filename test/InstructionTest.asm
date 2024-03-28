@@ -12,5 +12,5 @@ loop:
 
 Data:
 Str: 
-    .db "Hello, world\n", 0
+    .db "Hello, world", 0
 

@@ -1173,11 +1173,162 @@ typedef enum TestSyscall
     TESTSYS_WRITESTR = 0x0F000000,
 } TestSyscall;
 
+typedef struct Vec2i 
+{
+    int x, y;
+} Vec2i;
+
 typedef struct Buffer 
 {
     u8 *Ptr;
     iSize Size;
 } Buffer;
+
+#define TERM_HEIGHT 24
+#define TERM_WIDTH 80
+#define STATUS_HEIGHT TERM_HEIGHT
+#define STATUS_WIDTH 14*4
+#define SEPARATOR_WIDTH 1
+#define SEPARATOR_HEIGHT 1
+#define NEWLINE_WIDTH 1
+#define SCREEN_WIDTH (STATUS_WIDTH + SEPARATOR_WIDTH + TERM_WIDTH + SEPARATOR_WIDTH + NEWLINE_WIDTH)
+#define SCREEN_HEIGHT (2*SEPARATOR_HEIGHT + TERM_HEIGHT)
+static char sScreenBuffer[SCREEN_HEIGHT*SCREEN_WIDTH + 1];
+static Vec2i sTerminalPos = { 0, 0 };
+static Vec2i sStatusPos = { 0, 0 };
+
+static void TerminalClear(char Ch);
+static void StatusClear(char Ch);
+
+
+static char *ScreenGetWritePtr(Vec2i Position)
+{
+    iSize LinearIndex = Position.y * SCREEN_WIDTH + Position.x;
+    return sScreenBuffer + LinearIndex;
+}
+#include <string.h>
+
+static void ScreenInit(void)
+{
+    for (int x = 0; x < SCREEN_WIDTH; x++)
+    {
+        *ScreenGetWritePtr((Vec2i){.x = x, .y = 0}) = '=';
+        *ScreenGetWritePtr((Vec2i){.x = x, .y = TERM_HEIGHT + SEPARATOR_HEIGHT}) = '=';
+    }
+    for (int y = 0; y < SCREEN_HEIGHT; y++)
+    {
+        *ScreenGetWritePtr((Vec2i){.x = SCREEN_WIDTH - NEWLINE_WIDTH, .y = y}) = '\n';
+        *ScreenGetWritePtr((Vec2i){.x = SCREEN_WIDTH - SEPARATOR_WIDTH - NEWLINE_WIDTH, .y = y}) = '|';
+        *ScreenGetWritePtr((Vec2i){.x = STATUS_WIDTH, .y = y}) = '|';
+    }
+    TerminalClear(' ');
+    StatusClear(' ');
+    sScreenBuffer[sizeof sScreenBuffer - 1] = '\0';
+}
+
+
+#define WRAP_X (1 << 0)
+#define WRAP_Y (1 << 1)
+static uint TerminalIncrementPosition(void)
+{
+    uint WrapFlags = 0;
+    sTerminalPos.x++;
+    if (sTerminalPos.x == TERM_WIDTH + STATUS_WIDTH + SEPARATOR_WIDTH)
+    {
+        sTerminalPos.x = STATUS_WIDTH + SEPARATOR_WIDTH;
+        sTerminalPos.y++;
+        WrapFlags |= WRAP_X;
+    }
+    if (sTerminalPos.y == TERM_HEIGHT + SEPARATOR_HEIGHT)
+    {
+        sTerminalPos.y = SEPARATOR_HEIGHT;
+        WrapFlags |= WRAP_Y;
+    }
+    return WrapFlags;
+}
+
+static uint StatusIncrementPosition(void)
+{
+    uint WrapFlags = 0;
+    sStatusPos.x++;
+    if (sStatusPos.x == STATUS_WIDTH)
+    {
+        sStatusPos.x = 0;
+        sStatusPos.y++;
+        WrapFlags = WRAP_X;
+    }
+    if (sStatusPos.y == STATUS_HEIGHT + SEPARATOR_HEIGHT)
+    {
+        sStatusPos.y = SEPARATOR_HEIGHT;
+        WrapFlags |= WRAP_Y;
+    }
+    return WrapFlags;
+}
+
+
+
+static void TerminalMoveTo(int TerminalX, int TerminalY)
+{
+    sTerminalPos = (Vec2i) { 
+        .x = (TerminalX % TERM_WIDTH) + STATUS_WIDTH + SEPARATOR_WIDTH, 
+        .y = (TerminalY % TERM_HEIGHT) + SEPARATOR_HEIGHT,
+    };
+}
+
+static void StatusMoveTo(int StatusX, int StatusY)
+{
+    sStatusPos = (Vec2i) {
+        .x = StatusX % STATUS_WIDTH,
+        .y = (StatusY % STATUS_HEIGHT) + SEPARATOR_HEIGHT,
+    };
+}
+
+static void TerminalWrite(const char *Str, iSize StrLen, Bool8 ShouldWrap)
+{
+    while (StrLen --> 0)
+    {
+        /* write the char, TODO: process newline and stuff */
+        char Ch = *Str++;
+        *ScreenGetWritePtr(sTerminalPos) = Ch;
+        if (!ShouldWrap && (TerminalIncrementPosition() & WRAP_X))
+            break;
+    }
+    sScreenBuffer[sizeof sScreenBuffer - 1] = '\0';
+}
+
+static void StatusWrite(const char *Str, iSize StrLen, Bool8 ShouldWrap)
+{
+    while (StrLen --> 0)
+    {
+        /* write the char, TODO: process newline */
+        char Ch = *Str++;
+        *ScreenGetWritePtr(sStatusPos) = Ch;
+        if (!ShouldWrap && (StatusIncrementPosition() & WRAP_X))
+            break; 
+    }
+    sScreenBuffer[sizeof sScreenBuffer - 1] = '\0';
+}
+
+static void TerminalClear(char Ch)
+{
+    TerminalMoveTo(0, 0);
+    do {
+        *ScreenGetWritePtr(sTerminalPos) = Ch;
+    } while (!(WRAP_Y & TerminalIncrementPosition()));
+}
+
+static void StatusClear(char Ch)
+{
+    StatusMoveTo(0, 0);
+    do {
+        *ScreenGetWritePtr(sStatusPos) = Ch;
+    } while (!(WRAP_Y & StatusIncrementPosition()));
+}
+
+
+
+
+
 
 static u8 *ReadBinaryFile(const char *FileName, iSize *OutFileSize, iSize ExtraSize)
 {
@@ -1349,6 +1500,11 @@ static void DumpState(const R3051 *Mips)
 
 int main(int argc, char **argv)
 {
+    ScreenInit();
+    TerminalWrite("Hello, world", 12, false);
+    printf("%s\n", sScreenBuffer);
+    return 0;
+
     if (argc < 2)
     {
         printf("Usage: %s <mips binary file>\n", argv[0]);
