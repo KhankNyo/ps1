@@ -227,20 +227,21 @@ static Bool8 AsmConsumeIfNextCharIs(Assembler *Asm, char Ch)
 static char AsmSkipSpace(Assembler *Asm)
 {
     char Ch = *Asm->End;
-    while (!AsmIsAtEnd(Asm))
+    while (!AsmIsAtEnd(Asm) && Ch)
     {
         Asm->Begin = Asm->End;
         switch (Ch)
         {
         case ' ':
         case '\t':
+        case '\r':
         {
         } break;
 
         case '\n':
         {
             Asm->Line++;
-            Asm->LineStart = Asm->End;
+            Asm->LineStart = Asm->End + 1;
         } break;
         case ';': 
         {
@@ -684,7 +685,6 @@ static AsmToken AsmDirectiveToken(Assembler *Asm)
     const char *Directive = Asm->End;
     AsmConsumeWord(Asm);
     iSize DirectiveLength = Asm->End - Directive;
-    printf("dir: %.*s\n", (int)DirectiveLength, Directive);
 
     switch (Directive[0])
     {
@@ -706,7 +706,7 @@ static AsmToken AsmDirectiveToken(Assembler *Asm)
     case 'o':
     {
         /* org */
-        if (DirectiveLength == 2 && AsmStrEqual("rg", Directive, 2))
+        if (DirectiveLength == 3 && AsmStrEqual("org", Directive, 3))
         {
             return AsmCreateToken(Asm, TOK_ORG);
         }
@@ -715,7 +715,7 @@ static AsmToken AsmDirectiveToken(Assembler *Asm)
     case 'r':
     {
         /* resv */
-        if (DirectiveLength == 4 && AsmStrEqual("esv", Directive, 3))
+        if (DirectiveLength == 4 && AsmStrEqual("resv", Directive, 4))
         {
             return AsmCreateToken(Asm, TOK_RESV);
         }
@@ -880,9 +880,10 @@ static iSize AsmHighlight(char *Buffer, iSize BufferLength, StringView Offender,
 
 static StringView AsmGetLineContainingToken(const AsmToken *Token)
 {
+    int Offset = Token->Offset - 1;
     return (StringView) {
-        .Ptr = Token->Str.Ptr - Token->Offset + 1,
-        .Len = AsmLineLength(Token->Str.Ptr) + Token->Offset - 1,
+        .Ptr = Token->Str.Ptr - Offset,
+        .Len = AsmLineLength(Token->Str.Ptr) + Offset,
     };
 }
 
@@ -898,6 +899,7 @@ static void AsmErrorAtArgs(
     if (NULL == Asm->Logger || Asm->Panic)
         return;
 
+    Asm->Error = true;
     Asm->Panic = true;
 
 #define PRINT_AND_UPDATE_PTR(...) ((Len += snprintf(Ptr, sizeof Buffer - Len, __VA_ARGS__)), Ptr = Buffer + Len)
@@ -938,9 +940,10 @@ static void AsmErrorAtExpr(Assembler *Asm, const AsmExpression *Expression, cons
     va_start(Args, cFmt);
     StringView Line = {
         .Ptr = Expression->Str.Ptr - Expression->Offset + 1,
-        .Len = Expression->Str.Len + Expression->Offset - 1,
+        .Len = AsmLineLength(Expression->Str.Ptr) + Expression->Offset - 1,
     };
-    AsmErrorAtArgs(Asm, 
+    AsmErrorAtArgs(
+        Asm, 
         Line, 
         Expression->Str, 
         Expression->Line, Expression->Offset, 
@@ -1402,7 +1405,7 @@ static Bool8 AsmCheckSignedImmediate(Assembler *Asm, const char *ImmediateType, 
 
 static Bool8 AsmCheckUnsignedImmediate(Assembler *Asm, const char *ImmediateType, const AsmExpression *Immediate)
 {
-    if (Immediate->Value <= 0xFFFF)
+    if (Immediate->Value > 0xFFFF)
     {
         AsmErrorAtExpr(Asm, Immediate, 
             "%s must be in between %d and %d, got %"PRIu64" instead.", 
@@ -1582,7 +1585,7 @@ static void AsmIType2Operands(Assembler *Asm, const char *OperandName, int Offse
     AsmExpression ImmediateExpr = AsmConsumeExpr(Asm);
     if (ImmediateExpr.Incomplete)
     {
-        AsmPushIncompleteExpr(Asm, ImmediateExpr, PATCH_OPC_I16);
+        AsmPushIncompleteExpr(Asm, ImmediateExpr, PATCH_OPC_U16);
     }
     else
     {
@@ -1619,7 +1622,7 @@ static void AsmIType3Operands(Assembler *Asm)
     }
 
     Opcode |= (Rt & 0x1F) << RT;
-    Opcode |= (Rs & 0x1F) << Rs;
+    Opcode |= (Rs & 0x1F) << RS;
     Opcode |= ImmediateExpr.Value & 0x0000FFFF;
     AsmEmit32(Asm, Opcode);
 }
@@ -1645,8 +1648,8 @@ static void AsmITypeMemory(Assembler *Asm)
     uint Base = AsmConsumeGPRegister(Asm, "base");
     AsmConsumeTokenOrError(Asm, TOK_RPAREN, "Expected ')'.");
 
-    Opcode |= (Base & 0x1F) << RT;
-    Opcode |= (Rt & 0x1F) << RS;
+    Opcode |= (Base & 0x1F) << RS;
+    Opcode |= (Rt & 0x1F) << RT;
     Opcode |= OffsetExpr.Value & 0x0000FFFF;
     AsmEmit32(Asm, Opcode);
 }
@@ -1852,12 +1855,13 @@ static void AsmResolveIncompleteExprs(Assembler *Asm)
 {
     for (uint i = 0; i < Asm->IncompleteExprCount; i++)
     {
-        Asm->Panic = false;
-
         AsmIncompleteExpr *Entry = &Asm->IncompleteExprs[i];
         ASSERT(Entry->Location + 4 <= Asm->BufferSize);
+
         Asm->Begin = Entry->Expr.Str.Ptr;
         Asm->End = Entry->Expr.Str.Ptr;
+        Asm->LineStart = Entry->Expr.Str.Ptr - Entry->Expr.Offset + 1;
+        Asm->Panic = false;
 
         AsmConsumeToken(Asm);
         AsmExpression NewExpr = AsmConsumeExpr(Asm);
@@ -2014,6 +2018,7 @@ static char *ReadFileContent(const char *FileName)
     if (FileSize != (iSize)fread(Buffer, 1, FileSize, f))
         goto ReadingFailed;
 
+    Buffer[FileSize] = '\0';
     fclose(f);
     return Buffer;
 

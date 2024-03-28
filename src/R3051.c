@@ -54,6 +54,7 @@ typedef union R3051CP0
 
 
 
+#define R3051_RESET_VEC 0xBFC00000
 #define R3051_PIPESTAGE_COUNT 5
 typedef void (*R3051Write)(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size);
 typedef u32 (*R3051Read)(void *UserData, u32 Addr, R3051_DataSize Size);
@@ -135,7 +136,7 @@ R3051 R3051_Init(
     R3051AddrVerifyFn DataAddrVerifier, R3051AddrVerifyFn InstructionAddrVerifier
 )
 {
-    u32 ResetVector = 0xBFC00000;
+    u32 ResetVector = R3051_RESET_VEC;
     R3051 Mips = {
         .PC = ResetVector,
         .PCSave = { 0 },
@@ -1167,13 +1168,18 @@ InvalidatePipeline:
 #include "Disassembler.c"
 
 
+typedef enum TestSyscall 
+{
+    TESTSYS_WRITESTR = 0x0F000000,
+} TestSyscall;
+
 typedef struct Buffer 
 {
     u8 *Ptr;
     iSize Size;
 } Buffer;
 
-static u8 *ReadBinaryFile(const char *FileName, iSize *OutFileSize)
+static u8 *ReadBinaryFile(const char *FileName, iSize *OutFileSize, iSize ExtraSize)
 {
     FILE *f = fopen(FileName, "rb");
     if (NULL == f)
@@ -1188,7 +1194,7 @@ static u8 *ReadBinaryFile(const char *FileName, iSize *OutFileSize)
     fseek(f, 0, SEEK_SET);
 
 
-    u8 *Buffer = malloc(*OutFileSize);
+    u8 *Buffer = malloc(*OutFileSize + ExtraSize);
     if (*OutFileSize != (iSize)fread(Buffer, 1, *OutFileSize, f))
     {
         perror("Unable to fully read file.");
@@ -1200,41 +1206,60 @@ static u8 *ReadBinaryFile(const char *FileName, iSize *OutFileSize)
 }
 
 
-static u32 TranslateAddr(u32 LogicalAddr)
-{
-    u32 PhysicalAddr = 0;
-    if (LogicalAddr < 512 * KB)
-    {
-        PhysicalAddr = LogicalAddr;
-    }
-    if (IN_RANGE(0xBFC00000, LogicalAddr, 0xBFC00000 + 512*KB))
-    {
-        PhysicalAddr = LogicalAddr - 0xBFC00000;
-    }
-    else return LogicalAddr;
-    return PhysicalAddr;
-}
 
 
 static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
 {
-    Addr = TranslateAddr(Addr);
-    printf("WRITING: [%08x] <- %0*x\n", Addr, Size*2, (u32)(Data & (((u64)1 << Size*8) - 1)));
+    Buffer *Buf = UserData;
+    Addr -= R3051_RESET_VEC;
+    if (Addr == (u32)(TESTSYS_WRITESTR - R3051_RESET_VEC))
+    {
+        Data -= R3051_RESET_VEC;
+        if (Data >= Buf->Size)
+        {
+            printf("Invalid string address: 0x%08x\n", Data + R3051_RESET_VEC);
+        }
+        else
+        {
+            for (iSize i = Data; i < Buf->Size && Buf->Ptr[i]; i++)
+            {
+                fputc(Buf->Ptr[i], stdout);
+            }
+            fflush(stdout);
+        }
+    }
+    else if (Addr + Size <= Buf->Size)
+    {
+        for (int i = 0; i < Size; i++)
+        {
+            Buf->Ptr[Addr + i] = Data & 0xFF;
+            Data >>= 8;
+        }
+    }
+    else
+    {
+        printf("Out of bound write to 0x%08x with %x (size %d)\n", Addr + R3051_RESET_VEC, Data, Size);
+    }
 }
 
 static u32 MipsRead(void *UserData, u32 Addr, R3051_DataSize Size)
 {
     Buffer *Buf = UserData;
-    Addr = TranslateAddr(Addr);
-    if (Addr + Size > Buf->Size)
-        return 0;
-
-    u32 Data = 0;
-    for (int i = 0; i < Size; i++)
+    Addr -= R3051_RESET_VEC;
+    if (Addr + Size <= Buf->Size)
     {
-        Data |= (u32)Buf->Ptr[Addr + i] << i*8;
+        u32 Data = 0;
+        for (int i = 0; i < Size; i++)
+        {
+            Data |= (u32)Buf->Ptr[Addr + i] << 8*i;
+        }
+        return Data;
     }
-    return Data;
+    else
+    {
+        printf("Out of bound read at 0x%08x, size = %d\n", Addr + R3051_RESET_VEC, Size);
+    }
+    return 0;
 }
 
 static Bool8 MipsVerify(void *UserData, u32 Addr)
@@ -1332,7 +1357,8 @@ int main(int argc, char **argv)
     Bool8 CLIDisable = argc == 3;
 
     Buffer Buf;
-    Buf.Ptr = ReadBinaryFile(argv[1], &Buf.Size);
+    Buf.Ptr = ReadBinaryFile(argv[1], &Buf.Size, 4096);
+    Buf.Size += 4096;
     if (NULL == Buf.Ptr)
         return 1;
 
