@@ -35,6 +35,8 @@ ByteBuffer R3051_Assemble(
 #include <inttypes.h> /* PRIi64 */
 #include <stdarg.h> 
 
+#define ASM_NOP (u32)0
+
 typedef enum AsmTokenType 
 {
     TOK_ERR = 0,
@@ -69,14 +71,21 @@ typedef enum AsmTokenType
 
     TOK_RESV,
     TOK_ORG,
+    TOK_BRANCH_NOP,
+    TOK_LOAD_NOP,
     TOK_DB,
     TOK_DH,
     TOK_DW,
     TOK_DL,
 
+    TOK_INS_PSEUDO_MOVE,
+    TOK_INS_PSEUDO_LI,
+    TOK_INS_PSEUDO_LA,
+
     TOK_INS_I_TYPE_ALU,
     TOK_INS_I_TYPE_RT,
     TOK_INS_I_TYPE_MEM,
+    TOK_INS_I_TYPE_MEM_LOAD,
     TOK_INS_I_TYPE_BR1,
     TOK_INS_I_TYPE_BR2,
 
@@ -149,6 +158,8 @@ typedef enum AsmPatchType
     PATCH_OPC_SHAMT,
     PATCH_OPC_JUMP,
     PATCH_OPC_BRANCH,
+    PATCH_PSEUDO_I32,
+    PATCH_PSEUDO_U32,
 } AsmPatchType;
 
 typedef struct AsmIncompleteExpr 
@@ -190,6 +201,9 @@ typedef struct Assembler
     uint IncompleteDefinitionCount;
     AsmIncompleteExpr IncompleteExprs[1024];
     uint IncompleteExprCount;
+
+    Bool8 LoadNop;
+    Bool8 BranchNop;
 } Assembler;
 
 static Bool8 AsmIsAlpha(char Ch)
@@ -394,8 +408,8 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
         .Type = TOK_INS_##Typ,\
         .Opcode = Opc\
     }
-    static const AsmKeyword Keywords[128][20] = {
-        ['a'] = {
+    static const AsmKeyword Keywords['z' - 'a'][20] = {
+        ['a' - 'a'] = {
             INS("add",      R_TYPE_3,       0x00000020),
             INS("addi",     I_TYPE_ALU,     0x20000000),
             INS("addiu",    I_TYPE_ALU,     0x24000000),
@@ -403,7 +417,7 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
             INS("and",      R_TYPE_3,       0x00000024),
             INS("andi",     I_TYPE_ALU,     0x30000000),
         },
-        ['b'] = {
+        ['b' - 'a'] = {
             INS("beq",      I_TYPE_BR2,     0x10000000),
             INS("bgez",     I_TYPE_BR1,     0x04010000),
             INS("bgezal",   I_TYPE_BR1,     0x04110000),
@@ -414,34 +428,37 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
             INS("bne",      I_TYPE_BR2,     0x14000000),
             INS("break",    NO_ARG,         0x0000000D),
         },
-        ['c'] = {
+        ['c' - 'a'] = {
             /* TODO: CFCz */
             /* TODO: COPz */
             /* TODO: CTCz */
             0
         },
-        ['d'] = {   
+        ['d' - 'a'] = {   
             INS("div",      R_TYPE_RSRT,    0x0000001A),
             INS("divu",     R_TYPE_RSRT,    0x0000001B),
         },
-        ['j'] = {
+        ['j' - 'a'] = {
             INS("j",        J_TYPE,         0x08000000),
             INS("jal",      J_TYPE,         0x0C000000),
             INS("jalr",     R_TYPE_RDRS,    0x00000009),
             INS("jr",       R_TYPE_RS,      0x00000008),
         },
-        ['l'] = {
-            INS("lb",       I_TYPE_MEM,     0x80000000),
-            INS("lbu",      I_TYPE_MEM,     0x90000000),
-            INS("lh",       I_TYPE_MEM,     0x84000000),
-            INS("lhu",      I_TYPE_MEM,     0x94000000),
+        ['l' - 'a'] = {
+            INS("li",       PSEUDO_LI,      0),
+            INS("la",       PSEUDO_LA,      0),
+            INS("lb",       I_TYPE_MEM_LOAD,0x80000000),
+            INS("lbu",      I_TYPE_MEM_LOAD,0x90000000),
+            INS("lh",       I_TYPE_MEM_LOAD,0x84000000),
+            INS("lhu",      I_TYPE_MEM_LOAD,0x94000000),
             INS("lui",      I_TYPE_RT,      0x3C000000),
-            INS("lw",       I_TYPE_MEM,     0x8C000000),
+            INS("lw",       I_TYPE_MEM_LOAD,0x8C000000),
             /* TODO: LWCz */
-            INS("lwl",      I_TYPE_MEM,     0x88000000),
-            INS("lwr",      I_TYPE_MEM,     0x98000000),
+            INS("lwl",      I_TYPE_MEM_LOAD,0x88000000),
+            INS("lwr",      I_TYPE_MEM_LOAD,0x98000000),
         },
-        ['m'] = {
+        ['m' - 'a'] = {
+            INS("move",     PSEUDO_MOVE,    0),
             INS("mfc0",     R_TYPE_RTRD,    0x40000000),
             INS("mfc1",     R_TYPE_RTRD,    0x44000000),
             INS("mfc2",     R_TYPE_RTRD,    0x48000000),
@@ -461,14 +478,15 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
             INS("mult",     R_TYPE_RSRT,    0x00000018),
             INS("multu",    R_TYPE_RSRT,    0x00000019),
         },
-        ['n'] = {
+        ['n' - 'a'] = {
             INS("nor",      R_TYPE_3,       0x00000027),
+            INS("nop",      NO_ARG,         0X00000000),
         },
-        ['o'] = {
+        ['o' - 'a'] = {
             INS("or",       R_TYPE_3,       0x00000025),
             INS("ori",      I_TYPE_ALU,     0x34000000),
         },
-        ['s'] = {
+        ['s' - 'a'] = {
             INS("sb",       I_TYPE_MEM,     0xA0000000),
             INS("sh",       I_TYPE_MEM,     0xA4000000),
             INS("sw",       I_TYPE_MEM,     0xAC000000),
@@ -493,11 +511,11 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
 
             INS("syscall",  NO_ARG,         0x0000000C),
         },
-        ['x'] = {
+        ['x' - 'a'] = {
             INS("xor",      R_TYPE_3,       0x00000026),
             INS("xori",     I_TYPE_ALU,     0x38000000),
         },
-        ['r'] = {
+        ['r' - 'a'] = {
             INS("rfe",      NO_ARG,         0x42000010),
         },
     };
@@ -506,9 +524,9 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
     if (!IN_RANGE('a', Iden[0], 'z'))
         return NULL;
 
-    unsigned char Key = Iden[0] % STATIC_ARRAY_SIZE(Keywords);
+    unsigned char Key = (Iden[0] - 'a');
     const AsmKeyword *PotentialKeywords = Keywords[Key];
-    for (int i = 0; i < (int)STATIC_ARRAY_SIZE(Keywords[Key]); i++)
+    for (uint i = 0; i < STATIC_ARRAY_SIZE(Keywords[Key]); i++)
     {
         const AsmKeyword *Entry = PotentialKeywords + i;
         if (Entry->Len == Len 
@@ -682,52 +700,53 @@ static AsmToken AsmConsumeString(Assembler *Asm)
 
 static AsmToken AsmDirectiveToken(Assembler *Asm)
 {
+    /* directive: '.org', '.db' */
+#define DIRECTIVE(ConstStr, Typ) {\
+        .Str = ConstStr,\
+        .Len = sizeof(ConstStr) - 1,\
+        .Type = Typ,\
+    }
+    static const AsmKeyword Keywords['z' - 'a'][8] = {
+        ['b' - 'a'] = {
+            DIRECTIVE("branchNop", TOK_BRANCH_NOP),
+            DIRECTIVE("loadNop", TOK_LOAD_NOP),
+        },
+        ['d' - 'a'] = {
+            DIRECTIVE("db", TOK_DB),
+            DIRECTIVE("dh", TOK_DH),
+            DIRECTIVE("dw", TOK_DW),
+            DIRECTIVE("dl", TOK_DL),
+        },
+        ['o' - 'a'] = {
+            DIRECTIVE("org", TOK_ORG),
+        },
+        ['r' - 'a'] = {
+            DIRECTIVE("resv", TOK_RESV),
+        },
+    };
+#undef DIRECTIVE
     const char *Directive = Asm->End;
     AsmConsumeWord(Asm);
     iSize DirectiveLength = Asm->End - Directive;
 
-    switch (Directive[0])
+    if (!IN_RANGE('a', Directive[0], 'z'))
+        goto UnknownDirective;
+
+    unsigned char Key = Directive[0] - 'a';
+    const AsmKeyword *PotentialDirectives = Keywords[Key];
+    for (uint i = 0; i < STATIC_ARRAY_SIZE(Keywords[Key]); i++)
     {
-    case 'd':
-    {
-        if (DirectiveLength == 2)
+        const AsmKeyword *Entry = &PotentialDirectives[i];
+        if (0 == Entry->Len)
+            goto UnknownDirective;
+        if (DirectiveLength == Entry->Len && AsmStrEqual(Entry->Str, Directive, Entry->Len))
         {
-            switch (Directive[1])
-            {
-            case 'b': return AsmCreateToken(Asm, TOK_DB);
-            case 'h': return AsmCreateToken(Asm, TOK_DH);
-            case 'w': return AsmCreateToken(Asm, TOK_DW);
-            case 'l': return AsmCreateToken(Asm, TOK_DL);
-            default: goto UnknownDirective;
-            }
+            return AsmCreateToken(Asm, Entry->Type);
         }
-        else goto UnknownDirective;
-    } break;
-    case 'o':
-    {
-        /* org */
-        if (DirectiveLength == 3 && AsmStrEqual("org", Directive, 3))
-        {
-            return AsmCreateToken(Asm, TOK_ORG);
-        }
-        else goto UnknownDirective;
-    } break;
-    case 'r':
-    {
-        /* resv */
-        if (DirectiveLength == 4 && AsmStrEqual("resv", Directive, 4))
-        {
-            return AsmCreateToken(Asm, TOK_RESV);
-        }
-        else goto UnknownDirective;
-    } break;
+    }
 
 UnknownDirective:
-    default: 
-    {
-        return AsmErrorToken(Asm, "Unknown directive");
-    } break;
-    }
+    return AsmErrorToken(Asm, "Unknown directive");
 }
 
 static AsmToken AsmTokenize(Assembler *Asm)
@@ -1212,6 +1231,15 @@ static AsmExpression AsmConsumeExpr(Assembler *Asm)
     return AsmParsePrecedence(Asm, PREC_ANY);
 }
 
+static AsmExpression AsmConsumeStrictExpr(Assembler *Asm)
+{
+    Bool8 PrevSetting = Asm->ErrorOnUndefinedLabel;
+    Asm->ErrorOnUndefinedLabel = true;
+    AsmExpression Expr = AsmConsumeExpr(Asm);
+    Asm->ErrorOnUndefinedLabel = PrevSetting;
+    return Expr;
+}
+
 static void AsmPushIncompleteExpr(Assembler *Asm, AsmExpression Expr, AsmPatchType PatchType);
 static u64 AsmConsumeOrSaveExpr(Assembler *Asm, AsmPatchType PatchType)
 {
@@ -1249,6 +1277,9 @@ static Bool8 AsmResizeBuffer(Assembler *Asm, iSize NewSizeBytes)
 
 static Bool8 AsmEmitData(Assembler *Asm, const void *Data, iSize DataSizeBytes)
 {
+    if (Asm->FatalError)
+        return false;
+
     if (Asm->BufferSize + DataSizeBytes >= Asm->BufferCap)
     {
         if (!AsmResizeBuffer(Asm, Asm->BufferSize*4 + 8))
@@ -1279,6 +1310,7 @@ static Bool8 AsmEmitString(Assembler *Asm, const AsmToken *StringToken)
     }
 
     Bool8 ParseEscapeCode = false;
+    u32 BytesWritten = 0;
     for (const char *Ptr = StringToken->Str.Ptr + 1; 
         Length --> 0; 
         Ptr++)
@@ -1302,7 +1334,7 @@ static Bool8 AsmEmitString(Assembler *Asm, const AsmToken *StringToken)
             }
 
             ParseEscapeCode = false;
-            Asm->Buffer[Asm->BufferSize++] = CharToEmit;
+            Asm->Buffer[Asm->BufferSize + BytesWritten++] = CharToEmit;
         }
         else if ('\\' == *Ptr)
         {
@@ -1310,9 +1342,11 @@ static Bool8 AsmEmitString(Assembler *Asm, const AsmToken *StringToken)
         }
         else
         {
-            Asm->Buffer[Asm->BufferSize++] = *Ptr;
+            Asm->Buffer[Asm->BufferSize + BytesWritten++] = *Ptr;
         }
     }
+    Asm->BufferSize += BytesWritten;
+    Asm->CurrentVirtualLocation += BytesWritten;
     return true;
 }
 
@@ -1416,8 +1450,6 @@ static Bool8 AsmCheckUnsignedImmediate(Assembler *Asm, const char *ImmediateType
     return true;
 }
 
-
-
 static Bool8 AsmCheckJumpTarget(Assembler *Asm, u32 PC, const AsmExpression *JumpTarget)
 {
     /* TODO: check alignment? */
@@ -1430,6 +1462,40 @@ static Bool8 AsmCheckJumpTarget(Assembler *Asm, u32 PC, const AsmExpression *Jum
         return false;
     }
     return true;
+}
+
+/* returns true if in range of i16, else returns false */
+static Bool8 AsmCheckSigned32(Assembler *Asm, const char *ImmediateType, const AsmExpression *Expr)
+{
+    i64 Value = Expr->Value;
+    if (!IN_RANGE(INT32_MIN, Value, INT32_MAX))
+    {
+        AsmErrorAtExpr(Asm, Expr, 
+            "%s must be in between %ld and %ld, got %"PRIi64" instead.",
+            ImmediateType, 
+            (long)INT32_MIN, (long)INT32_MAX, 
+            Value
+        );
+        return false;
+    }
+    return IN_RANGE(INT16_MIN, Value, INT16_MAX);
+}
+
+/* returns true if in range of u16, else returns false */
+static Bool8 AsmCheckUnsigned32(Assembler *Asm, const char *ImmediateType, const AsmExpression *Expr)
+{
+    u64 Value = Expr->Value;
+    if (Value > 0xFFFFFFFF)
+    {
+        AsmErrorAtExpr(Asm, Expr, 
+            "%s must be less than %lu, got %"PRIi64" instead.",
+            ImmediateType, 
+            (unsigned long)0xFFFFFFFF, 
+            Value
+        );
+        return false;
+    }
+    return Value < 0xFFFF;
 }
 
 
@@ -1627,7 +1693,7 @@ static void AsmIType3Operands(Assembler *Asm)
     AsmEmit32(Asm, Opcode);
 }
 
-static void AsmITypeMemory(Assembler *Asm)
+static void AsmITypeMemory(Assembler *Asm, Bool8 IsLoadInstruction)
 {
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
@@ -1652,6 +1718,8 @@ static void AsmITypeMemory(Assembler *Asm)
     Opcode |= (Rt & 0x1F) << RT;
     Opcode |= OffsetExpr.Value & 0x0000FFFF;
     AsmEmit32(Asm, Opcode);
+    if (IsLoadInstruction && Asm->LoadNop)
+        AsmEmit32(Asm, ASM_NOP);
 }
 
 static void AsmITypeBranch(Assembler *Asm, int RegisterArgumentCount)
@@ -1678,18 +1746,17 @@ static void AsmITypeBranch(Assembler *Asm, int RegisterArgumentCount)
     }
     i32 BranchOffset = ((i32)BranchTargetExpr.Value - (i32)(Asm->CurrentVirtualLocation + 4)) / 4;
 
+
     Opcode |= (FirstReg & 0x1F) << RS;
     Opcode |= BranchOffset & 0x0000FFFF;
     AsmEmit32(Asm, Opcode);
+    if (Asm->BranchNop)
+        AsmEmit32(Asm, ASM_NOP);
 }
 
 static void AsmOrgDirective(Assembler *Asm)
 {
-    Bool8 OldSetting = Asm->ErrorOnUndefinedLabel;
-    Asm->ErrorOnUndefinedLabel = true;
-    AsmExpression Expr = AsmConsumeExpr(Asm);
-    Asm->ErrorOnUndefinedLabel = OldSetting;
-
+    AsmExpression Expr = AsmConsumeStrictExpr(Asm);
     if (Expr.Value > UINT32_MAX)
     {
         AsmErrorAtExpr(Asm, &Expr, 
@@ -1747,10 +1814,7 @@ static void AsmDefineLongDirective(Assembler *Asm)
 
 static void AsmResvDirective(Assembler *Asm)
 {
-    Bool8 PrevSetting = Asm->ErrorOnUndefinedLabel;
-    Asm->ErrorOnUndefinedLabel = true;
-    AsmExpression Expr = AsmConsumeExpr(Asm);
-    Asm->ErrorOnUndefinedLabel = PrevSetting;
+    AsmExpression Expr = AsmConsumeStrictExpr(Asm);
 
     u32 OldSize = Asm->BufferSize;
     if (!AsmResizeBuffer(Asm, Asm->BufferSize + Expr.Value))
@@ -1763,6 +1827,77 @@ static void AsmResvDirective(Assembler *Asm)
     Asm->CurrentVirtualLocation += Expr.Value;
 }
 
+static Bool8 AsmBoolDirective(Assembler *Asm)
+{
+    AsmExpression Expr = AsmConsumeStrictExpr(Asm);
+    return Expr.Value != 0;
+}
+
+static void AsmPseudoImm(Assembler *Asm, Bool8 Signed)
+{
+    /* ins rd, imm */
+    uint Rd = AsmConsumeGPRegister(Asm, "destination");
+    ASM_CONSUME_COMMA(Asm, "destination register.");
+    AsmExpression Expr = AsmConsumeExpr(Asm);
+
+    Bool8 In16Bit = false;
+    if (Expr.Incomplete)
+    {
+        AsmPatchType PatchType = Signed
+            ? PATCH_PSEUDO_I32 
+            : PATCH_PSEUDO_U32;
+        AsmPushIncompleteExpr(Asm, Expr, PatchType);
+    }
+    else 
+    {
+        In16Bit = Signed
+            ? AsmCheckSigned32(Asm, "Immediate", &Expr)
+            : AsmCheckUnsigned32(Asm, "Immediate", &Expr);
+    }
+
+    if (In16Bit)
+    {
+        u32 Opcode = Signed
+            ? 0x24000000  /* addiu rd, r0, imm */
+            : 0x34000000; /* ori rd, r0, imm  */
+        Opcode |= (Rd & 0x1F) << RT;
+        Opcode |= Expr.Value & 0xFFFF;
+        AsmEmit32(Asm, Opcode);
+    }
+    else
+    {
+        u16 High16 = (Expr.Value >> 16) & 0xFFFF;
+        u16 Low16 = (Expr.Value & 0xFFFF);
+        
+        u32 Lui = 0x3C000000;
+        Lui |= (Rd & 0x1F) << RT;
+        Lui |= High16;
+        AsmEmit32(Asm, Lui);
+
+        if (Low16 || Expr.Incomplete)
+        {
+            u32 Ori = 0x34000000;
+            Ori |= (Rd & 0x1F) << RT;
+            Ori |= (Rd & 0x1F) << RS;
+            Ori |= Low16;
+            AsmEmit32(Asm, Ori);
+        }
+    }
+}
+
+static void AsmPseudoMove(Assembler *Asm)
+{
+    /* move $rd, $rs */
+    uint Rd = AsmConsumeGPRegister(Asm, "destination");
+    ASM_CONSUME_COMMA(Asm, "destination register.");
+    uint Rs = AsmConsumeGPRegister(Asm, "source");
+
+    u32 Opcode = 0x00000021; /* addu */
+    Opcode |= Rd << RD;
+    Opcode |= Rs << RS;
+    AsmEmit32(Asm, Opcode);
+}
+
 #undef ASM_CONSUME_COMMA
 
 
@@ -1771,6 +1906,7 @@ static void AsmConsumeStmt(Assembler *Asm)
     switch (AsmConsumeToken(Asm))
     {
     case TOK_IDENTIFIER:        AsmIdentifierStmt(Asm); break;
+
 
     case TOK_INS_NO_ARG:        AsmEmit32(Asm, Asm->CurrentToken.As.Opcode); break;
 
@@ -1786,7 +1922,8 @@ static void AsmConsumeStmt(Assembler *Asm)
 
     case TOK_INS_I_TYPE_ALU:    AsmIType3Operands(Asm); break;
     case TOK_INS_I_TYPE_RT:     AsmIType2Operands(Asm, "destination", RT); break;
-    case TOK_INS_I_TYPE_MEM:    AsmITypeMemory(Asm); break;
+    case TOK_INS_I_TYPE_MEM_LOAD:
+    case TOK_INS_I_TYPE_MEM:    AsmITypeMemory(Asm, TOK_INS_I_TYPE_MEM_LOAD == Asm->CurrentToken.Type); break;
     case TOK_INS_I_TYPE_BR1:    AsmITypeBranch(Asm, 1); break;
     case TOK_INS_I_TYPE_BR2:    AsmITypeBranch(Asm, 2); break;
 
@@ -1796,6 +1933,12 @@ static void AsmConsumeStmt(Assembler *Asm)
     case TOK_DL:                AsmDefineLongDirective(Asm); break;
     case TOK_ORG:               AsmOrgDirective(Asm); break;
     case TOK_RESV:              AsmResvDirective(Asm); break;
+    case TOK_BRANCH_NOP:        Asm->BranchNop = AsmBoolDirective(Asm); 
+    case TOK_LOAD_NOP:          Asm->LoadNop = AsmBoolDirective(Asm);
+
+    case TOK_INS_PSEUDO_LA:
+    case TOK_INS_PSEUDO_LI:     AsmPseudoImm(Asm, TOK_INS_PSEUDO_LI == Asm->CurrentToken.Type); break;
+    case TOK_INS_PSEUDO_MOVE:   AsmPseudoMove(Asm); break;
 
     default:                    AsmErrorAtToken(Asm, &Asm->CurrentToken, "Unexpected token.");
     }
@@ -1916,6 +2059,18 @@ static void AsmResolveIncompleteExprs(Assembler *Asm)
             i32 BranchOffset = (Target - (PC + 4)) >> 2;
             AsmPatchOpcode(Location, 0x0000FFFF, BranchOffset);
         } break;
+        case PATCH_PSEUDO_I32:
+        {
+            AsmCheckSigned32(Asm, "Immediate", &NewExpr);
+            AsmPatchOpcode(Location, 0x0000FFFF, NewExpr.Value >> 16);
+            AsmPatchOpcode(Location + 4, 0x0000FFFF, NewExpr.Value);
+        } break;
+        case PATCH_PSEUDO_U32:
+        {
+            AsmCheckUnsigned32(Asm, "Immediate", &NewExpr);
+            AsmPatchOpcode(Location, 0x0000FFFF, NewExpr.Value >> 16);
+            AsmPatchOpcode(Location + 4, 0x0000FFFF, NewExpr.Value);
+        } break;
         }
     }
 }
@@ -1942,6 +2097,9 @@ ByteBuffer R3051_Assemble(
         .AllocatorContext = AllocatorContext,
         .Allocator = Allocate,
         .CurrentVirtualLocation = 0,
+
+        .BranchNop = true,
+        .LoadNop = true,
     };
     if (!AsmResizeBuffer(&Asm, 1024*4))
         return (ByteBuffer) { 0 };
@@ -1982,17 +2140,25 @@ ByteBuffer R3051_Assemble(
     return Buffer;
 }
 
+#undef ASM_NOP
+
 #ifdef STANDALONE
 #undef STANDALONE
 #include <stdio.h>
 #include "Disassembler.c"
 
-static int sErrorCount = 0;
+
+typedef struct LoggerContext 
+{
+    int ErrorCount;
+    const char *SourceFileName;
+} LoggerContext;
+
 static void Log(void *Context, const char *ErrorMessage, uint Length)
 {
-    const char *SourceFile = Context;
-    sErrorCount++;
-    fprintf(stderr, "%s %.*s\n", SourceFile, (int)Length, ErrorMessage);
+    LoggerContext *Logger = Context;
+    Logger->ErrorCount++;
+    fprintf(stderr, "%s %.*s\n", Logger->SourceFileName, (int)Length, ErrorMessage);
 }
 
 static void *Allocator(void *Context, void *OldPtr, u32 SizeBytes)
@@ -2070,14 +2236,18 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    LoggerContext Logger = {
+        .ErrorCount = 0,
+        .SourceFileName = SourceFileName,
+    };
     ByteBuffer Buffer = R3051_Assemble(
         Source, 
-        SourceFileName, Log,
+        &Logger, Log,
         NULL, Allocator
     );
     if (NULL == Buffer.Ptr)
     {
-        fprintf(stderr, "Assembler encountered %d errors.\n", sErrorCount);
+        fprintf(stderr, "Assembler encountered %d errors.\n", Logger.ErrorCount);
         return 1;
     }
     FreeFileContent(Source);

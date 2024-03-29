@@ -1171,7 +1171,8 @@ InvalidatePipeline:
 
 typedef enum TestSyscall 
 {
-    TESTSYS_WRITESTR = 0x0F000000,
+    TESTSYS_WRITESTR    = 0x70000000,
+    TESTSYS_CLRSCR      = 0x71000000,
 } TestSyscall;
 
 typedef struct Vec2i 
@@ -1204,8 +1205,6 @@ typedef struct Buffer
 #define NEWLINE_WIDTH 1
 #define SCREEN_WIDTH (STATUS_WIDTH + SEPARATOR_WIDTH + TERM_WIDTH + SEPARATOR_WIDTH + NEWLINE_WIDTH)
 #define SCREEN_HEIGHT (2*SEPARATOR_HEIGHT + TERM_HEIGHT)
-static uint TerminalIncPos(ScreenBuffer *);
-static uint StatusIncPos(ScreenBuffer *);
 
 static char sMasterScreenBuffer[SCREEN_HEIGHT*SCREEN_WIDTH + 1];
 static ScreenBuffer sMasterWindow = {
@@ -1285,6 +1284,12 @@ static void ScreenWriteStr(ScreenBuffer *Screen, const char *Str, iSize MaxLen, 
         {
             char *WritePtr = ScreenGetWritePtr(Screen, Screen->WriteCursor.x, Screen->WriteCursor.y);
             *WritePtr = Ch;
+
+            uint Wrapped = ScreenIncPos(Screen);
+            if (!(Flags & WRAP_X) && (Wrapped & WRAP_X))
+                goto Out;
+            if (!(Flags & WRAP_Y) && (Wrapped & WRAP_Y))
+                goto Out;
         } break;
         case '\n':
         {
@@ -1295,13 +1300,9 @@ static void ScreenWriteStr(ScreenBuffer *Screen, const char *Str, iSize MaxLen, 
             ScreenMoveWriteCursorTo(Screen, 0, Screen->WriteCursor.y - 1);
         } break;
         }
-
-        uint Wrapped = ScreenIncPos(Screen);
-        if (!(Flags & WRAP_X) && (Wrapped & WRAP_X))
-            break;
-        if (!(Flags & WRAP_Y) && (Wrapped & WRAP_Y))
-            break;
     }
+Out:
+    ;
 }
 
 static void ScreenClear(ScreenBuffer *Screen, char Ch)
@@ -1372,7 +1373,7 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
 {
     Buffer *Buf = UserData;
     Addr -= R3051_RESET_VEC;
-    if (Addr == (u32)(TESTSYS_WRITESTR - R3051_RESET_VEC))
+    if (Addr == (u32)((u32)TESTSYS_WRITESTR - R3051_RESET_VEC))
     {
         Data -= R3051_RESET_VEC;
         if (Data >= Buf->Size)
@@ -1384,6 +1385,10 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
             iSize MaxLength = Buf->Size - (&Buf->Ptr[Data] - Buf->Ptr);
             ScreenWriteStr(&sTerminalWindow, (const char *)&Buf->Ptr[Data], MaxLength, false);
         }
+    }
+    else if (Addr == (u32)((u32)TESTSYS_CLRSCR - R3051_RESET_VEC))
+    {
+        ScreenClear(&sTerminalWindow, ' ');
     }
     else if (Addr + Size <= Buf->Size)
     {

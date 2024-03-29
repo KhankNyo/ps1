@@ -32,14 +32,18 @@ if exists("b:current_syntax")
   syn match asmOpcode "\<lui\>"
   syn match asmOpcode "\<lwc[0-3]\>"
   syn match asmOpcode "\<lw[lr]\?\>"
-  syn match asmOpcode "\<s[bhw]\?\>"
+  syn match asmOpcode "\<la\>"
+  syn match asmOpcode "\<li\>"
+  syn match asmOpcode "\<s[bhw]\>"
   syn match asmOpcode "\<sw[lr]\>"
   syn match asmOpcode "\<swc[0-3]\>"
 
   syn match asmOpcode "\<m[ft]c[0-3]\>"
   syn match asmOpcode "\<m[ft]hi\|m[ft]lo\>"
+  syn match asmOpcode "\<move\>"
 
   syn match asmOpcode "\<nor\>"
+  syn match asmOpcode "\<nop\>"
   syn match asmOpcode "\<ori\?\>"
 
   syn match asmOpcode "\<sllv\?\>"
@@ -55,7 +59,7 @@ if exists("b:current_syntax")
   syn match asmBinNumber "0b[_01]\+\>"
   syn match asmDecNumber "\<[_0-9]\+D\=\>"
 
-  syn match asmLabel		"^[a-zA-Z_][a-zA-Z0-9_]*"
+  syn match asmLabel "^[a-zA-Z_][a-zA-Z0-9_]*:"
 
   syn match asmStringError "'[ -~]*'"
   syn match asmStringError "'[ -~]*$"
@@ -63,7 +67,7 @@ if exists("b:current_syntax")
   syn region asmString   start="\"" skip="\\\"" end="\"" contains=asm68kCharError,asmStringEscape
   syn match asmCharError "[^ -~]" contained
 
-  syn keyword asmDirective .org .db .dh .dw .dl .resv
+  syn keyword asmDirective .org .db .dh .dw .dl .resv .branchNop .loadNop
 
   "Mips registers
   syn match asmRegister   "\$2[0-9]\|\$1[0-9]\|\$3[0-1]\|\$[0-9]"
