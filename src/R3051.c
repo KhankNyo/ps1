@@ -1164,6 +1164,7 @@ InvalidatePipeline:
 #undef STANDALONE
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "Disassembler.c"
 
@@ -1178,152 +1179,192 @@ typedef struct Vec2i
     int x, y;
 } Vec2i;
 
+typedef struct ScreenBuffer ScreenBuffer;
+#define WRAP_X (1 << 0)
+#define WRAP_Y (1 << 1)
+typedef uint (*ScreenBufferIncPosFn)(ScreenBuffer *);
+typedef char *(*ScreenBufferGetWritePtrFn)(ScreenBuffer *, int x, int y);
+
+struct ScreenBuffer 
+{
+    char *Buffer;
+    iSize BufferSizeBytes;
+    int Width, Height, XOffset, YOffset;
+    Vec2i WriteCursor;
+
+    ScreenBufferIncPosFn IncPos;
+};
+
 typedef struct Buffer 
 {
     u8 *Ptr;
     iSize Size;
 } Buffer;
 
+
+
 #define TERM_HEIGHT 24
 #define TERM_WIDTH 80
 #define STATUS_HEIGHT TERM_HEIGHT
-#define STATUS_WIDTH 14*4
+#define STATUS_WIDTH (14*4)
 #define SEPARATOR_WIDTH 1
 #define SEPARATOR_HEIGHT 1
 #define NEWLINE_WIDTH 1
 #define SCREEN_WIDTH (STATUS_WIDTH + SEPARATOR_WIDTH + TERM_WIDTH + SEPARATOR_WIDTH + NEWLINE_WIDTH)
 #define SCREEN_HEIGHT (2*SEPARATOR_HEIGHT + TERM_HEIGHT)
-static char sScreenBuffer[SCREEN_HEIGHT*SCREEN_WIDTH + 1];
-static Vec2i sTerminalPos = { 0, 0 };
-static Vec2i sStatusPos = { 0, 0 };
+static uint TerminalIncPos(ScreenBuffer *);
+static uint StatusIncPos(ScreenBuffer *);
 
-static void TerminalClear(char Ch);
-static void StatusClear(char Ch);
+static char sMasterScreenBuffer[SCREEN_HEIGHT*SCREEN_WIDTH + 1];
+static ScreenBuffer sMasterWindow = {
+    .Width = SCREEN_WIDTH,
+    .Height = SCREEN_HEIGHT,
+    .Buffer = sMasterScreenBuffer,
+    .BufferSizeBytes = sizeof sMasterScreenBuffer
+};
+static ScreenBuffer sTerminalWindow = {
+    .IncPos = TerminalIncPos,
+
+    .Buffer = sMasterScreenBuffer,
+    .XOffset = STATUS_WIDTH + SEPARATOR_WIDTH,
+    .YOffset = SEPARATOR_HEIGHT,
+    .Width = TERM_WIDTH,
+    .Height = TERM_HEIGHT,
+    .BufferSizeBytes = sizeof sMasterScreenBuffer,
+};
+static ScreenBuffer sStatusWindow = {
+    .IncPos = StatusIncPos,
+
+    .Buffer = sMasterScreenBuffer,
+    .XOffset = 0,
+    .YOffset = SEPARATOR_HEIGHT,
+    .Width = STATUS_WIDTH,
+    .Height = STATUS_HEIGHT,
+    .BufferSizeBytes = sizeof sMasterScreenBuffer,
+};
 
 
-static char *ScreenGetWritePtr(Vec2i Position)
+
+static char *ScreenGetWritePtr(ScreenBuffer *Screen, int x, int y)
 {
-    iSize LinearIndex = Position.y * SCREEN_WIDTH + Position.x;
-    return sScreenBuffer + LinearIndex;
+    iSize LinearIndex = (y + Screen->YOffset)*SCREEN_WIDTH + x + Screen->XOffset;
+    return Screen->Buffer + (LinearIndex % Screen->BufferSizeBytes);
 }
-#include <string.h>
+
+static void ScreenMoveWriteCursorTo(ScreenBuffer *Screen, int x, int y)
+{
+    Screen->WriteCursor = (Vec2i) {
+        .x = (x % Screen->Width) + Screen->XOffset, 
+        .y = (y % Screen->Height) + Screen->YOffset,
+    };
+}
+
+static void ScreenNewline(ScreenBuffer *Screen)
+{
+    ScreenMoveWriteCursorTo(Screen, 0, Screen->WriteCursor.y);
+}
+
+
+static void ScreenWriteStr(ScreenBuffer *Screen, const char *Str, iSize MaxLen, uint Flags)
+{
+    while (MaxLen --> 0 && *Str)
+    {
+        char Ch = *Str++;
+        /* write the char */
+        switch (Ch)
+        {
+        default:
+        {
+            char *WritePtr = ScreenGetWritePtr(Screen, Screen->WriteCursor.x, Screen->WriteCursor.y);
+            *WritePtr = Ch;
+        } break;
+        case '\n':
+        {
+            ScreenNewline(Screen);
+        } break;
+        case '\r':
+        {
+            ScreenMoveWriteCursorTo(Screen, 0, Screen->WriteCursor.y - 1);
+        } break;
+        }
+
+        uint Wrapped = Screen->IncPos(Screen);
+        if (!(Flags & WRAP_X) && (Wrapped & WRAP_X))
+            break;
+        if (!(Flags & WRAP_Y) && (Wrapped & WRAP_Y))
+            break;
+    }
+}
+
+static void ScreenClear(ScreenBuffer *Screen, char Ch)
+{
+    ScreenMoveWriteCursorTo(Screen, 0, 0);
+    do {
+        char *WritePtr = ScreenGetWritePtr(
+            Screen, 
+            Screen->WriteCursor.x, 
+            Screen->WriteCursor.y
+        );
+        *WritePtr = Ch;
+    } while (!(WRAP_Y & Screen->IncPos(Screen)));
+    ScreenMoveWriteCursorTo(Screen, 0, 0);
+}
 
 static void ScreenInit(void)
 {
     for (int x = 0; x < SCREEN_WIDTH; x++)
     {
-        *ScreenGetWritePtr((Vec2i){.x = x, .y = 0}) = '=';
-        *ScreenGetWritePtr((Vec2i){.x = x, .y = TERM_HEIGHT + SEPARATOR_HEIGHT}) = '=';
+        *ScreenGetWritePtr(&sMasterWindow, x, 0) = '=';
+        *ScreenGetWritePtr(&sMasterWindow, x, SCREEN_HEIGHT - SEPARATOR_HEIGHT) = '=';
     }
     for (int y = 0; y < SCREEN_HEIGHT; y++)
     {
-        *ScreenGetWritePtr((Vec2i){.x = SCREEN_WIDTH - NEWLINE_WIDTH, .y = y}) = '\n';
-        *ScreenGetWritePtr((Vec2i){.x = SCREEN_WIDTH - SEPARATOR_WIDTH - NEWLINE_WIDTH, .y = y}) = '|';
-        *ScreenGetWritePtr((Vec2i){.x = STATUS_WIDTH, .y = y}) = '|';
+        *ScreenGetWritePtr(&sMasterWindow, SCREEN_WIDTH - NEWLINE_WIDTH, y) = '\n';
+        *ScreenGetWritePtr(&sMasterWindow, SCREEN_WIDTH - NEWLINE_WIDTH - SEPARATOR_WIDTH, y) = '|';
+        *ScreenGetWritePtr(&sMasterWindow, STATUS_WIDTH, y) = '|';
     }
-    TerminalClear(' ');
-    StatusClear(' ');
-    sScreenBuffer[sizeof sScreenBuffer - 1] = '\0';
+    ScreenClear(&sTerminalWindow, ' ');
+    ScreenClear(&sStatusWindow, ' ');
+    sMasterScreenBuffer[sizeof sMasterScreenBuffer - 1] = '\0';
 }
 
 
-#define WRAP_X (1 << 0)
-#define WRAP_Y (1 << 1)
-static uint TerminalIncrementPosition(void)
+static uint TerminalIncPos(ScreenBuffer *Screen)
 {
     uint WrapFlags = 0;
-    sTerminalPos.x++;
-    if (sTerminalPos.x == TERM_WIDTH + STATUS_WIDTH + SEPARATOR_WIDTH)
+    Screen->WriteCursor.x++;
+    if (Screen->WriteCursor.x == TERM_WIDTH)
     {
-        sTerminalPos.x = STATUS_WIDTH + SEPARATOR_WIDTH;
-        sTerminalPos.y++;
+        Screen->WriteCursor.x = 0;
+        Screen->WriteCursor.y++;
         WrapFlags |= WRAP_X;
-    }
-    if (sTerminalPos.y == TERM_HEIGHT + SEPARATOR_HEIGHT)
-    {
-        sTerminalPos.y = SEPARATOR_HEIGHT;
-        WrapFlags |= WRAP_Y;
+        if (Screen->WriteCursor.y == TERM_HEIGHT)
+        {
+            Screen->WriteCursor.y = 0;
+            WrapFlags |= WRAP_Y;
+        }
     }
     return WrapFlags;
 }
 
-static uint StatusIncrementPosition(void)
+static uint StatusIncPos(ScreenBuffer *Screen)
 {
     uint WrapFlags = 0;
-    sStatusPos.x++;
-    if (sStatusPos.x == STATUS_WIDTH)
+    Screen->WriteCursor.x++;
+    if (Screen->WriteCursor.x == STATUS_WIDTH)
     {
-        sStatusPos.x = 0;
-        sStatusPos.y++;
+        Screen->WriteCursor.x = 0;
+        Screen->WriteCursor.y++;
         WrapFlags = WRAP_X;
-    }
-    if (sStatusPos.y == STATUS_HEIGHT + SEPARATOR_HEIGHT)
-    {
-        sStatusPos.y = SEPARATOR_HEIGHT;
-        WrapFlags |= WRAP_Y;
+        if (Screen->WriteCursor.y == STATUS_HEIGHT)
+        {
+            Screen->WriteCursor.y = 0;
+            WrapFlags |= WRAP_Y;
+        }
     }
     return WrapFlags;
 }
 
-
-
-static void TerminalMoveTo(int TerminalX, int TerminalY)
-{
-    sTerminalPos = (Vec2i) { 
-        .x = (TerminalX % TERM_WIDTH) + STATUS_WIDTH + SEPARATOR_WIDTH, 
-        .y = (TerminalY % TERM_HEIGHT) + SEPARATOR_HEIGHT,
-    };
-}
-
-static void StatusMoveTo(int StatusX, int StatusY)
-{
-    sStatusPos = (Vec2i) {
-        .x = StatusX % STATUS_WIDTH,
-        .y = (StatusY % STATUS_HEIGHT) + SEPARATOR_HEIGHT,
-    };
-}
-
-static void TerminalWrite(const char *Str, iSize StrLen, Bool8 ShouldWrap)
-{
-    while (StrLen --> 0)
-    {
-        /* write the char, TODO: process newline and stuff */
-        char Ch = *Str++;
-        *ScreenGetWritePtr(sTerminalPos) = Ch;
-        if (!ShouldWrap && (TerminalIncrementPosition() & WRAP_X))
-            break;
-    }
-    sScreenBuffer[sizeof sScreenBuffer - 1] = '\0';
-}
-
-static void StatusWrite(const char *Str, iSize StrLen, Bool8 ShouldWrap)
-{
-    while (StrLen --> 0)
-    {
-        /* write the char, TODO: process newline */
-        char Ch = *Str++;
-        *ScreenGetWritePtr(sStatusPos) = Ch;
-        if (!ShouldWrap && (StatusIncrementPosition() & WRAP_X))
-            break; 
-    }
-    sScreenBuffer[sizeof sScreenBuffer - 1] = '\0';
-}
-
-static void TerminalClear(char Ch)
-{
-    TerminalMoveTo(0, 0);
-    do {
-        *ScreenGetWritePtr(sTerminalPos) = Ch;
-    } while (!(WRAP_Y & TerminalIncrementPosition()));
-}
-
-static void StatusClear(char Ch)
-{
-    StatusMoveTo(0, 0);
-    do {
-        *ScreenGetWritePtr(sStatusPos) = Ch;
-    } while (!(WRAP_Y & StatusIncrementPosition()));
-}
 
 
 
@@ -1372,11 +1413,8 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
         }
         else
         {
-            for (iSize i = Data; i < Buf->Size && Buf->Ptr[i]; i++)
-            {
-                fputc(Buf->Ptr[i], stdout);
-            }
-            fflush(stdout);
+            iSize MaxLength = Buf->Size - (&Buf->Ptr[Data] - Buf->Ptr);
+            ScreenWriteStr(&sTerminalWindow, (const char *)&Buf->Ptr[Data], MaxLength, false);
         }
     }
     else if (Addr + Size <= Buf->Size)
@@ -1434,24 +1472,45 @@ static Bool8 ProcessCLI(R3051 *Mips)
 static void DumpState(const R3051 *Mips)
 {
     static R3051 LastState;
-    /* dump regs */
-    printf("========== Registers =========:\n");
-    for (int i = 0; i < (int)STATIC_ARRAY_SIZE(Mips->R); i++)
-    {
-        if (Mips->R[i] == LastState.R[i])
-            printf(" R%02d %08x ", i, Mips->R[i]);
-        else
-            printf("[R%02d=%08x]", i, Mips->R[i]);
+    int RegisterCount = STATIC_ARRAY_SIZE(Mips->R);
+    int RegisterBoxPerLine = 4;
+    int y = 1;
 
-        if ((i - 3) % 4 == 0)
-            printf("\n");
+    /* dump regs */
+    ScreenClear(&sStatusWindow, ' ');
+    const char *Display = "========== Registers ==========";
+    ScreenMoveWriteCursorTo(&sStatusWindow, (STATUS_WIDTH - strlen(Display)) / 2, 0);
+    ScreenWriteStr(&sStatusWindow, Display, INT64_MAX, false);
+    for (; y < 1 + RegisterCount / RegisterBoxPerLine; y++)
+    {
+        for (int x = 0; x < RegisterBoxPerLine; x++)
+        {
+            int StrLen = 14;
+            int BoxPos = x*StrLen;
+
+            int RegisterIndex = (y - 1)*RegisterBoxPerLine + x;
+            char Str[64];
+            if (Mips->R[RegisterIndex] == LastState.R[RegisterIndex])
+                snprintf(Str, sizeof Str, " R%02d %08x ", RegisterIndex, Mips->R[RegisterIndex]);
+            else
+                snprintf(Str, sizeof Str, "[R%02d=%08x]", RegisterIndex, Mips->R[RegisterIndex]);
+
+            ScreenMoveWriteCursorTo(&sStatusWindow, BoxPos, y);
+            ScreenWriteStr(&sStatusWindow, Str, StrLen, false);
+        }
     }
 
+
     /* dump pipeline */
+    char DisassembledLine[128];
     char DisassembledInstruction[64];
     Bool8 AlreadyDecoded = false, 
           AlreadyExecuted = false;
-    printf("========== Pipeline =========:\n");
+
+    ScreenNewline(&sStatusWindow);
+    Display = "========== Pipeline ==========";
+    ScreenMoveWriteCursorTo(&sStatusWindow, (STATUS_WIDTH - strlen(Display)) / 2, sStatusWindow.WriteCursor.y);
+    ScreenWriteStr(&sStatusWindow, Display, INT64_MAX, false);
     for (int i = 0; i < R3051_PIPESTAGE_COUNT; i++)
     {
         R3051_Disasm(
@@ -1478,7 +1537,8 @@ static void DumpState(const R3051 *Mips)
 
         if (LastState.Instruction[i] == Mips->Instruction[i])
         {
-            printf("%s    PC=%08x  %08x: %s  \n", 
+            snprintf(DisassembledLine, sizeof DisassembledLine, 
+                "%s    PC=%08x  %08x: %s", 
                 StagePtr, 
                 Mips->PCSave[i], Mips->Instruction[i], 
                 DisassembledInstruction
@@ -1486,25 +1546,24 @@ static void DumpState(const R3051 *Mips)
         }
         else
         {
-            printf("%s | [PC=%08x]:%08x: %s  \n", 
+            snprintf(DisassembledLine, sizeof DisassembledLine, 
+                "%s | [PC=%08x]:%08x: %s", 
                 StagePtr, 
                 Mips->PCSave[i], Mips->Instruction[i], 
                 DisassembledInstruction
             );
         }
-        
+
+        ScreenNewline(&sStatusWindow);
+        ScreenWriteStr(&sStatusWindow, DisassembledLine, INT64_MAX, false);
     }
-    printf("PC: %08x\n", Mips->PC);
     LastState = *Mips;
+
+    printf("%s", sMasterScreenBuffer);
 }
 
 int main(int argc, char **argv)
 {
-    ScreenInit();
-    TerminalWrite("Hello, world", 12, false);
-    printf("%s\n", sScreenBuffer);
-    return 0;
-
     if (argc < 2)
     {
         printf("Usage: %s <mips binary file>\n", argv[0]);
@@ -1518,6 +1577,7 @@ int main(int argc, char **argv)
     if (NULL == Buf.Ptr)
         return 1;
 
+    ScreenInit();
     R3051 Mips = R3051_Init(
         &Buf, 
         MipsRead, MipsWrite,
