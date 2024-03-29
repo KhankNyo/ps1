@@ -1179,21 +1179,13 @@ typedef struct Vec2i
     int x, y;
 } Vec2i;
 
-typedef struct ScreenBuffer ScreenBuffer;
-#define WRAP_X (1 << 0)
-#define WRAP_Y (1 << 1)
-typedef uint (*ScreenBufferIncPosFn)(ScreenBuffer *);
-typedef char *(*ScreenBufferGetWritePtrFn)(ScreenBuffer *, int x, int y);
-
-struct ScreenBuffer 
+typedef struct ScreenBuffer 
 {
     char *Buffer;
     iSize BufferSizeBytes;
     int Width, Height, XOffset, YOffset;
     Vec2i WriteCursor;
-
-    ScreenBufferIncPosFn IncPos;
-};
+} ScreenBuffer;
 
 typedef struct Buffer 
 {
@@ -1223,8 +1215,6 @@ static ScreenBuffer sMasterWindow = {
     .BufferSizeBytes = sizeof sMasterScreenBuffer
 };
 static ScreenBuffer sTerminalWindow = {
-    .IncPos = TerminalIncPos,
-
     .Buffer = sMasterScreenBuffer,
     .XOffset = STATUS_WIDTH + SEPARATOR_WIDTH,
     .YOffset = SEPARATOR_HEIGHT,
@@ -1233,8 +1223,6 @@ static ScreenBuffer sTerminalWindow = {
     .BufferSizeBytes = sizeof sMasterScreenBuffer,
 };
 static ScreenBuffer sStatusWindow = {
-    .IncPos = StatusIncPos,
-
     .Buffer = sMasterScreenBuffer,
     .XOffset = 0,
     .YOffset = SEPARATOR_HEIGHT,
@@ -1254,14 +1242,34 @@ static char *ScreenGetWritePtr(ScreenBuffer *Screen, int x, int y)
 static void ScreenMoveWriteCursorTo(ScreenBuffer *Screen, int x, int y)
 {
     Screen->WriteCursor = (Vec2i) {
-        .x = (x % Screen->Width) + Screen->XOffset, 
-        .y = (y % Screen->Height) + Screen->YOffset,
+        .x = (x % Screen->Width), 
+        .y = (y % Screen->Height),
     };
 }
 
 static void ScreenNewline(ScreenBuffer *Screen)
 {
-    ScreenMoveWriteCursorTo(Screen, 0, Screen->WriteCursor.y);
+    ScreenMoveWriteCursorTo(Screen, 0, Screen->WriteCursor.y + 1);
+}
+
+#define WRAP_X (1 << 0)
+#define WRAP_Y (1 << 1)
+static uint ScreenIncPos(ScreenBuffer *Screen)
+{
+    uint WrapFlags = 0;
+    Screen->WriteCursor.x++;
+    if (Screen->WriteCursor.x == Screen->Width)
+    {
+        Screen->WriteCursor.x = 0;
+        Screen->WriteCursor.y++;
+        WrapFlags |= WRAP_X;
+        if (Screen->WriteCursor.y == Screen->Height)
+        {
+            Screen->WriteCursor.y = 0;
+            WrapFlags |= WRAP_Y;
+        }
+    }
+    return WrapFlags;
 }
 
 
@@ -1288,7 +1296,7 @@ static void ScreenWriteStr(ScreenBuffer *Screen, const char *Str, iSize MaxLen, 
         } break;
         }
 
-        uint Wrapped = Screen->IncPos(Screen);
+        uint Wrapped = ScreenIncPos(Screen);
         if (!(Flags & WRAP_X) && (Wrapped & WRAP_X))
             break;
         if (!(Flags & WRAP_Y) && (Wrapped & WRAP_Y))
@@ -1306,7 +1314,7 @@ static void ScreenClear(ScreenBuffer *Screen, char Ch)
             Screen->WriteCursor.y
         );
         *WritePtr = Ch;
-    } while (!(WRAP_Y & Screen->IncPos(Screen)));
+    } while (!(WRAP_Y & ScreenIncPos(Screen)));
     ScreenMoveWriteCursorTo(Screen, 0, 0);
 }
 
@@ -1323,50 +1331,10 @@ static void ScreenInit(void)
         *ScreenGetWritePtr(&sMasterWindow, SCREEN_WIDTH - NEWLINE_WIDTH - SEPARATOR_WIDTH, y) = '|';
         *ScreenGetWritePtr(&sMasterWindow, STATUS_WIDTH, y) = '|';
     }
-    ScreenClear(&sTerminalWindow, ' ');
     ScreenClear(&sStatusWindow, ' ');
+    ScreenClear(&sTerminalWindow, ' ');
     sMasterScreenBuffer[sizeof sMasterScreenBuffer - 1] = '\0';
 }
-
-
-static uint TerminalIncPos(ScreenBuffer *Screen)
-{
-    uint WrapFlags = 0;
-    Screen->WriteCursor.x++;
-    if (Screen->WriteCursor.x == TERM_WIDTH)
-    {
-        Screen->WriteCursor.x = 0;
-        Screen->WriteCursor.y++;
-        WrapFlags |= WRAP_X;
-        if (Screen->WriteCursor.y == TERM_HEIGHT)
-        {
-            Screen->WriteCursor.y = 0;
-            WrapFlags |= WRAP_Y;
-        }
-    }
-    return WrapFlags;
-}
-
-static uint StatusIncPos(ScreenBuffer *Screen)
-{
-    uint WrapFlags = 0;
-    Screen->WriteCursor.x++;
-    if (Screen->WriteCursor.x == STATUS_WIDTH)
-    {
-        Screen->WriteCursor.x = 0;
-        Screen->WriteCursor.y++;
-        WrapFlags = WRAP_X;
-        if (Screen->WriteCursor.y == STATUS_HEIGHT)
-        {
-            Screen->WriteCursor.y = 0;
-            WrapFlags |= WRAP_Y;
-        }
-    }
-    return WrapFlags;
-}
-
-
-
 
 
 
