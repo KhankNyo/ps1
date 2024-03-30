@@ -35,7 +35,9 @@ ByteBuffer R3051_Assemble(
 #include <inttypes.h> /* PRIi64 */
 #include <stdarg.h> 
 
-#define ASM_NOP (u32)0
+#define ASM_NOP (u32)0x00000000
+#define ASM_JR  (u32)0x00000008
+#define ASM_RET (ASM_JR | (31 << RS))
 
 typedef enum AsmTokenType 
 {
@@ -73,6 +75,7 @@ typedef enum AsmTokenType
     TOK_ORG,
     TOK_BRANCH_NOP,
     TOK_LOAD_NOP,
+    TOK_JUMP_NOP,
     TOK_DB,
     TOK_DH,
     TOK_DW,
@@ -81,8 +84,11 @@ typedef enum AsmTokenType
     TOK_INS_PSEUDO_MOVE,
     TOK_INS_PSEUDO_LI,
     TOK_INS_PSEUDO_LA,
+    TOK_INS_PSEUDO_RET,
+    TOK_INS_PSEUDO_BRA,
 
-    TOK_INS_I_TYPE_ALU,
+    TOK_INS_I_TYPE_U16,
+    TOK_INS_I_TYPE_I16,
     TOK_INS_I_TYPE_RT,
     TOK_INS_I_TYPE_MEM,
     TOK_INS_I_TYPE_MEM_LOAD,
@@ -204,6 +210,7 @@ typedef struct Assembler
 
     Bool8 LoadNop;
     Bool8 BranchNop;
+    Bool8 JumpNop;
 } Assembler;
 
 static Bool8 AsmIsAlpha(char Ch)
@@ -263,7 +270,9 @@ static char AsmSkipSpace(Assembler *Asm)
             { /* do nothing */ }
 
             Asm->Line++;
-            Asm->LineStart = Asm->End;
+            Asm->LineStart = AsmIsAtEnd(Asm) 
+                ? Asm->End
+                : Asm->End + 1;
         } break;
         default: goto Out;
         }
@@ -411,11 +420,11 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
     static const AsmKeyword Keywords['z' - 'a'][20] = {
         ['a' - 'a'] = {
             INS("add",      R_TYPE_3,       0x00000020),
-            INS("addi",     I_TYPE_ALU,     0x20000000),
-            INS("addiu",    I_TYPE_ALU,     0x24000000),
+            INS("addi",     I_TYPE_I16,     0x20000000),
+            INS("addiu",    I_TYPE_I16,     0x24000000),
             INS("addu",     R_TYPE_3,       0x00000021),
             INS("and",      R_TYPE_3,       0x00000024),
-            INS("andi",     I_TYPE_ALU,     0x30000000),
+            INS("andi",     I_TYPE_U16,     0x30000000),
         },
         ['b' - 'a'] = {
             INS("beq",      I_TYPE_BR2,     0x10000000),
@@ -427,6 +436,9 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
             INS("bltzal",   I_TYPE_BR1,     0x04100000),
             INS("bne",      I_TYPE_BR2,     0x14000000),
             INS("break",    NO_ARG,         0x0000000D),
+            INS("bez",      I_TYPE_BR1,     0x10000000), /* beq zero, r, offset */
+            INS("bnz",      I_TYPE_BR1,     0x14000000), /* bne zero, r, offset */
+            INS("bra",      PSEUDO_BRA,     0),         /* beq zero, zero, offset */
         },
         ['c' - 'a'] = {
             /* TODO: CFCz */
@@ -442,7 +454,7 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
             INS("j",        J_TYPE,         0x08000000),
             INS("jal",      J_TYPE,         0x0C000000),
             INS("jalr",     R_TYPE_RDRS,    0x00000009),
-            INS("jr",       R_TYPE_RS,      0x00000008),
+            INS("jr",       R_TYPE_RS,      ASM_JR),
         },
         ['l' - 'a'] = {
             INS("li",       PSEUDO_LI,      0),
@@ -484,7 +496,7 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
         },
         ['o' - 'a'] = {
             INS("or",       R_TYPE_3,       0x00000025),
-            INS("ori",      I_TYPE_ALU,     0x34000000),
+            INS("ori",      I_TYPE_U16,     0x34000000),
         },
         ['s' - 'a'] = {
             INS("sb",       I_TYPE_MEM,     0xA0000000),
@@ -505,17 +517,18 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
             INS("subu",     R_TYPE_3,       0x00000023),
 
             INS("slt",      R_TYPE_3,       0x0000002A),
-            INS("slti",     I_TYPE_ALU,     0x28000000),
-            INS("sltiu",    I_TYPE_ALU,     0x2C000000),
+            INS("slti",     I_TYPE_I16,     0x28000000),
+            INS("sltiu",    I_TYPE_I16,     0x2C000000),
             INS("sltu",     R_TYPE_3,       0x0000002B),
 
             INS("syscall",  NO_ARG,         0x0000000C),
         },
         ['x' - 'a'] = {
             INS("xor",      R_TYPE_3,       0x00000026),
-            INS("xori",     I_TYPE_ALU,     0x38000000),
+            INS("xori",     I_TYPE_U16,     0x38000000),
         },
         ['r' - 'a'] = {
+            INS("ret",      NO_ARG,         ASM_RET), 
             INS("rfe",      NO_ARG,         0x42000010),
         },
     };
@@ -709,13 +722,18 @@ static AsmToken AsmDirectiveToken(Assembler *Asm)
     static const AsmKeyword Keywords['z' - 'a'][8] = {
         ['b' - 'a'] = {
             DIRECTIVE("branchNop", TOK_BRANCH_NOP),
-            DIRECTIVE("loadNop", TOK_LOAD_NOP),
         },
         ['d' - 'a'] = {
             DIRECTIVE("db", TOK_DB),
             DIRECTIVE("dh", TOK_DH),
             DIRECTIVE("dw", TOK_DW),
             DIRECTIVE("dl", TOK_DL),
+        },
+        ['l' - 'a'] = {
+            DIRECTIVE("loadNop", TOK_JUMP_NOP),
+        },
+        ['j' - 'a'] = {
+            DIRECTIVE("jumpNop", TOK_JUMP_NOP),
         },
         ['o' - 'a'] = {
             DIRECTIVE("org", TOK_ORG),
@@ -1408,9 +1426,14 @@ static Bool8 AsmCheckShamt(Assembler *Asm, const AsmExpression *ShamtExpr)
     return true;
 }
 
+static i32 AsmGetBranchOffset(u32 PC, u32 Target)
+{
+    return (i32)(Target - (PC + 4)) / 4;
+}
+
 static Bool8 AsmCheckBranchOffset(Assembler *Asm, u32 PC, const AsmExpression *BranchTarget)
 {
-    i32 Offset = ((i32)BranchTarget->Value - (i32)(PC + 4)) / 4;
+    i32 Offset = AsmGetBranchOffset(PC, BranchTarget->Value);
     /* TODO: should we warn about alignment? */
     if (!IN_RANGE(INT16_MIN, Offset, INT16_MAX))
     {
@@ -1531,6 +1554,14 @@ static void AsmIdentifierStmt(Assembler *Asm)
     }
 }
 
+static void AsmEmitNoArg(Assembler *Asm)
+{
+    AsmEmit32(Asm, Asm->CurrentToken.As.Opcode);
+    if (Asm->CurrentToken.As.Opcode == ASM_RET && Asm->JumpNop)
+        AsmEmit32(Asm, ASM_NOP);
+
+}
+
 static uint AsmConsumeGPRegister(Assembler *Asm, const char *Name)
 {
     AsmConsumeTokenOrError(Asm, TOK_REG, "Expected %s register.", Name);
@@ -1557,6 +1588,8 @@ static void AsmJType(Assembler *Asm)
 
     Opcode |= (AddrExpr.Value & 0x0FFFFFFF) >> 2;
     AsmEmit32(Asm, Opcode);
+    if (Asm->JumpNop)
+        AsmEmit32(Asm, ASM_NOP);
 }
 
 static void AsmRType3Operands(Assembler *Asm)
@@ -1586,19 +1619,22 @@ static void AsmRType3Operands(Assembler *Asm)
     AsmEmit32(Asm, Opcode);
 }
 
-static void AsmRType1Operand(Assembler *Asm, const char *RegisterType, int Offset)
+static void AsmRType1Operand(Assembler *Asm, const char *RegisterType, int Offset, Bool8 IsJump)
 {
     u32 Opcode = Asm->CurrentToken.As.Opcode;
     uint Reg = AsmConsumeGPRegister(Asm, RegisterType);
 
     Opcode |= (Reg & 0x1F) << Offset;
     AsmEmit32(Asm, Opcode);
+    if (IsJump && Asm->JumpNop)
+        AsmEmit32(Asm, ASM_NOP);
 }
 
 static void AsmRType2Operands(
     Assembler *Asm, 
     const char *First, const char *Second, 
-    int Offset1, int Offset2
+    int Offset1, int Offset2, 
+    Bool8 IsJump
 )
 {
     u32 Opcode = Asm->CurrentToken.As.Opcode;
@@ -1610,6 +1646,8 @@ static void AsmRType2Operands(
     Opcode |= (R1 & 0x1F) << Offset1;
     Opcode |= (R2 & 0x1F) << Offset2;
     AsmEmit32(Asm, Opcode);
+    if (IsJump && Asm->JumpNop)
+        AsmEmit32(Asm, ASM_NOP);
 }
 
 static void AsmRTypeShift(Assembler *Asm)
@@ -1663,7 +1701,7 @@ static void AsmIType2Operands(Assembler *Asm, const char *OperandName, int Offse
     AsmEmit32(Asm, Opcode);
 }
 
-static void AsmIType3Operands(Assembler *Asm)
+static void AsmIType3Operands(Assembler *Asm, Bool8 Signed)
 {
     u32 Opcode = Asm->CurrentToken.As.Opcode;
 
@@ -1680,11 +1718,16 @@ static void AsmIType3Operands(Assembler *Asm)
     AsmExpression ImmediateExpr = AsmConsumeExpr(Asm);
     if (ImmediateExpr.Incomplete)
     {
-        AsmPushIncompleteExpr(Asm, ImmediateExpr, PATCH_OPC_I16);
+        AsmPatchType PatchType = Signed
+            ? PATCH_OPC_I16 
+            : PATCH_OPC_U16;
+        AsmPushIncompleteExpr(Asm, ImmediateExpr, PatchType);
     }
     else
     {
-        AsmCheckSignedImmediate(Asm, "Immediate", &ImmediateExpr);
+        if (Signed)
+            AsmCheckSignedImmediate(Asm, "Immediate", &ImmediateExpr);
+        else AsmCheckUnsignedImmediate(Asm, "Immediate", &ImmediateExpr);
     }
 
     Opcode |= (Rt & 0x1F) << RT;
@@ -1744,9 +1787,9 @@ static void AsmITypeBranch(Assembler *Asm, int RegisterArgumentCount)
     {
         AsmCheckBranchOffset(Asm, Asm->CurrentVirtualLocation, &BranchTargetExpr);
     }
-    i32 BranchOffset = ((i32)BranchTargetExpr.Value - (i32)(Asm->CurrentVirtualLocation + 4)) / 4;
 
 
+    i32 BranchOffset = AsmGetBranchOffset(Asm->CurrentVirtualLocation, BranchTargetExpr.Value);
     Opcode |= (FirstReg & 0x1F) << RS;
     Opcode |= BranchOffset & 0x0000FFFF;
     AsmEmit32(Asm, Opcode);
@@ -1820,6 +1863,7 @@ static void AsmResvDirective(Assembler *Asm)
     if (!AsmResizeBuffer(Asm, Asm->BufferSize + Expr.Value))
         return;
 
+    Asm->BufferSize += Expr.Value;
     for (u32 i = OldSize; i < Asm->BufferSize; i++)
     {
         Asm->Buffer[i] = 0;
@@ -1898,6 +1942,26 @@ static void AsmPseudoMove(Assembler *Asm)
     AsmEmit32(Asm, Opcode);
 }
 
+static void AsmPseudoBra(Assembler *Asm)
+{
+    AsmExpression Expr = AsmConsumeExpr(Asm);
+    if (Expr.Incomplete)
+    {
+        AsmPushIncompleteExpr(Asm, Expr, PATCH_OPC_BRANCH);
+    }
+    else 
+    {
+        AsmCheckBranchOffset(Asm, Asm->CurrentVirtualLocation, &Expr);
+    }
+
+    u32 Opcode = 0x10000000; /* beq */
+    i32 BranchOffset = AsmGetBranchOffset(Asm->CurrentVirtualLocation, Expr.Value);
+    Opcode |= 0xFFFF & BranchOffset;
+    AsmEmit32(Asm, Opcode);
+    if (Asm->BranchNop)
+        AsmEmit32(Asm, ASM_NOP);
+}
+
 #undef ASM_CONSUME_COMMA
 
 
@@ -1908,19 +1972,20 @@ static void AsmConsumeStmt(Assembler *Asm)
     case TOK_IDENTIFIER:        AsmIdentifierStmt(Asm); break;
 
 
-    case TOK_INS_NO_ARG:        AsmEmit32(Asm, Asm->CurrentToken.As.Opcode); break;
+    case TOK_INS_NO_ARG:        AsmEmitNoArg(Asm); break;
 
     case TOK_INS_J_TYPE:        AsmJType(Asm); break;
 
     case TOK_INS_R_TYPE_3:      AsmRType3Operands(Asm); break;
-    case TOK_INS_R_TYPE_RD:     AsmRType1Operand(Asm, "destination", RD); break;
-    case TOK_INS_R_TYPE_RS:     AsmRType1Operand(Asm, "source", RS); break;
-    case TOK_INS_R_TYPE_RDRS:   AsmRType2Operands(Asm, "destination", "source", RD, RS); break;
-    case TOK_INS_R_TYPE_RTRD:   AsmRType2Operands(Asm, "general", "coprocessor", RT, RD); break;
-    case TOK_INS_R_TYPE_RSRT:   AsmRType2Operands(Asm, "a", "a second", RS, RT); break;
+    case TOK_INS_R_TYPE_RD:     AsmRType1Operand(Asm, "destination", RD, false); break;
+    case TOK_INS_R_TYPE_RS:     AsmRType1Operand(Asm, "source", RS, Asm->CurrentToken.As.Opcode == ASM_JR); break;
+    case TOK_INS_R_TYPE_RDRS:   AsmRType2Operands(Asm, "destination", "source", RD, RS, true); break;
+    case TOK_INS_R_TYPE_RTRD:   AsmRType2Operands(Asm, "general", "coprocessor", RT, RD, false); break;
+    case TOK_INS_R_TYPE_RSRT:   AsmRType2Operands(Asm, "a", "a second", RS, RT, false); break;
     case TOK_INS_R_TYPE_SHAMT:  AsmRTypeShift(Asm); break;
 
-    case TOK_INS_I_TYPE_ALU:    AsmIType3Operands(Asm); break;
+    case TOK_INS_I_TYPE_U16:
+    case TOK_INS_I_TYPE_I16:    AsmIType3Operands(Asm, TOK_INS_I_TYPE_I16 == Asm->CurrentToken.Type); break;
     case TOK_INS_I_TYPE_RT:     AsmIType2Operands(Asm, "destination", RT); break;
     case TOK_INS_I_TYPE_MEM_LOAD:
     case TOK_INS_I_TYPE_MEM:    AsmITypeMemory(Asm, TOK_INS_I_TYPE_MEM_LOAD == Asm->CurrentToken.Type); break;
@@ -1933,12 +1998,14 @@ static void AsmConsumeStmt(Assembler *Asm)
     case TOK_DL:                AsmDefineLongDirective(Asm); break;
     case TOK_ORG:               AsmOrgDirective(Asm); break;
     case TOK_RESV:              AsmResvDirective(Asm); break;
-    case TOK_BRANCH_NOP:        Asm->BranchNop = AsmBoolDirective(Asm); 
-    case TOK_LOAD_NOP:          Asm->LoadNop = AsmBoolDirective(Asm);
+    case TOK_BRANCH_NOP:        Asm->BranchNop = AsmBoolDirective(Asm); break;
+    case TOK_LOAD_NOP:          Asm->LoadNop = AsmBoolDirective(Asm); break;
+    case TOK_JUMP_NOP:          Asm->JumpNop = AsmBoolDirective(Asm); break;
 
     case TOK_INS_PSEUDO_LA:
     case TOK_INS_PSEUDO_LI:     AsmPseudoImm(Asm, TOK_INS_PSEUDO_LI == Asm->CurrentToken.Type); break;
     case TOK_INS_PSEUDO_MOVE:   AsmPseudoMove(Asm); break;
+    case TOK_INS_PSEUDO_BRA:    AsmPseudoBra(Asm); break;
 
     default:                    AsmErrorAtToken(Asm, &Asm->CurrentToken, "Unexpected token.");
     }
@@ -1946,7 +2013,7 @@ static void AsmConsumeStmt(Assembler *Asm)
 
 static Bool8 AsmTokenIsInstruction(AsmTokenType Token)
 {
-    return IN_RANGE(TOK_INS_I_TYPE_ALU, Token, TOK_INS_NO_ARG);
+    return IN_RANGE(TOK_INS_PSEUDO_MOVE, Token, TOK_INS_NO_ARG);
 }
 
 static void AsmRecoverFromPanic(Assembler *Asm)
@@ -2004,6 +2071,7 @@ static void AsmResolveIncompleteExprs(Assembler *Asm)
         Asm->Begin = Entry->Expr.Str.Ptr;
         Asm->End = Entry->Expr.Str.Ptr;
         Asm->LineStart = Entry->Expr.Str.Ptr - Entry->Expr.Offset + 1;
+        Asm->Line = Entry->Expr.Line;
         Asm->Panic = false;
 
         AsmConsumeToken(Asm);
@@ -2054,9 +2122,8 @@ static void AsmResolveIncompleteExprs(Assembler *Asm)
         case PATCH_OPC_BRANCH:
         {
             AsmCheckBranchOffset(Asm, Entry->VirtualLocation, &NewExpr);
-            u32 PC = Entry->Location;
             u32 Target = NewExpr.Value;
-            i32 BranchOffset = (Target - (PC + 4)) >> 2;
+            i32 BranchOffset = AsmGetBranchOffset(Entry->VirtualLocation, Target);
             AsmPatchOpcode(Location, 0x0000FFFF, BranchOffset);
         } break;
         case PATCH_PSEUDO_I32:
@@ -2100,6 +2167,7 @@ ByteBuffer R3051_Assemble(
 
         .BranchNop = true,
         .LoadNop = true,
+        .JumpNop = true,
     };
     if (!AsmResizeBuffer(&Asm, 1024*4))
         return (ByteBuffer) { 0 };
@@ -2141,6 +2209,8 @@ ByteBuffer R3051_Assemble(
 }
 
 #undef ASM_NOP
+#undef ASM_JR
+#undef ASM_RET
 
 #ifdef STANDALONE
 #undef STANDALONE

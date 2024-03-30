@@ -183,12 +183,11 @@ void R3051_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
         case 1: /* bcond */
         {
             uint RtBits = REG(Instruction, RT);
-            u32 BranchOffset = (i32)(i16)(Instruction & 0xFFFF);
+            i32 BranchOffset = (i32)(i16)(Instruction & 0xFFFF)*4;
             u32 DelaySlotAddr = CurrentPC + 4;
             const char *Rs = RegName[REG(Instruction, RS)];
             const char *Mnemonic = "???";
 
-            BranchOffset <<= 2;
             switch (RtBits)
             {
             case 000: Mnemonic = "bltz"; break;
@@ -227,20 +226,19 @@ void R3051_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
             };
             const char *Rs = RegName[REG(Instruction, RS)];
             const char *Rt = RegName[REG(Instruction, RT)];
-            u32 DelaySlotAddr = CurrentPC + 4;
-            u32 BranchOffset = (i32)(i16)(Instruction & 0xFFFF);
-            BranchOffset <<= 2;
+            i32 DelaySlotAddr = CurrentPC + 4;
+            i32 BranchOffset = (i32)(i16)(Instruction & 0xFFFF)*4;
 
             if (OpcodeMode < 6) /* reg-reg comparison */
             {
                 snprintf(OutBuffer, OutBufferSize, "%s %s, %s, 0x%08x", 
-                    MnemonicTable[OpcodeMode], Rs, Rt, DelaySlotAddr + BranchOffset
+                    MnemonicTable[OpcodeMode], Rs, Rt, (u32)(DelaySlotAddr + BranchOffset)
                 );
             }
             else /* reg-zero, NOTE: the comparison type is different, can't use reg-reg comparison */
             {
                 snprintf(OutBuffer, OutBufferSize, "%s %s, 0x%08x", 
-                    MnemonicTable[OpcodeMode], Rs, DelaySlotAddr + BranchOffset
+                    MnemonicTable[OpcodeMode], Rs, (u32)(DelaySlotAddr + BranchOffset)
                 );
             }
         } break;
@@ -422,7 +420,7 @@ int main(int argc, char **argv)
         char Line[64];
         R3051_Disasm(
             Program[i], 
-            i, 
+            i*4, 
             Flags, 
             Line, 
             sizeof Line

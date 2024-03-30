@@ -15,13 +15,14 @@ if exists("b:current_syntax")
   "Mips opcodes
   syn match asmOpcode "\<addi\?u\?\>"
   syn match asmOpcode "\<andi\?\>"
-  syn match asmOpcode "\<beq\>"
+  syn match asmOpcode "\<be[qz]\>"
   syn match asmOpcode "\<bg[et]z\>"
   syn match asmOpcode "\<bl[et]z\>"
   syn match asmOpcode "\<bgezal\>"
   syn match asmOpcode "\<bltzal\>"
-  syn match asmOpcode "\<bne\>"
+  syn match asmOpcode "\<bn[ez]\>"
   syn match asmOpcode "\<break\>"
+  syn match asmOpcode "\<bra\>"
   "TODO: C-group instructions
   "
   syn match asmOpcode "\<divu\?\>"
@@ -54,6 +55,7 @@ if exists("b:current_syntax")
 
   syn match asmOpcode "\<xori\?\>"
   syn match asmOpcode "\<rfe\>"
+  syn match asmOpcode "\<ret\>"
 
   syn match asmHexNumber "0x[_0-9a-fA-F]\+\>"
   syn match asmBinNumber "0b[_01]\+\>"
@@ -61,20 +63,24 @@ if exists("b:current_syntax")
 
   syn match asmLabel "^[a-zA-Z_][a-zA-Z0-9_]*:"
 
-  syn match asmStringError "'[ -~]*'"
-  syn match asmStringError "'[ -~]*$"
+  syn match asmStringError "\"[ -~]*\""
+  syn match asmStringError "\"[ -~]*$"
   syn match asmStringEscape display contained "\\[nrt\"]"
   syn region asmString   start="\"" skip="\\\"" end="\"" contains=asm68kCharError,asmStringEscape
   syn match asmCharError "[^ -~]" contained
 
-  syn keyword asmDirective .org .db .dh .dw .dl .resv .branchNop .loadNop
+  syn keyword asmDirective .org .db .dh .dw .dl .resv .branchNop .loadNop .jumpNop
 
   "Mips registers
   syn match asmRegister   "\$2[0-9]\|\$1[0-9]\|\$3[0-1]\|\$[0-9]"
-
+  syn match asmRegister	  "\$v[01]"
+  syn match asmRegister	  "\$a[0-3]"
+  syn match asmRegister	  "\$t[0-9]"
+  syn match asmRegister	  "\$s[0-7]"
+  syn match asmRegister	  "\$k[0-1]"
+  syn match asmRegister "\$zero\|$at\|$gp\|$sp\|\$fp\|\$ra"
 
   syn match asmComment ";.*"
-
 
   hi def link asmOpcode		Statement
   hi def link asmRegister	Identifier

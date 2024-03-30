@@ -176,7 +176,6 @@ static u32 R3051_InstructionAt(const R3051 *This, int Stage)
 
 static void R3051_ScheduleWriteback(R3051 *This, u32 *Location, u32 Data, int Stage)
 {
-    This->R[0] = 0;
     int CurrentPipeStage = R3051_CurrentPipeStage(This, Stage);
     if (Location && &This->R[0] != Location)
     {
@@ -421,13 +420,11 @@ static Bool8 R3051_Decode(R3051 *This)
         {
             ShouldBranch = (i32)Rs < 0;
             This->R[31] = NextInstructionAddr;
-            R3051_ScheduleWriteback(This, &This->R[31], NextInstructionAddr, DECODE_STAGE);
         } break;
         case 0x11: /* bgezal */
         {
             ShouldBranch = (i32)Rs >= 0; 
             This->R[31] = NextInstructionAddr;
-            R3051_ScheduleWriteback(This, &This->R[31], NextInstructionAddr, DECODE_STAGE);
         } break;
         }
 
@@ -438,7 +435,6 @@ static Bool8 R3051_Decode(R3051 *This)
     case 003: /* jal (jump and link) */
     {
         This->R[31] = NextInstructionAddr;
-        R3051_ScheduleWriteback(This, &This->R[31], NextInstructionAddr, DECODE_STAGE);
         goto j; /* goto is used instead of fallthrough to suppress warning */
     }
     case 002: /* j (jump) */
@@ -850,8 +846,7 @@ static Bool8 R3051_Execute(R3051 *This)
     default: return false;
     }
 
-    if (Rt)
-        R3051_ScheduleWriteback(This, Rt, *Rt, EXECUTE_STAGE);
+    This->R[0] = 0;
     return ExceptionRaisedThisStage;
 }
 
@@ -1025,7 +1020,6 @@ static void R3051_Writeback(R3051 *This)
             break;
         }
         This->R[REG(Instruction, RD)] = This->Hi;
-        This->R[0] = 0;
     } break;
     case 0x00000012: /* mflo */
     {
@@ -1035,7 +1029,6 @@ static void R3051_Writeback(R3051 *This)
             break;
         }
         This->R[REG(Instruction, RD)] = This->Lo;
-        This->R[0] = 0;
     } break;
     }
 
@@ -1044,6 +1037,7 @@ static void R3051_Writeback(R3051 *This)
     {
         *This->WritebackBuffer[CurrentPipeStage].RegRef = This->WritebackBuffer[CurrentPipeStage].Data;
         This->WritebackBuffer[CurrentPipeStage].RegRef = NULL;
+        This->R[0] = 0;
     }
 }
 
@@ -1173,6 +1167,7 @@ typedef enum TestSyscall
 {
     TESTSYS_WRITESTR    = 0x70000000,
     TESTSYS_CLRSCR      = 0x71000000,
+    TESTSYS_EXIT        = 0x72000000,
 } TestSyscall;
 
 typedef struct Vec2i 
@@ -1196,17 +1191,20 @@ typedef struct Buffer
 
 
 
-#define TERM_HEIGHT 24
-#define TERM_WIDTH 80
-#define STATUS_HEIGHT TERM_HEIGHT
+#define STATUS_HEIGHT (24)
 #define STATUS_WIDTH (14*4)
+#define LOG_HEIGHT (8)
+#define LOG_WIDTH STATUS_WIDTH
 #define SEPARATOR_WIDTH 1
 #define SEPARATOR_HEIGHT 1
+#define TERM_HEIGHT (LOG_HEIGHT + STATUS_HEIGHT)
+#define TERM_WIDTH  60
 #define NEWLINE_WIDTH 1
 #define SCREEN_WIDTH (STATUS_WIDTH + SEPARATOR_WIDTH + TERM_WIDTH + SEPARATOR_WIDTH + NEWLINE_WIDTH)
 #define SCREEN_HEIGHT (2*SEPARATOR_HEIGHT + TERM_HEIGHT)
 
-static char sMasterScreenBuffer[SCREEN_HEIGHT*SCREEN_WIDTH + 1];
+static Bool8 sShouldContinue;
+static char sMasterScreenBuffer[SCREEN_HEIGHT*SCREEN_WIDTH ];
 static ScreenBuffer sMasterWindow = {
     .Width = SCREEN_WIDTH,
     .Height = SCREEN_HEIGHT,
@@ -1229,8 +1227,22 @@ static ScreenBuffer sStatusWindow = {
     .Height = STATUS_HEIGHT,
     .BufferSizeBytes = sizeof sMasterScreenBuffer,
 };
+static ScreenBuffer sLogWindow = {
+    .Buffer = sMasterScreenBuffer,
+    .XOffset = 0,
+    .YOffset = STATUS_HEIGHT + SEPARATOR_HEIGHT,
+    .Width = LOG_WIDTH,
+    .Height = LOG_HEIGHT,
+    .BufferSizeBytes = sizeof sMasterScreenBuffer
+};
 
 
+
+#define SCREEN_PRINTF(pScreen, uintFlags, ...) do {\
+    char Buf[256];\
+    snprintf(Buf, sizeof Buf, __VA_ARGS__);\
+    ScreenWriteStr(pScreen, Buf, sizeof Buf, uintFlags);\
+} while (0)
 
 static char *ScreenGetWritePtr(ScreenBuffer *Screen, int x, int y)
 {
@@ -1334,6 +1346,7 @@ static void ScreenInit(void)
     }
     ScreenClear(&sStatusWindow, ' ');
     ScreenClear(&sTerminalWindow, ' ');
+    ScreenClear(&sLogWindow, ' ');
     sMasterScreenBuffer[sizeof sMasterScreenBuffer - 1] = '\0';
 }
 
@@ -1369,16 +1382,33 @@ static u8 *ReadBinaryFile(const char *FileName, iSize *OutFileSize, iSize ExtraS
 
 
 
+static u32 TranslateAddr(u32 LogicalAddr)
+{
+    switch (LogicalAddr)
+    {
+    case TESTSYS_WRITESTR:
+    case TESTSYS_EXIT:
+    case TESTSYS_CLRSCR:
+    {
+        return LogicalAddr;
+    } break;
+    default: return LogicalAddr - R3051_RESET_VEC;
+    }
+}
+
 static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
 {
     Buffer *Buf = UserData;
-    Addr -= R3051_RESET_VEC;
-    if (Addr == (u32)((u32)TESTSYS_WRITESTR - R3051_RESET_VEC))
+    Addr = TranslateAddr(Addr);
+    if (Addr == (u32)TESTSYS_WRITESTR)
     {
         Data -= R3051_RESET_VEC;
         if (Data >= Buf->Size)
         {
-            printf("Invalid string address: 0x%08x\n", Data + R3051_RESET_VEC);
+            SCREEN_PRINTF(&sLogWindow, WRAP_X, 
+                "Invalid string address: 0x%08x\n", 
+                Data + R3051_RESET_VEC
+            );
         }
         else
         {
@@ -1386,9 +1416,13 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
             ScreenWriteStr(&sTerminalWindow, (const char *)&Buf->Ptr[Data], MaxLength, false);
         }
     }
-    else if (Addr == (u32)((u32)TESTSYS_CLRSCR - R3051_RESET_VEC))
+    else if (Addr == (u32)TESTSYS_CLRSCR)
     {
         ScreenClear(&sTerminalWindow, ' ');
+    }
+    else if (Addr == (u32)TESTSYS_EXIT)
+    {
+        sShouldContinue = false;
     }
     else if (Addr + Size <= Buf->Size)
     {
@@ -1400,14 +1434,17 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
     }
     else
     {
-        printf("Out of bound write to 0x%08x with %x (size %d)\n", Addr + R3051_RESET_VEC, Data, Size);
+        SCREEN_PRINTF(&sLogWindow, WRAP_X, 
+            "Out of bound write to 0x%08x with %x (size %d)\n", 
+            Addr + R3051_RESET_VEC, Data, Size
+        );
     }
 }
 
 static u32 MipsRead(void *UserData, u32 Addr, R3051_DataSize Size)
 {
     Buffer *Buf = UserData;
-    Addr -= R3051_RESET_VEC;
+    Addr = TranslateAddr(Addr);
     if (Addr + Size <= Buf->Size)
     {
         u32 Data = 0;
@@ -1419,7 +1456,10 @@ static u32 MipsRead(void *UserData, u32 Addr, R3051_DataSize Size)
     }
     else
     {
-        printf("Out of bound read at 0x%08x, size = %d\n", Addr + R3051_RESET_VEC, Size);
+        SCREEN_PRINTF(&sLogWindow, WRAP_X,
+            "Out of bound read at 0x%08x, size = %d\n", 
+            Addr + R3051_RESET_VEC, Size
+        );
     }
     return 0;
 }
@@ -1442,19 +1482,79 @@ static Bool8 ProcessCLI(R3051 *Mips)
     return 'q' != Input;
 }
 
+static void UpdateDisassembly(ScreenBuffer *Screen, const R3051 *Mips, int StartX, int StartY)
+{
+#define NUM_INS 10
+    typedef struct DisasmInfo 
+    {
+        char Opc[64];
+        u32 Instruction;
+        u32 Addr;
+    } DisasmInfo;
+
+    static DisasmInfo Disasm[NUM_INS] = { 0 };
+    if (!IN_RANGE(Disasm[0].Addr, Mips->PC, Disasm[NUM_INS - 1].Addr))
+    {
+        const Buffer *Buf = Mips->UserData;
+        u32 CurrentPC = Mips->PC;
+        for (int i = 0; i < NUM_INS; i++)
+        {
+            u32 PhysAddr = TranslateAddr(CurrentPC);
+            if (PhysAddr + 4 <= Buf->Size)
+            {
+                u32 Instruction;
+                memcpy(&Instruction, Buf->Ptr + PhysAddr, sizeof Instruction);
+                R3051_Disasm(
+                    Instruction, 
+                    CurrentPC,
+                    0,
+                    Disasm[i].Opc, 
+                    sizeof Disasm[i].Opc
+                );
+                Disasm[i].Instruction = Instruction;
+                Disasm[i].Addr = CurrentPC;
+                CurrentPC += 4;
+            }
+            else
+            {
+                Disasm[i].Addr = CurrentPC;
+                Disasm[i].Instruction = 0;
+                snprintf(Disasm[i].Opc, sizeof Disasm[i].Opc, "???");
+            }
+        }
+    }
+
+    ScreenMoveWriteCursorTo(Screen, StartX, StartY);
+    for (int i = 0; i < NUM_INS; i++)
+    {
+        const char *Pointer = "   ";
+        if (Mips->PC == Disasm[i].Addr)
+            Pointer = "PC>";
+        else if (Mips->PC - 4*sizeof(Disasm[0].Instruction) == Disasm[i].Addr)
+            Pointer = "wb>";
+        SCREEN_PRINTF(Screen, 0, 
+            "%s %08X:  %08X  %s\n", 
+            Pointer, Disasm[i].Addr, Disasm[i].Instruction, Disasm[i].Opc
+        );
+    }
+#undef NUM_INS
+}
+
 static void DumpState(const R3051 *Mips)
 {
     static R3051 LastState;
     int RegisterCount = STATIC_ARRAY_SIZE(Mips->R);
     int RegisterBoxPerLine = 4;
-    int y = 1;
+    int y = 0;
 
     /* dump regs */
     ScreenClear(&sStatusWindow, ' ');
     const char *Display = "========== Registers ==========";
-    ScreenMoveWriteCursorTo(&sStatusWindow, (STATUS_WIDTH - strlen(Display)) / 2, 0);
+    int DisplayX = (sStatusWindow.Width - strlen(Display)) / 2;
+    ScreenMoveWriteCursorTo(&sStatusWindow, DisplayX, y);
     ScreenWriteStr(&sStatusWindow, Display, INT64_MAX, false);
-    for (; y < 1 + RegisterCount / RegisterBoxPerLine; y++)
+
+    for (y = 1; y < 1 + RegisterCount / RegisterBoxPerLine; y++)
     {
         for (int x = 0; x < RegisterBoxPerLine; x++)
         {
@@ -1462,74 +1562,19 @@ static void DumpState(const R3051 *Mips)
             int BoxPos = x*StrLen;
 
             int RegisterIndex = (y - 1)*RegisterBoxPerLine + x;
-            char Str[64];
-            if (Mips->R[RegisterIndex] == LastState.R[RegisterIndex])
-                snprintf(Str, sizeof Str, " R%02d %08x ", RegisterIndex, Mips->R[RegisterIndex]);
-            else
-                snprintf(Str, sizeof Str, "[R%02d=%08x]", RegisterIndex, Mips->R[RegisterIndex]);
-
             ScreenMoveWriteCursorTo(&sStatusWindow, BoxPos, y);
-            ScreenWriteStr(&sStatusWindow, Str, StrLen, false);
+            if (Mips->R[RegisterIndex] == LastState.R[RegisterIndex])
+                SCREEN_PRINTF(&sStatusWindow, 0,  " R%02d %08x ", RegisterIndex, Mips->R[RegisterIndex]);
+            else SCREEN_PRINTF(&sStatusWindow, 0, "[R%02d=%08x]", RegisterIndex, Mips->R[RegisterIndex]);
         }
     }
 
+    Display = "========== Disassembly ==========";
+    DisplayX = (sStatusWindow.Width - strlen(Display)) / 2;
+    ScreenMoveWriteCursorTo(&sStatusWindow, DisplayX, y++);
+    ScreenWriteStr(&sStatusWindow, Display, INT32_MAX, 0);
 
-    /* dump pipeline */
-    char DisassembledLine[128];
-    char DisassembledInstruction[64];
-    Bool8 AlreadyDecoded = false, 
-          AlreadyExecuted = false;
-
-    ScreenNewline(&sStatusWindow);
-    Display = "========== Pipeline ==========";
-    ScreenMoveWriteCursorTo(&sStatusWindow, (STATUS_WIDTH - strlen(Display)) / 2, sStatusWindow.WriteCursor.y);
-    ScreenWriteStr(&sStatusWindow, Display, INT64_MAX, false);
-    for (int i = 0; i < R3051_PIPESTAGE_COUNT; i++)
-    {
-        R3051_Disasm(
-            Mips->Instruction[i], 
-            Mips->PCSave[i], 
-            DISASM_IMM16_AS_HEX, 
-            DisassembledInstruction, 
-            sizeof(DisassembledInstruction)
-        );
-
-        const char *StagePtr = "   ";
-        if (Mips->PC - 4 == Mips->PCSave[i])
-            StagePtr = "fi>";
-        else if (Mips->PC - 4*(2) == Mips->PCSave[i] && !AlreadyDecoded)
-        {
-            StagePtr = "di ";
-            AlreadyDecoded = true;
-        }
-        else if (Mips->PC - 4*3 == Mips->PCSave[i] && !AlreadyExecuted)
-        {
-            StagePtr = "ex ";
-            AlreadyExecuted = true;
-        }
-
-        if (LastState.Instruction[i] == Mips->Instruction[i])
-        {
-            snprintf(DisassembledLine, sizeof DisassembledLine, 
-                "%s    PC=%08x  %08x: %s", 
-                StagePtr, 
-                Mips->PCSave[i], Mips->Instruction[i], 
-                DisassembledInstruction
-            );
-        }
-        else
-        {
-            snprintf(DisassembledLine, sizeof DisassembledLine, 
-                "%s | [PC=%08x]:%08x: %s", 
-                StagePtr, 
-                Mips->PCSave[i], Mips->Instruction[i], 
-                DisassembledInstruction
-            );
-        }
-
-        ScreenNewline(&sStatusWindow);
-        ScreenWriteStr(&sStatusWindow, DisassembledLine, INT64_MAX, false);
-    }
+    UpdateDisassembly(&sStatusWindow, Mips, 0, y + 1);
     LastState = *Mips;
 
     printf("%s", sMasterScreenBuffer);
@@ -1545,8 +1590,7 @@ int main(int argc, char **argv)
     Bool8 CLIDisable = argc == 3;
 
     Buffer Buf;
-    Buf.Ptr = ReadBinaryFile(argv[1], &Buf.Size, 4096);
-    Buf.Size += 4096;
+    Buf.Ptr = ReadBinaryFile(argv[1], &Buf.Size, 0);
     if (NULL == Buf.Ptr)
         return 1;
 
@@ -1557,19 +1601,18 @@ int main(int argc, char **argv)
         MipsVerify, MipsVerify
     );
 
-    Bool8 ShouldContinue = true;
+    sShouldContinue = true;
     do {
         R3051_StepClock(&Mips);
         DumpState(&Mips);
         if (!CLIDisable)
         {
-            ShouldContinue = ProcessCLI(&Mips);
+            sShouldContinue = sShouldContinue && ProcessCLI(&Mips);
         }
-    } while (ShouldContinue);
+    } while (sShouldContinue);
 
     free(Buf.Ptr);
     return 0;
-
 }
 #endif /* STANDALONE */
 
