@@ -43,15 +43,15 @@ ResetEnd:
 
 .org START
     jal TestBranch
-    bnz $v0, Fail
+    bnz $v0, Fail           ; if (0 != arith test result) -> failed
 
     jal TestLoad
-    bnz $v0, Fail           ; if (0 != arith test result) -> failed
+    bnz $v0, Fail
 
     jal TestStore
     bnz $v0, Fail
 
-    jal TestArith
+    jal TestImmArith
     bnz $v0, Fail           
 
     la $a0, TestFinished_Msg ; else success, print msg 
@@ -357,11 +357,11 @@ TestStore:
 ;   addiu, sltiu, slti, andi, ori, xori, lui
 ; destroys: $a0, $a1, $t0, $t1, $t2, $v0
 .jumpNop 0 
-TestArith:
-    la $a0, TestArith_Failed_Msg
+TestImmArith:
+    la $a0, TestImmArith_Failed_Msg
 
     ; test r0:
-    la $a1, TestArith_R0_Msg
+    la $a1, TestImmArith_R0_Msg
     move $1, $zero
     move $2, $zero
     addiu $0, $0, 10                ; r0 = 0 (should not be 10)
@@ -369,48 +369,48 @@ TestArith:
     bne $1, $0, TestFailed          ; assert r1 == r0
 
     ; test addiu: sign extension
-    la $a1, TestArith_AddiuSex_Msg
+    la $a1, TestImmArith_AddiuSex_Msg
     addiu $t0, $zero, -1            ; t0 =  0xFFFF_FFFF
     addiu $t0, 1                    ; t0 += 0x0000_0001
     bne $t0, $zero, TestFailed      ; assert t0 == 0
 
     ; test ori: zero extension
-    la $a1, TestArith_OriZex_Msg
+    la $a1, TestImmArith_OriZex_Msg
     ori $t0, $zero, 0xFFFF          ; t0 = 0x0000_FFFF
     addiu $t1, $zero, -1            ; t1 = 0xFFFF_FFFF
     beq $t0, $t1, TestFailed        ; assert t0 != t1 
 
     ; test lui, andi: 
-    la $a1, TestArith_LuiAndi_Msg
+    la $a1, TestImmArith_LuiAndi_Msg
     ori $t0, $zero, 0xFFFF          ; t0 =  0x0000_FFFF
     lui $t0, 0xFFFF                 ; t0 =  0xFFFF_0000
     andi $t0, $t0, 0xFFFF           ; t0 &= 0x0000_FFFF
     bne $t0, $zero, TestFailed      ; assert t0 == 0
 
     ; test xori:
-    la $a1, TestArith_Xori_Msg       
+    la $a1, TestImmArith_Xori_Msg       
     addiu $t0, $zero, -1            ; t0 =  0xFFFF_FFFF
     xori $t0, 0xF00F                ; t0 ^= 0x0000_F00F
     la $t1, 0xFFFF_0FF0             ; expected 
     bne $t1, $t0, TestFailed        ; assert t0 == 0xFFFF_0FF0
 
     ; test slti: true case 
-    la $a1, TestArith_Slti_Msg
+    la $a1, TestImmArith_Slti_Msg
     slti $t0, $zero, 1              ; t1 = 0 < 1
     bez $t0, TestFailed             ; assert condition true
 
     ; test slti: false case, negative
-    la $a1, TestArith_SltiNeg_Msg
+    la $a1, TestImmArith_SltiNeg_Msg
     slti $t0, $zero, -1             ; t0 = 0 < -1
     bnz $t0, TestFailed             ; assert condition false
 
     ; test sltiu: true case, unsigned
-    la $a1, TestArith_SltiuUnsigned_Msg
+    la $a1, TestImmArith_SltiuUnsigned_Msg
     sltiu $t0, $zero, -1            ; t0 = 0 < 0xFFFF_FFFF
     bez $t0, TestFailed             ; assert condition true
 
     ; test sltiu: false case, sign extension
-    la $a1, TestArith_SltiuSex_Msg
+    la $a1, TestImmArith_SltiuSex_Msg
     li $t1, -1
     sltiu $t0, $t1, (-1 << 15)      ; t0 = 0xFFFF_FFFF < 0xFFFF_8000
     bnz $t0, TestFailed             ; assert condition false
@@ -424,16 +424,16 @@ DataSection:
 TestPrerequisite_Failed_Msg:    .db "Test preqrequisite failed: jal.\n", 0
 TestFinished_Msg:               .db "All tests passed.\n", 0
 
-TestArith_Failed_Msg:           .db "Arithmetic test failed: ", 0
-TestArith_R0_Msg:               .db "R0 should always be zero.\n", 0
-TestArith_AddiuSex_Msg:         .db "addiu should sign extend its immediate value.\n", 0
-TestArith_OriZex_Msg:           .db "ori should zero extend its immediate value.\n", 0
-TestArith_LuiAndi_Msg:          .db "lui, andi.\n", 0
-TestArith_Xori_Msg:             .db "xori should zero extend its immediate value.\n", 0
-TestArith_Slti_Msg:             .db "slti.\n", 0
-TestArith_SltiNeg_Msg:          .db "slti failed on negative values.\n", 0
-TestArith_SltiuUnsigned_Msg:    .db "Operands of sltiu should be treated as unsigned.\n", 0
-TestArith_SltiuSex_Msg:         .db "Immediate of sltiu must be sign extended.\n", 0
+TestImmArith_Failed_Msg:           .db "Arithmetic test failed: ", 0
+TestImmArith_R0_Msg:               .db "R0 should always be zero.\n", 0
+TestImmArith_AddiuSex_Msg:         .db "addiu should sign extend its immediate value.\n", 0
+TestImmArith_OriZex_Msg:           .db "ori should zero extend its immediate value.\n", 0
+TestImmArith_LuiAndi_Msg:          .db "lui, andi.\n", 0
+TestImmArith_Xori_Msg:             .db "xori should zero extend its immediate value.\n", 0
+TestImmArith_Slti_Msg:             .db "slti.\n", 0
+TestImmArith_SltiNeg_Msg:          .db "slti failed on negative values.\n", 0
+TestImmArith_SltiuUnsigned_Msg:    .db "Operands of sltiu should be treated as unsigned.\n", 0
+TestImmArith_SltiuSex_Msg:         .db "Immediate of sltiu must be sign extended.\n", 0
 
 TestBranch_Failed_Msg:          .db "Branch test failed: ", 0
 TestBranch_Bltz_Msg:            .db "bltz.\n", 0
