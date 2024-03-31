@@ -96,6 +96,8 @@ TestFailed:
 ; assumes working:  beq, bne
 ; returns:          $v0: 0 for success, 1 for failure
 ; destroys:         $t0..9, $a0..1, $v0
+.branchNop 0
+.jumpNop 0
 TestBranch:
     move $v0, $zero                 ; assumes test is going to be successful
     la $a0, TestBranch_Failed_Msg
@@ -113,112 +115,170 @@ TestBranch:
 
     ; test bltz
     la $a1, TestBranch_Bltz_Msg
-    bltz $t3, TestBranch_Bltz_Ok0
+    move $t7, $zero                 ; branch delday counter 
+    bltz $t3, TestBranch_Bltz_Ok0   ; assert (i32)(0x8000_0000) < 0
+        addiu $t7, 1
         bra TestFailed
+        nop
 TestBranch_Bltz_Ok0:
-    bltz $t2, TestBranch_Bltz_Ok1
+    bltz $t2, TestBranch_Bltz_Ok1   ; assert (i32)0xFFFF_FFFF < 0
+        addiu $t7, 1
         bra TestFailed
+        nop
 TestBranch_Bltz_Ok1:
-    bltz $t4, TestFailed
-    bltz $t9, TestFailed
-    bltz $t8, TestFailed
+    bltz $t4, TestFailed            ; assert !( (i32)0x7FFF_FFFF < 0 )
+        addiu $t7, 1
+    bltz $t9, TestFailed            ; assert !( 1 < 0 )
+        addiu $t7, 1
+    bltz $t8, TestFailed            ; assert !( 0 < 0 )
+        addiu $t7, 1
+    li $t6, 5
+    la $a1, TestBranch_BltzDelaySlot_Msg
+    bne $t7, $t6, TestFailed        ; assert branch delay counter == 5
+        nop
 
     ; test bgez
     la $a1, TestBranch_Bgez_Msg
-    bgez $t8, TestBranch_Bgez_Ok0
+    move $t7, $zero
+    bgez $t8, TestBranch_Bgez_Ok0   ; assert 0 >= 0
+        addiu $t7, 1
         bra TestFailed
+        nop
 TestBranch_Bgez_Ok0:
-    bgez $t9, TestBranch_Bgez_Ok1
+    bgez $t9, TestBranch_Bgez_Ok1   ; assert 1 >= 0
+        addiu $t7, 1
         bra TestFailed
+        nop
 TestBranch_Bgez_Ok1:
-    bgez $t4, TestBranch_Bgez_Ok2
+    bgez $t4, TestBranch_Bgez_Ok2   ; assert (i32)0x7FFF_FFFF >= 0
+        addiu $t7, 1
         bra TestFailed
+        nop
 TestBranch_Bgez_Ok2:
-    bgez $t2, TestFailed
-    bgez $t3, TestFailed
+    bgez $t2, TestFailed            ; assert !( (i32)0xFFFF_FFFF >= 0 )
+        addiu $t7, 1
+    bgez $t3, TestFailed            ; assert !( (i32)0x8000_0000 >= 0 )
+        addiu $t7, 1
+    li $t6, 5
+    la $a1, TestBranch_BgezDelaySlot_Msg
+    bne $t7, $t6, TestFailed        ; assert branch delay counter == 5
+        nop
 
     ; test blez
     la $a1, TestBranch_Blez_Msg
-    blez $t8, TestBranch_Blez_Ok0
+    move $t7, $zero
+    blez $t8, TestBranch_Blez_Ok0   ; assert 0 <= 0
+        addiu $t7, 1
         bra TestFailed
+        nop
 TestBranch_Blez_Ok0:
-    blez $t2, TestBranch_Blez_Ok1
+    blez $t2, TestBranch_Blez_Ok1   ; assert (i32)0xFFFF_FFFF <= 1
+        addiu $t7, 1
         bra TestFailed
+        nop
 TestBranch_Blez_Ok1:
-    blez $t3, TestBranch_Blez_Ok3
+    blez $t3, TestBranch_Blez_Ok3   ; assert (i32)0x8000_0000 <= 0
+        addiu $t7, 1
         bra TestFailed
+        nop
 TestBranch_Blez_Ok3:
-    blez $t9, TestFailed
-    blez $t4, TestFailed
+    blez $t9, TestFailed            ; assert !( 1 <= 0 )
+        addiu $t7, 1
+    blez $t4, TestFailed            ; assert !( (i32)0x7FFF_FFFF <= 0 )
+        addiu $t7, 1
+    li $t6, 5
+    la $a1, TestBranch_BlezDelaySlot_Msg
+    bne $t7, $t6, TestFailed        ; assert branch delay counter == 5
+
 
     ; test bgtz
     la $a1, TestBranch_Bgtz_Msg
-    bgtz $t9, TestBranch_Bgtz_Ok0
+    move $t7, $zero                 ; branch delay counter
+    bgtz $t9, TestBranch_Bgtz_Ok0   ; assert 1 > 0
+        addiu $t7, 1
         bra TestFailed
+        nop
 TestBranch_Bgtz_Ok0:
-    bgtz $t4, TestBranch_Bgtz_Ok1
+    bgtz $t4, TestBranch_Bgtz_Ok1   ; assert (i32)0x7FFF_FFFF > 0
+        addiu $t7, 1
         bra TestFailed
+        nop
 TestBranch_Bgtz_Ok1:
-    bgtz $t8, TestFailed
-    bgtz $t2, TestFailed
-    bgtz $t3, TestFailed
+    bgtz $t8, TestFailed            ; assert !( 0 > 0 )
+        addiu $t7, 1
+    bgtz $t2, TestFailed            ; assert !( (i32)0xFFFF_FFFF > 0 )
+        addiu $t7, 1
+    bgtz $t3, TestFailed            ; assert !( (i32)0x8000_0000 < 0 )
+        addiu $t7, 1
+    li $t6, 5
+    la $a1, TestBranch_BgtzDelaySlot_Msg
+    bne $t7, $t6, TestFailed        ; assert branch delay counter == 5
 
-.branchNop 0
-.jumpNop 0
-    ; test bltzal
     move $t5, $ra                       ; save return reg 
+    ; test bltzal
     la $a3, TestBranch_Bltzal_Msg
     la $a2, TestBranch_BltzalRetAddr_Msg
-
-    bltzal $t2, TestBranch_Bltzal_Ok1
-        move $t6, $ra                   ; save ret addr
+    move $t7, $zero                     ; branch delay counter
+    bltzal $t2, TestBranch_Bltzal_Ok1   ; assert (i32)0xFFFF_FFFF < 0
+        addiu $t7, 1
     TestBranch_Bltzal_Addr0:
+        move $t6, $ra
         jal TestFailed
-        move $a1, $a3                   ; set instruction error msg
-        move $ra, $t6                   ; restore ret addr
+        move $a1, $a3                   ; set instruction error msg (in delay slot)
+        move $ra, $t6
 TestBranch_Bltzal_Ok1:
         la $t6, TestBranch_Bltzal_Addr0
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bltzal_Addr0
-        move $a1, $a2                       ; set ret addr error msg
+        move $a1, $a2
 
-    bltzal $t3, TestBranch_Bltzal_Ok2
-        move $t6, $ra
+    bltzal $t3, TestBranch_Bltzal_Ok2   ; assert (i32)0x8000_0000 < 0
+        addiu $t7, 1
     TestBranch_Bltzal_Addr1:
+        move $t6, $ra
         jal TestFailed
-        move $a1, $a3                    ; instruction error msg
+        move $a1, $a3                   ; NOTE: arg in delay slot
         move $ra, $t6
 TestBranch_Bltzal_Ok2:
         la $t6, TestBranch_Bltzal_Addr1
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bltzal_Addr1
         move $a1, $a2                   ; ret addr error msg
 
-    bltzal $t8, TestFailed
-        move $a1, $a3                   ; instruction error msg
+    move $a1, $a3                       ; instruction error msg
+    bltzal $t8, TestFailed              ; assert !( 0 < 0 ) 
+        addiu $t7, 1
     TestBranch_Bltzal_Addr2:
         la $t6, TestBranch_Bltzal_Addr2
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bltzal_Addr2
-        move $a1, $a2                   ; ret addr error msg
+        move $a1, $a2                   ; ret addr error msg (in delay slot)
 
-    bltzal $t9, TestFailed
-        move $a1, $a3                   ; instruction error msg
+    move $a1, $a3                       ; instruction error msg
+    bltzal $t9, TestFailed              ; assert !( 1 < 0 )
+        addiu $t7, 1
     TestBranch_Bltzal_Addr3:
         la $t6, TestBranch_Bltzal_Addr3
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bltzal_Addr3
-        move $a1, $a2                   ; ret addr error msg
+        move $a1, $a2                   ; ret addr error msg (in delay slot
 
-    bltzal $t4, TestFailed
-        move $a1, $a3                   ; instruction error msg
+    move $a1, $a3                       ; instruction error msg
+    bltzal $t4, TestFailed              ; assert !( 1 < 0 ) 
+        addiu $t7, 1
     TestBranch_Bltzal_Addr4:
         la $t6, TestBranch_Bltzal_Addr4
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bltzal_Addr4
-        move $a1, $a2                   ; ret addr error msg
+        move $a1, $a2                   ; ret addr error msg (in delay slot)
+    li $t6, 5
+    la $a1, TestBranch_BltzalDelaySlot_Msg
+    bne $t6, $t7, TestFailed            ; assert branch delay counter == 5
+        nop
 
     ; test bgezal
     la $a3, TestBranch_Bgezal_Msg
     la $a2, TestBranch_BgezalRetAddr_Msg
+    move $t7, $zero
     bgezal $t8, TestBranch_Bgezal_Ok0
-        move $t6, $ra
+        addiu $t7, 1
     TestBranch_Bgezal_Addr0:
+        move $t6, $ra
         jal TestFailed
         move $a1, $a3
         move $ra, $t6
@@ -228,8 +288,9 @@ TestBranch_Bgezal_Ok0:
         move $a1, $a2
 
     bgezal $t9, TestBranch_Bgezal_Ok1
-        move $t6, $ra
+        addiu $t7, 1
     TestBranch_Bgezal_Addr1:
+        move $t6, $ra
         jal TestFailed
         move $a1, $a3
         move $ra, $t6
@@ -239,8 +300,9 @@ TestBranch_Bgezal_Ok1:
         move $a1, $a2
     
     bgezal $t4, TestBranch_Bgezal_Ok2
-        move $t6, $ra
+        addiu $t7, 1
     TestBranch_Bgezal_Addr2:
+        move $t6, $ra
         jal TestFailed
         move $a1, $a3
         move $ra, $t6
@@ -249,19 +311,25 @@ TestBranch_Bgezal_Ok2:
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bgezal_Addr2
         move $a1, $a2
 
-    bgezal $t2, TestFailed
     move $a1, $a3
+    bgezal $t2, TestFailed
+        addiu $t7, 1
     TestBranch_Bgezal_Addr3:
         la $t6, TestBranch_Bgezal_Addr3
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bgezal_Addr3
         move $a1, $a2
 
-    bgezal $t3, TestFailed
     move $a1, $a3
+    bgezal $t3, TestFailed
+        addiu $t7, 1
     TestBranch_Bgezal_Addr4:
         la $t6, TestBranch_Bgezal_Addr4
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bgezal_Addr4
         move $a1, $a2
+    li $t6, 5
+    la $a1, TestBranch_BgezalDelaySlot_Msg
+    bne $t6, $t7, TestFailed            ; assert branch delay counter == 5
+        nop
 .branchNop 1
 .jumpNop 1
 
@@ -376,6 +444,14 @@ TestBranch_Bltzal_Msg:          .db "bltzal.\n", 0
 TestBranch_Bgezal_Msg:          .db "bgezal.\n", 0
 TestBranch_BltzalRetAddr_Msg:   .db "bltzal has incorrect return addr.\n", 0
 TestBranch_BgezalRetAddr_Msg:   .db "bgezal has incorrect return addr.\n", 0
+
+TestBranch_BltzDelaySlot_Msg:   .db "bltz delay slot.\n", 0
+TestBranch_BgezDelaySlot_Msg:   .db "bgezu delay slot.\n", 0
+TestBranch_BlezDelaySlot_Msg:   .db "bltez delay slot.\n", 0
+TestBranch_BgtzDelaySlot_Msg:   .db "bgtz delay slot.\n", 0
+TestBranch_BltzalDelaySlot_Msg: .db "bltzal delay slot.\n", 0
+TestBranch_BgezalDelaySlot_Msg: .db "bgezal delay slot.\n", 0
+
 
 
 

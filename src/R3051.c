@@ -529,7 +529,7 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, B
     case 003: /* sra */
     {
         *Rd = Rt & 0x80000000? 
-            ~(~(i32)Rt >> SHAMT(Instruction))
+            (u32)~(~(i32)Rt >> SHAMT(Instruction))
             : Rt >> SHAMT(Instruction);
     } break;
     case 004: /* sllv */
@@ -546,7 +546,7 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, B
     {
         Rs &= 0x1F;
         *Rd = Rt & 0x80000000?
-            ~(~(i32)Rt >> Rs) 
+            (u32)~(~(i32)Rt >> Rs) 
             : Rt >> Rs;
     } break;
 
@@ -871,9 +871,9 @@ static Bool8 R3051_Memory(R3051 *This)
     /* verify memory addr */
     if (!This->VerifyDataAddr(This->UserData, Addr))
     {
-        if ((OP(Instruction) & 070) == 4) /* load instruction */
-            goto LoadAddrError;
-        else goto StoreAddrError;
+        if ((OP_GROUP(Instruction) & 0x4)) /* store instruction */
+            goto StoreAddrError;
+        else goto LoadAddrError;
     }
 
     /* NOTE: load instructions do not perform writeback to rt immediately, 
@@ -1426,7 +1426,7 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
     }
     else if (Addr + Size <= Buf->Size)
     {
-        for (int i = 0; i < Size; i++)
+        for (int i = 0; i < (int)Size; i++)
         {
             Buf->Ptr[Addr + i] = Data & 0xFF;
             Data >>= 8;
@@ -1448,7 +1448,7 @@ static u32 MipsRead(void *UserData, u32 Addr, R3051_DataSize Size)
     if (Addr + Size <= Buf->Size)
     {
         u32 Data = 0;
-        for (int i = 0; i < Size; i++)
+        for (int i = 0; i < (int)Size; i++)
         {
             Data |= (u32)Buf->Ptr[Addr + i] << 8*i;
         }

@@ -1142,7 +1142,7 @@ static AsmExpression AsmBinaryExpr(Assembler *Asm, AsmExpression Lhs)
         {
             /* arithmetic shift right */
             Result.Value = Lhs.Value >> 63? 
-                ~(~(i64)Lhs.Value >> Rhs.Value) 
+                (u64)~(~(i64)Lhs.Value >> Rhs.Value) 
                 : Lhs.Value >> Rhs.Value;
         }
     } break;

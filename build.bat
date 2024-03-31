@@ -5,7 +5,7 @@ set "UNITY_BUILD_FILE=src\Build.c"
 set "APPNAME=PS1Emu.exe"
 
 set "MSVC_INC=/I..\src\Include"
-set "CC_CMD=gcc -O0"
+set "CC_CMD=gcc -O2 -Wall -Wextra -Wpedantic -Wno-missing-braces"
 set "CC_INC=-Isrc\Include"
 
 if "clean"=="%1" (
