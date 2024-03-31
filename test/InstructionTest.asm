@@ -42,23 +42,40 @@ ResetEnd:
 
 
 .org START
-    jal TestBranch
-    bnz $v0, Fail           ; if (0 != arith test result) -> failed
-
+    la $a0, TestStatus_Load_Msg
+    jal PrintStr
     jal TestLoad
-    bnz $v0, Fail
+    bnz $v0, Fail           ; if (0 != arith test result) -> failed
+    la $a0, TestStatus_Ok_Msg
+    jal PrintStr
 
+    la $a0, TestStatus_Store_Msg
+    jal PrintStr
     jal TestStore
     bnz $v0, Fail
+    la $a0, TestStatus_Ok_Msg
+    jal PrintStr
 
+    la $a0, TestStatus_Branch_Msg
+    jal PrintStr
+    jal TestBranch
+    bnz $v0, Fail
+    la $a0, TestStatus_Ok_Msg
+    jal PrintStr
+
+    la $a0, TestStatus_ImmArith_Msg
+    jal PrintStr
     jal TestImmArith
     bnz $v0, Fail           
+    la $a0, TestStatus_Ok_Msg
+    jal PrintStr
 
     la $a0, TestFinished_Msg ; else success, print msg 
     jal PrintStr
 Fail:
     li $t0, SYS_EXIT
     sw $zero, 0($t0)        ; call sys_exit 
+
 InfLoop: 
     bra InfLoop
 
@@ -86,7 +103,7 @@ TestFailed:
         move $a0, $a1
         jal PrintStr
     move $ra, $t1                   ; restore return addr 
-    ori $v0, $zero, 1               ; returns test failed
+    ori $v0, $zero, 1               ; returns test failed (not using jump delay slot here)
     ret
 
 
@@ -338,10 +355,71 @@ TestBranch_Bgezal_Ok2:
 
 
 
-
+.loadNop 0
+.branchNop 0
 TestLoad:
+    li $t9, 1
+    li $t8, -1
+    li $t7, -0x80
+    li $t6, 0x7F
+    li $t1, 0x1337C0DE
+    move $t5, $zero
+
+    ; test lb (signed)
+    la $a0, TestLoad_Lb_Msg
+    la $a1, TestLoad_DelaySlotRead_Msg
+    la $at, TestLoad_Byte
+
+    move $t0, $t1
+    lb $t0, 0($at)
+        bne $t0, $t1, TestFailed    ; NOTE: in delay slot
+    lb $t0, 1($at)
+        bne $t0, $t9, TestFailed
+    lb $t0, 2($at)
+        bne $t0, $t8, TestFailed
+    lb $t0, 3($at)
+        bne $t0, $t7, TestFailed
+    lb $t0, 4($at)
+        bne $t0, $t6, TestFailed
+        nop
+    bne $t0, $t5, TestFailed
+        nop
+
+    la $a1, TestLoad_DelaySlotWrite_Msg
+    lb $t0, 0($at)
+        or $t0, $t1, $zero          ; NOTE: despite delay slot, writes should be in order
+    bne $t0, $t1, TestFailed
+        nop
+
+    ; test lh (signed)
+    ; test lw (signed)
+
+    ; test lbu
+    li $t7, 0x80
+    li $t8, 0xFF
+    la $a1, TestLoad_Lbu_Msg
+    la $at, TestLoad_Byte
+
+    lbu $t0, 0($at)
+    lbu $t0, 1($at)
+        bne $t0, $t9, TestFailed    ; NOTE: in delay slot
+    lbu $t0, 2($at)
+        bne $t0, $t8, TestFailed
+    lbu $t0, 3($at)
+        bne $t0, $t7, TestFailed
+    lbu $t0, 4($at)
+        bne $t0, $t6, TestFailed
+        nop
+    bne $t0, $t5, TestFailed
+        nop
+
+
+    ; test lhu
+
     move $v0, $zero
     ret 
+.loadNop 1
+.branchNop 0
 
 
 
@@ -358,8 +436,6 @@ TestStore:
 ; destroys: $a0, $a1, $t0, $t1, $t2, $v0
 .jumpNop 0 
 TestImmArith:
-    la $a0, TestImmArith_Failed_Msg
-
     ; test r0:
     la $a1, TestImmArith_R0_Msg
     move $1, $zero
@@ -421,19 +497,25 @@ TestImmArith:
 
 
 DataSection:
-TestPrerequisite_Failed_Msg:    .db "Test preqrequisite failed: jal.\n", 0
+TestStatus_Load_Msg:            .db "Load instructions: ", 0
+TestStatus_Store_Msg:           .db "Store instructions: ", 0
+TestStatus_Branch_Msg:          .db "Branch instructions: ", 0
+TestStatus_ImmArith_Msg:        .db "Alu with immediate instructions: ", 0
+TestStatus_Ok_Msg:              .db "OK\n", 0
 TestFinished_Msg:               .db "All tests passed.\n", 0
 
-TestImmArith_Failed_Msg:           .db "Arithmetic test failed: ", 0
-TestImmArith_R0_Msg:               .db "R0 should always be zero.\n", 0
-TestImmArith_AddiuSex_Msg:         .db "addiu should sign extend its immediate value.\n", 0
-TestImmArith_OriZex_Msg:           .db "ori should zero extend its immediate value.\n", 0
-TestImmArith_LuiAndi_Msg:          .db "lui, andi.\n", 0
-TestImmArith_Xori_Msg:             .db "xori should zero extend its immediate value.\n", 0
-TestImmArith_Slti_Msg:             .db "slti.\n", 0
-TestImmArith_SltiNeg_Msg:          .db "slti failed on negative values.\n", 0
-TestImmArith_SltiuUnsigned_Msg:    .db "Operands of sltiu should be treated as unsigned.\n", 0
-TestImmArith_SltiuSex_Msg:         .db "Immediate of sltiu must be sign extended.\n", 0
+TestPrerequisite_Failed_Msg:    .db "Test preqrequisite failed: jal.\n", 0
+
+TestImmArith_Failed_Msg:        .db "Arithmetic test failed: ", 0
+TestImmArith_R0_Msg:            .db "R0 should always be zero.\n", 0
+TestImmArith_AddiuSex_Msg:      .db "addiu should sign extend its immediate value.\n", 0
+TestImmArith_OriZex_Msg:        .db "ori should zero extend its immediate value.\n", 0
+TestImmArith_LuiAndi_Msg:       .db "lui, andi.\n", 0
+TestImmArith_Xori_Msg:          .db "xori should zero extend its immediate value.\n", 0
+TestImmArith_Slti_Msg:          .db "slti.\n", 0
+TestImmArith_SltiNeg_Msg:       .db "slti failed on negative values.\n", 0
+TestImmArith_SltiuUnsigned_Msg: .db "Operands of sltiu should be treated as unsigned.\n", 0
+TestImmArith_SltiuSex_Msg:      .db "Immediate of sltiu must be sign extended.\n", 0
 
 TestBranch_Failed_Msg:          .db "Branch test failed: ", 0
 TestBranch_Bltz_Msg:            .db "bltz.\n", 0
@@ -452,7 +534,21 @@ TestBranch_BgtzDelaySlot_Msg:   .db "bgtz delay slot.\n", 0
 TestBranch_BltzalDelaySlot_Msg: .db "bltzal delay slot.\n", 0
 TestBranch_BgezalDelaySlot_Msg: .db "bgezal delay slot.\n", 0
 
+TestLoad_Lb_Msg:                .db "lb:", 0
+TestLoad_Lbu_Msg:               .db "lbu:", 0
+TestLoad_Lh_Msg:                .db "lh:", 0
+TestLoad_Lhu_Msg:               .db "lhu:", 0
+TestLoad_Lw_Msg:                .db "lw:", 0
+TestLoad_Lwl_Msg:               .db "lwl:", 0
+TestLoad_Lwr_Msg:               .db "lwr:", 0
+TestLoad_DelaySlotRead_Msg:     .db " read in delay slot failed\n", 0
+TestLoad_DelaySlotWrite_Msg:    .db " write in delay slot failed\n", 0
 
+.align 4
+TestLoad_WordDir:   .dw 0xdeadbeef, 0xbaadf00d
+TestLoad_Word:      .dw 1, -1, 0x8000_0000, 0x7FFF_FFFF, 0
+TestLoad_Half:      .dh 1, -1, 0x8000, 0x7FFF, 0
+TestLoad_Byte:      .db 1, -1, 0x80, 0x7F, 0
 
 
 FreeMemorySection:

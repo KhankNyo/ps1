@@ -55,6 +55,7 @@ typedef enum AsmTokenType
     TOK_MINUS, 
     TOK_STAR, 
     TOK_SLASH,
+    TOK_TILDE,
     TOK_PERCENT,
     TOK_AMPERSAND,
     TOK_BAR,
@@ -80,6 +81,7 @@ typedef enum AsmTokenType
     TOK_DH,
     TOK_DW,
     TOK_DL,
+    TOK_ALIGN,
 
     TOK_INS_PSEUDO_MOVE,
     TOK_INS_PSEUDO_LI,
@@ -720,6 +722,9 @@ static AsmToken AsmDirectiveToken(Assembler *Asm)
         .Type = Typ,\
     }
     static const AsmKeyword Keywords['z' - 'a'][8] = {
+        ['a' - 'a'] = {
+            DIRECTIVE("align", TOK_ALIGN),
+        },
         ['b' - 'a'] = {
             DIRECTIVE("branchNop", TOK_BRANCH_NOP),
         },
@@ -730,7 +735,7 @@ static AsmToken AsmDirectiveToken(Assembler *Asm)
             DIRECTIVE("dl", TOK_DL),
         },
         ['l' - 'a'] = {
-            DIRECTIVE("loadNop", TOK_JUMP_NOP),
+            DIRECTIVE("loadNop", TOK_LOAD_NOP),
         },
         ['j' - 'a'] = {
             DIRECTIVE("jumpNop", TOK_JUMP_NOP),
@@ -783,6 +788,7 @@ static AsmToken AsmTokenize(Assembler *Asm)
 
     switch (Ch)
     {
+    case '~': return AsmCreateToken(Asm, TOK_TILDE);
     case '"': return AsmConsumeString(Asm);
     case '.': return AsmDirectiveToken(Asm);
     case '+': return AsmCreateToken(Asm, TOK_PLUS);
@@ -1172,6 +1178,11 @@ static AsmExpression AsmPrefixExpr(Assembler *Asm)
         AsmExpression Result = AsmParsePrecedence(Asm, PREC_UNARY);
         return AsmCombineExpr(Sign, Result, -Result.Value);
     }
+    else if (Asm->CurrentToken.Type == TOK_TILDE)
+    {
+        AsmExpression Result = AsmParsePrecedence(Asm, PREC_UNARY);
+        return AsmCombineExpr(Sign, Result, ~Result.Value);
+    }
     else
     {
         UNREACHABLE("");
@@ -1203,6 +1214,7 @@ static const AsmParseRule *AsmGetParseRule(AsmTokenType Token)
         [TOK_INT]               = { PREC_NONE,      AsmParseNumber, NULL },
         [TOK_LPAREN]            = { PREC_NONE,      AsmParenExpr,   NULL },
         [TOK_IDENTIFIER]        = { PREC_NONE,      AsmParseIden,   NULL },
+        [TOK_TILDE]             = { PREC_NONE,      AsmPrefixExpr,  NULL },
 
         [TOK_PLUS]              = { PREC_ADDSUB,    AsmPrefixExpr,  AsmBinaryExpr },
         [TOK_MINUS]             = { PREC_ADDSUB,    AsmPrefixExpr,  AsmBinaryExpr },
@@ -1803,13 +1815,39 @@ static void AsmOrgDirective(Assembler *Asm)
     if (Expr.Value > UINT32_MAX)
     {
         AsmErrorAtExpr(Asm, &Expr, 
-            "Argument to org directive must be <= UINT32_MAX, got %"PRIu64"\n", 
+            "Argument to org directive must be <= UINT32_MAX, got %"PRIu64" instead.", 
             Expr.Value
         );
     }
     Asm->CurrentVirtualLocation = Expr.Value;
 }
 
+
+static void AsmAlignDirective(Assembler *Asm)
+{
+    AsmExpression Expr = AsmConsumeStrictExpr(Asm);
+    Bool8 IsPowerOf2 = 0 == (Expr.Value & (Expr.Value - 1));
+    if (!IsPowerOf2)
+    {
+        AsmErrorAtExpr(Asm, &Expr, 
+            "Alignment directive only accept powers of 2, got %"PRIu64" instead.", 
+            Expr.Value
+        );
+    }
+
+    u64 NewPC = (Asm->CurrentVirtualLocation + Expr.Value) & ~(Expr.Value - 1);
+    u64 DistanceToAlign = NewPC - Asm->CurrentVirtualLocation;
+
+    Asm->CurrentVirtualLocation = NewPC;
+    if (!AsmResizeBuffer(Asm, Asm->BufferSize + DistanceToAlign))
+        return;
+
+    for (u64 i = Asm->BufferSize; i < Asm->BufferSize + DistanceToAlign; i++)
+    {
+        Asm->Buffer[i] = 0;
+    }
+    Asm->BufferSize += DistanceToAlign;
+}
 
 static void AsmDefineByteDirective(Assembler *Asm)
 {
@@ -1987,11 +2025,12 @@ static void AsmConsumeStmt(Assembler *Asm)
     case TOK_INS_I_TYPE_U16:
     case TOK_INS_I_TYPE_I16:    AsmIType3Operands(Asm, TOK_INS_I_TYPE_I16 == Asm->CurrentToken.Type); break;
     case TOK_INS_I_TYPE_RT:     AsmIType2Operands(Asm, "destination", RT); break;
-    case TOK_INS_I_TYPE_MEM_LOAD:
-    case TOK_INS_I_TYPE_MEM:    AsmITypeMemory(Asm, TOK_INS_I_TYPE_MEM_LOAD == Asm->CurrentToken.Type); break;
+    case TOK_INS_I_TYPE_MEM_LOAD: AsmITypeMemory(Asm, true); break;
+    case TOK_INS_I_TYPE_MEM:    AsmITypeMemory(Asm, false); break;
     case TOK_INS_I_TYPE_BR1:    AsmITypeBranch(Asm, 1); break;
     case TOK_INS_I_TYPE_BR2:    AsmITypeBranch(Asm, 2); break;
 
+    case TOK_ALIGN:             AsmAlignDirective(Asm); break;
     case TOK_DB:                AsmDefineByteDirective(Asm); break;
     case TOK_DH:                AsmDefineHalfDirective(Asm); break;
     case TOK_DW:                AsmDefineWordDirective(Asm); break;

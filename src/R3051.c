@@ -68,10 +68,8 @@ typedef struct R3051
     u32 PCSave[R3051_PIPESTAGE_COUNT];
     u32 Instruction[R3051_PIPESTAGE_COUNT];
     Bool8 InstructionIsBranch[R3051_PIPESTAGE_COUNT];
-    struct {
-        u32 *RegRef;
-        u32 Data;
-    } WritebackBuffer[R3051_PIPESTAGE_COUNT];
+    int ExecuteStageDstIdx;
+    u32 ExecuteStageData;
     int PipeStage;
     int HiLoCyclesLeft;
     Bool8 HiLoBlocking;
@@ -174,15 +172,6 @@ static u32 R3051_InstructionAt(const R3051 *This, int Stage)
     return This->Instruction[CurrentStage];
 }
 
-static void R3051_ScheduleWriteback(R3051 *This, u32 *Location, u32 Data, int Stage)
-{
-    int CurrentPipeStage = R3051_CurrentPipeStage(This, Stage);
-    if (Location && &This->R[0] != Location)
-    {
-        This->WritebackBuffer[CurrentPipeStage].RegRef = Location;
-        This->WritebackBuffer[CurrentPipeStage].Data = Data;
-    }
-}
 
 
 
@@ -324,7 +313,6 @@ static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction, Bool8 *ExceptionR
             {
                 *Rd = This->PC;
                 This->PC = Rs;
-                R3051_ScheduleWriteback(This, Rd, *Rd, DECODE_STAGE);
             }
             *IsBranchingInstruction = true;
         } break;
@@ -511,9 +499,15 @@ j:
 }
 
 
-static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, Bool8 *ExceptionRaisedThisStage)
+static void R3051_SetExecuteStageWriteback(R3051 *This, uint Reg, u32 Data)
 {
-    *ExceptionRaisedThisStage = false;
+    This->ExecuteStageDstIdx = Reg;
+    This->ExecuteStageData = Data;
+}
+
+/* returns true if exception was raised during this stage, false otherwise */
+static Bool8 R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
+{
     u32 *Rd = &This->R[REG(Instruction, RD)];
     switch (FUNCT(Instruction)) 
     {
@@ -559,12 +553,12 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, B
     case 021: /* mthi */
     {
         This->Hi = Rs;
-        return NULL;
+        return false;
     } break;
     case 023: /* mtlo */
     {
         This->Lo = Rs;
-        return NULL;
+        return false;
     } break;
 
 
@@ -580,7 +574,7 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, B
         i64 Result = (i64)(i32)Rt * (i64)(i32)Rs;
         This->Hi = (u64)Result >> 32;
         This->Lo = (u64)Result & 0xFFFFFFFF;
-        return NULL;
+        return false;
     } break;
     case 031: /* multu */
     {
@@ -593,7 +587,7 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, B
         u64 Result = (u64)Rt * Rs;
         This->Hi = Result >> 32;
         This->Lo = Result & 0xFFFFFFFF;
-        return NULL;
+        return false;
     } break;
     case 032: /* div */
     {
@@ -617,7 +611,7 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, B
             This->Lo = SignedRt / SignedRs;
             This->Hi = SignedRt % SignedRs;
         }
-        return NULL;
+        return false;
     } break;
     case 033: /* divu */
     {
@@ -632,7 +626,7 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, B
             This->Lo = Rs / Rt;
             This->Hi = Rs % Rt;
         }
-        return NULL;
+        return false;
     } break;
 
 
@@ -647,8 +641,7 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, B
                 EXCEPTION_OVF, 
                 R3051_CurrentPipeStage(This, EXECUTE_STAGE)
             );
-            *ExceptionRaisedThisStage = true;
-            return NULL;
+            return true;
         }
         else
         {
@@ -670,8 +663,7 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, B
                 EXCEPTION_OVF, 
                 R3051_CurrentPipeStage(This, EXECUTE_STAGE)
             );
-            *ExceptionRaisedThisStage = true;
-            return NULL;
+            return true;
         }
         else
         {
@@ -709,10 +701,12 @@ static u32 *R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs, B
         *Rd = Rs < Rt;
     } break;
 
-    default: return NULL;
+    default: return false;
     }
 
-    return Rd;
+    ASSERT(Rd);
+    R3051_SetExecuteStageWriteback(This, REG(Instruction, RD), *Rd);
+    return false;
 }
 
 
@@ -739,7 +733,7 @@ static Bool8 R3051_Execute(R3051 *This)
     {
     case 000:
     {
-        Rt = R3051_ExecuteSpecial(This, Instruction, *Rt, Rs, &ExceptionRaisedThisStage);
+        return R3051_ExecuteSpecial(This, Instruction, *Rt, Rs);
     } break;
 
     /* group 1: alu immediate */
@@ -798,6 +792,7 @@ static Bool8 R3051_Execute(R3051 *This)
         {
             /* restore KUp, IEp and KUc, IEc */
             MASKED_LOAD(This->CP0.Status, This->CP0.Status >> 2, 0xF);
+            TODO("RFE: checck priviliage level");
             Rt = NULL;
         }
         else switch (REG(Instruction, RS))
@@ -805,10 +800,8 @@ static Bool8 R3051_Execute(R3051 *This)
         case 0x00:
         case 0x01: /* MFC0 */
         {
-            u32 CP0RegisterContent = R3051CP0_Read(This, REG(Instruction, RT));
-            R3051_ScheduleWriteback(This, Rt, CP0RegisterContent, EXECUTE_STAGE);
+            *Rt = R3051CP0_Read(This, REG(Instruction, RT));
             TODO("Check if coprocessor is usable for MFC0");
-            Rt = NULL;
         } break;
         case 0x04:
         case 0x05: /* MTC0 */
@@ -817,6 +810,7 @@ static Bool8 R3051_Execute(R3051 *This)
             TODO("Check if coprocessor is usable for MTC0");
             Rt = NULL;
         } break;
+        default: goto DifferentInstruction;
         }
     } break;
     case 022: /* COP2 */
@@ -840,13 +834,23 @@ static Bool8 R3051_Execute(R3051 *This)
         case 0x07:
         {
         } break;
+        default: goto DifferentInstruction;
         }
     } break;
 
+DifferentInstruction:
     default: return false;
     }
 
-    This->R[0] = 0;
+    if (Rt)
+    {
+        This->ExecuteStageData = *Rt;
+        This->ExecuteStageDstIdx = REG(Instruction, RT);
+    }
+    else 
+    {
+        This->ExecuteStageDstIdx = 0;
+    }
     return ExceptionRaisedThisStage;
 }
 
@@ -859,7 +863,7 @@ static Bool8 R3051_Execute(R3051 *This)
 static Bool8 R3051_Memory(R3051 *This)
 {
     u32 Instruction = R3051_InstructionAt(This, MEMORY_STAGE);
-    u32 Addr;
+    u32 Addr; /* calculate effective addr */
     {
         i32 Offset = (i32)(i16)(Instruction & 0xFFFF);
         u32 Base = This->R[REG(Instruction, RS)];
@@ -871,7 +875,7 @@ static Bool8 R3051_Memory(R3051 *This)
     /* verify memory addr */
     if (!This->VerifyDataAddr(This->UserData, Addr))
     {
-        if ((OP_GROUP(Instruction) & 0x4)) /* store instruction */
+        if ((OP_GROUP(Instruction) & 0x1)) /* store instruction */
             goto StoreAddrError;
         else goto LoadAddrError;
     }
@@ -984,7 +988,8 @@ static Bool8 R3051_Memory(R3051 *This)
     default: return false;
     }
 
-    R3051_ScheduleWriteback(This, Rt, DataRead, MEMORY_STAGE);
+    ASSERT(Rt);
+    *Rt = DataRead;
     return false;
 
 LoadAddrError:
@@ -1031,14 +1036,6 @@ static void R3051_Writeback(R3051 *This)
         This->R[REG(Instruction, RD)] = This->Lo;
     } break;
     }
-
-    int CurrentPipeStage = R3051_CurrentPipeStage(This, WRITEBACK_STAGE);
-    if (This->WritebackBuffer[CurrentPipeStage].RegRef)
-    {
-        *This->WritebackBuffer[CurrentPipeStage].RegRef = This->WritebackBuffer[CurrentPipeStage].Data;
-        This->WritebackBuffer[CurrentPipeStage].RegRef = NULL;
-        This->R[0] = 0;
-    }
 }
 
 
@@ -1056,11 +1053,11 @@ static void R3051_AdvancePipeStage(R3051 *This)
 void R3051_StepClock(R3051 *This)
 {
 #define INVALIDATE_PIPELINE_IF(Cond, CurrentStageAndBelow) do {\
-    if (Cond) {\
-        StageToInvalidate = CurrentStageAndBelow;\
-        goto InvalidatePipeline;\
-    }\
-} while (0)
+        if (Cond) {\
+            StageToInvalidate = CurrentStageAndBelow;\
+            goto InvalidatePipeline;\
+        }\
+    } while (0)
 
     if (This->HiLoCyclesLeft)
     {
@@ -1111,15 +1108,26 @@ void R3051_StepClock(R3051 *This)
      * e.g. an alu instruction followed by a branch/jump consuming the result of the alu instruction.
      */
     R3051_Writeback(This);
-
-    HasException = R3051_Memory(This);
-    INVALIDATE_PIPELINE_IF(HasException, EXECUTE_STAGE);
+    This->R[0] = 0;
 
     HasException = R3051_Execute(This);
     INVALIDATE_PIPELINE_IF(HasException, DECODE_STAGE);
+    This->R[0] = 0;
+
+    HasException = R3051_Memory(This);
+    INVALIDATE_PIPELINE_IF(HasException, EXECUTE_STAGE);
+    This->R[0] = 0;
+
+    /* overide data of the load instruction */
+    if (This->ExecuteStageDstIdx) 
+    {
+        This->R[This->ExecuteStageDstIdx] = This->ExecuteStageData;
+        This->ExecuteStageDstIdx = 0;
+    }
 
     HasException = R3051_Decode(This);
     INVALIDATE_PIPELINE_IF(HasException, FETCH_STAGE);
+    This->R[0] = 0;
     return;
 
 
@@ -1191,6 +1199,7 @@ typedef struct Buffer
 
 
 
+#define STREQU(Buf, ConstStr) (0 == strncmp(Buf, ConstStr, sizeof ConstStr - 1))
 #define STATUS_HEIGHT (24)
 #define STATUS_WIDTH (14*4)
 #define LOG_HEIGHT (8)
@@ -1470,17 +1479,67 @@ static Bool8 MipsVerify(void *UserData, u32 Addr)
 }
 
 
+static u32 ParseAddr(const char *Buf)
+{
+    u32 Addr = 0;
+    const char *Ptr = Buf;
+
+    /* skip space */
+    while (' ' == *Ptr && *Ptr)
+        Ptr++;
+    if ('\0' == *Ptr)
+        return Addr;
+
+    /* addr is gonna be in hex anyway, so we ignore 0x */
+    if (STREQU(Ptr, "0x"))
+        Ptr += 2;
+    while ('\0' != *Ptr)
+    {
+        char Ch = *Ptr++;
+        char UpperCh = Ch & ~(1 << 5);
+        if (IN_RANGE('0', Ch, '9'))
+        {
+            Addr *= 16;
+            Addr += Ch - '0';
+        }
+        else if (IN_RANGE('A', UpperCh, 'F'))
+        {
+            Addr *= 16;
+            Addr += UpperCh - 'A' + 10;
+        }
+        else if ('_' == Ch)
+        {
+            /* do nothing */
+        }
+        else break;
+    }
+    return Addr;
+}
+
+
 static Bool8 ProcessCLI(R3051 *Mips)
 {
-    return true;
-    (void)Mips;
-    char Input = 0;
+    static Bool8 ShouldHalt = true;
+    static u32 HaltAddr = 1;
+
+    if (Mips->PC == HaltAddr) 
+        ShouldHalt = true;
+    if (!ShouldHalt)
+        return true;
+
     char InputBuffer[64];
     if (NULL == fgets(InputBuffer, sizeof InputBuffer, stdin))
         return false;
-    Input = InputBuffer[0];
 
-    return 'q' != Input;
+    if (STREQU(InputBuffer, "setbp"))
+    {
+        HaltAddr = ParseAddr(InputBuffer + sizeof("setbp") - 1);
+    }
+    else if (STREQU(InputBuffer, "cont"))
+    {
+        ShouldHalt = false;
+    }
+    return !STREQU(InputBuffer, "quit");
 }
 
 static void UpdateDisassembly(ScreenBuffer *Screen, const R3051 *Mips, int StartX, int StartY)
