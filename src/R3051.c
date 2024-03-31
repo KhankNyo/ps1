@@ -1204,7 +1204,7 @@ typedef struct Buffer
 #define SCREEN_HEIGHT (2*SEPARATOR_HEIGHT + TERM_HEIGHT)
 
 static Bool8 sShouldContinue;
-static char sMasterScreenBuffer[SCREEN_HEIGHT*SCREEN_WIDTH ];
+static char sMasterScreenBuffer[SCREEN_HEIGHT*SCREEN_WIDTH + 1];
 static ScreenBuffer sMasterWindow = {
     .Width = SCREEN_WIDTH,
     .Height = SCREEN_HEIGHT,
@@ -1472,6 +1472,7 @@ static Bool8 MipsVerify(void *UserData, u32 Addr)
 
 static Bool8 ProcessCLI(R3051 *Mips)
 {
+    return true;
     (void)Mips;
     char Input = 0;
     char InputBuffer[64];
