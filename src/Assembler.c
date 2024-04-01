@@ -1523,7 +1523,7 @@ static Bool8 AsmCheckUnsigned32(Assembler *Asm, const char *ImmediateType, const
     if (Value > 0xFFFFFFFF)
     {
         AsmErrorAtExpr(Asm, Expr, 
-            "%s must be less than %lu, got %"PRIi64" instead.",
+            "%s must be less than %lu, got %"PRIu64" instead.",
             ImmediateType, 
             (unsigned long)0xFFFFFFFF, 
             Value
@@ -1581,7 +1581,7 @@ static uint AsmConsumeGPRegister(Assembler *Asm, const char *Name)
 }
 
 #define ASM_CONSUME_COMMA(pAsm, ...) \
-    AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after "__VA_ARGS__);
+    if (!AsmConsumeTokenOrError(Asm, TOK_COMMA, "Expected ',' after "__VA_ARGS__)) return;
 
 static void AsmJType(Assembler *Asm)
 {

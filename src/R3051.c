@@ -935,7 +935,7 @@ static Bool8 R3051_Memory(R3051 *This)
     } break;
 
 
-    case 042: /* lwl */
+    case 046: /* lwl */
     {
         /* reads 'up' from a given addr until it hits an addr that's divisble by 4 */
         u32 Data = 0;
@@ -949,7 +949,7 @@ static Bool8 R3051_Memory(R3051 *This)
         DataRead = *Rt;
         MASKED_LOAD(DataRead, Data, Mask);
     } break;
-    case 046: /* lwr */
+    case 042: /* lwr */
     {
         /* reads 'down' from a given addr to one that's divisible by 4 */
         u32 Data = 0;
@@ -963,7 +963,7 @@ static Bool8 R3051_Memory(R3051 *This)
         DataRead = *Rt;
         MASKED_LOAD(DataRead, Data, Mask);
     } break;
-    case 052: /* swl */
+    case 056: /* swl */
     {
         /* stores 'up' from a given addr to one that's divisible by 4 */
         u32 Src = *Rt;
@@ -973,7 +973,7 @@ static Bool8 R3051_Memory(R3051 *This)
         } while (Addr++ & 0x3);
         return false;
     } break;
-    case 056: /* swr */
+    case 052: /* swr */
     {
         /* stores 'down' from a given addr + 4 to one that's divisible by 4 */
         u32 Src = *Rt;
@@ -1202,12 +1202,12 @@ typedef struct Buffer
 #define STREQU(Buf, ConstStr) (0 == strncmp(Buf, ConstStr, sizeof ConstStr - 1))
 #define STATUS_HEIGHT (24)
 #define STATUS_WIDTH (14*4)
-#define LOG_HEIGHT (8)
+#define LOG_HEIGHT (3)
 #define LOG_WIDTH STATUS_WIDTH
 #define SEPARATOR_WIDTH 1
 #define SEPARATOR_HEIGHT 1
 #define TERM_HEIGHT (LOG_HEIGHT + STATUS_HEIGHT)
-#define TERM_WIDTH  60
+#define TERM_WIDTH  80
 #define NEWLINE_WIDTH 1
 #define SCREEN_WIDTH (STATUS_WIDTH + SEPARATOR_WIDTH + TERM_WIDTH + SEPARATOR_WIDTH + NEWLINE_WIDTH)
 #define SCREEN_HEIGHT (2*SEPARATOR_HEIGHT + TERM_HEIGHT)

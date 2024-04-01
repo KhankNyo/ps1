@@ -1,3 +1,5 @@
+;.littleEndian
+
 SYS_WRITE   = 0x7000_0000
 SYS_CLRSCR  = 0x7100_0000
 SYS_EXIT    = 0x7200_0000
@@ -84,7 +86,7 @@ InfLoop:
 
 ; prints string in $a0 by writing its content to SYS_WRITE
 ; args:     const char *$a0
-; destroys: $t0
+; destroys: $t0, $ra
 PrintStr: 
     li $t0, SYS_WRITE
     sw $a0, 0($t0)          ; call sys_write(Str)
@@ -96,7 +98,7 @@ PrintStr:
 ; prints string in $a0 and then string in $a1
 ; args:     const char *$a0, $a1
 ; returns:  1 in $v0
-; destroys: $t0, $t1, $v0
+; destroys: $t0, $t1, $v0, $ra
 TestFailed:
     move $t1, $ra                   ; save return addr 
         jal PrintStr
@@ -112,7 +114,7 @@ TestFailed:
 ; tests:            bltz, bgez, blez, bgtz, bltzal, bgezal, 
 ; assumes working:  beq, bne
 ; returns:          $v0: 0 for success, 1 for failure
-; destroys:         $t0..9, $a0..1, $v0
+; destroys:         $t0..9, $a0..1, $v0, $ra
 .branchNop 0
 .jumpNop 0
 TestBranch:
@@ -355,6 +357,9 @@ TestBranch_Bgezal_Ok2:
 
 
 
+; tests lb, lh, lw, lbu, lhu, lwl, lwr instructions
+; returns:  $v0: 1 for failure, 0 for success
+; destroys: $t0..9, $a0, $a1, $at, $ra, $v0
 .loadNop 0
 .branchNop 0
 TestLoad:
@@ -366,8 +371,8 @@ TestLoad:
     move $t5, $zero
 
     ; test lb (signed)
-    la $a0, TestLoad_Lb_Msg
     la $a1, TestLoad_DelaySlotRead_Msg
+    la $a0, TestLoad_Lb_Msg
     la $at, TestLoad_Byte
 
     move $t0, $t1
@@ -392,12 +397,65 @@ TestLoad:
         nop
 
     ; test lh (signed)
+    la $a0, TestLoad_Lh_Msg
+    la $a1, TestLoad_DelaySlotRead_Msg
+    la $at, TestLoad_Half
+    li $t7, -0x8000
+    li $t6, 0x7FFF
+
+    move $t0, $t1
+    lh $t0, 0($at)
+        bne $t0, $t1, TestFailed    ; NOTE: in delay slot
+    lh $t0, 2($at)
+        bne $t0, $t9, TestFailed
+    lh $t0, 4($at)
+        bne $t0, $t8, TestFailed
+    lh $t0, 6($at)
+        bne $t0, $t7, TestFailed
+    lh $t0, 8($at)
+        bne $t0, $t6, TestFailed
+        nop
+    bne $t0, $t5, TestFailed
+        nop
+    la $a1, TestLoad_DelaySlotWrite_Msg
+    lh $t0, 0($at)
+        or $t0, $t1, $zero          ; NOTE: despite delay slot, writes should be in order
+    bne $t0, $t1, TestFailed
+        nop
+
     ; test lw (signed)
+    la $a0, TestLoad_Lw_Msg
+    la $a1, TestLoad_DelaySlotRead_Msg
+    la $at, TestLoad_Word
+    li $t7, -0x8000_0000
+    la $t6,  0x7FFF_FFFF
+
+    move $t0, $t1
+    lw $t0, 0($at)
+        bne $t0, $t1, TestFailed    ; NOTE: in delay slot
+    lw $t0, 4($at)
+        bne $t0, $t9, TestFailed
+    lw $t0, 8($at)
+        bne $t0, $t8, TestFailed
+    lw $t0, 12($at)
+        bne $t0, $t7, TestFailed
+    lw $t0, 16($at)
+        bne $t0, $t6, TestFailed
+        nop
+    bne $t0, $t5, TestFailed
+        nop
+    la $a1, TestLoad_DelaySlotWrite_Msg
+    lw $t0, 0($at)
+        or $t0, $t1, $zero          ; NOTE: despite delay slot, writes should be in order
+    bne $t0, $t1, TestFailed
+        nop
 
     ; test lbu
+    li $t6, 0x7F
     li $t7, 0x80
     li $t8, 0xFF
-    la $a1, TestLoad_Lbu_Msg
+    la $a1, TestLoad_DelaySlotRead_Msg
+    la $a0, TestLoad_Lbu_Msg
     la $at, TestLoad_Byte
 
     lbu $t0, 0($at)
@@ -412,14 +470,126 @@ TestLoad:
         nop
     bne $t0, $t5, TestFailed
         nop
-
+    la $a1, TestLoad_DelaySlotWrite_Msg
+    lbu $t0, 0($at)
+        or $t0, $t1, $zero          ; NOTE: despite delay slot, writes should be in order
+    bne $t0, $t1, TestFailed
+        nop
 
     ; test lhu
+    li $t6, 0x7FFF
+    li $t7, 0x8000
+    li $t8, 0xFFFF
+    la $a1, TestLoad_DelaySlotRead_Msg
+    la $a0, TestLoad_Lhu_Msg
+    la $at, TestLoad_Half
+
+    lhu $t0, 0($at)
+    lhu $t0, 2($at)
+        bne $t0, $t9, TestFailed    ; NOTE: in delay slot
+    lhu $t0, 4($at)
+        bne $t0, $t8, TestFailed
+    lhu $t0, 6($at)
+        bne $t0, $t7, TestFailed
+    lhu $t0, 8($at)
+        bne $t0, $t6, TestFailed
+        nop
+    bne $t0, $t5, TestFailed
+        nop
+    la $a1, TestLoad_DelaySlotWrite_Msg
+    lhu $t0, 0($at)
+        or $t0, $t1, $zero          ; NOTE: despite delay slot, writes should be in order
+    bne $t0, $t1, TestFailed
+        nop
+
+    ; test lwl
+    la $at, TestLoad_WordDir
+    la $a0, TestLoad_Lwl_Msg
+    la $a1, TestLoad_DirFailed_Msg
+
+    la $t9, 0xdeadbeef
+    la $t8, 0xadbeef77
+    la $t7, 0xbeef7777
+    la $t6, 0xef777777
+    li $t0, 0x77777777
+    move $t1, $t0
+    lwl $t0, 0($at)
+        bne $t0, $t1, TestFailed    ; NOTE: in delay slot 
+    lwl $t0, 1($at)
+        bne $t0, $t6, TestFailed
+    lwl $t0, 2($at)
+        bne $t0, $t7, TestFailed
+    lwl $t0, 3($at)
+        bne $t0, $t8, TestFailed
+        nop
+    bne $t0, $t9, TestFailed
+        nop
+
+    la $a1, TestLoad_DelaySlotWrite_Msg
+    li $t1, 0x1337C0DE
+    lwl $t0, 2($at)
+        or $t0, $zero, $t1          ; NOTE: should overwrite loaded content
+    bne $t0, $t1, TestFailed
+        nop
+
+    ; test lwr
+    la $at, TestLoad_WordDir
+    la $a0, TestLoad_Lwl_Msg
+    la $a1, TestLoad_DirFailed_Msg
+
+    la $t9, 0xdeadbeef
+    la $t8, 0x77deadbe
+    la $t7, 0x7777dead
+    la $t6, 0x777777de
+    li $t0, 0x77777777
+    move $t1, $t0
+    lwr $t0, 3($at)
+        bne $t0, $t1, TestFailed    ; NOTE: in delay slot 
+    lwr $t0, 2($at)
+        bne $t0, $t6, TestFailed
+    lwr $t0, 1($at)
+        bne $t0, $t7, TestFailed
+    lwr $t0, 0($at)
+        bne $t0, $t8, TestFailed
+        nop
+    bne $t0, $t9, TestFailed
+        nop
+
+    la $a1, TestLoad_DelaySlotWrite_Msg
+    li $t1, 0x1337C0DE
+    lwr $t0, 2($at)
+        or $t0, $zero, $t1          ; NOTE: should overwrite loaded content
+    bne $t0, $t1, TestFailed
+        nop
+
+    ; test lwl, lwr combo
+    la $a0, TestLoad_Combo_Msg
+    la $a1, TestLoad_Failed_Msg
+    la $t1, TestLoad_WordDir
+    la $t2, 0x0D_DEAD_BE
+    la $t3, 0xF00D_DEAD_
+    la $t4, 0xAD_F00D_DE
+
+    lwl $t0, 4($t1)                 ; 0x0d__-____
+    lwr $t0, 1($t1)                 ; 0x__de-adbe
+        nop
+    bne $t0, $t2, TestFailed
+        nop
+    lwl $t0, 5($t1)                 ; 0xf00d-____
+    lwr $t0, 2($t1)                 ; 0x____-dead
+        nop
+    bne $t0, $t3, TestFailed
+        nop
+    lwl $t0, 6($t1)                 ; 0xadf0-0d__
+    lwr $t0, 3($t1)                 ; 0x____-__de
+        nop
+    bne $t0, $t4, TestFailed
+        nop
 
     move $v0, $zero
     ret 
 .loadNop 1
-.branchNop 0
+.branchNop 1
 
 
 
@@ -433,7 +603,7 @@ TestStore:
 
 ; tests arithmetic instructions involving immediate values: 
 ;   addiu, sltiu, slti, andi, ori, xori, lui
-; destroys: $a0, $a1, $t0, $t1, $t2, $v0
+; destroys: $a0, $a1, $t0, $t1, $t2, $v0, $ra
 .jumpNop 0 
 TestImmArith:
     ; test r0:
@@ -541,8 +711,12 @@ TestLoad_Lhu_Msg:               .db "lhu:", 0
 TestLoad_Lw_Msg:                .db "lw:", 0
 TestLoad_Lwl_Msg:               .db "lwl:", 0
 TestLoad_Lwr_Msg:               .db "lwr:", 0
-TestLoad_DelaySlotRead_Msg:     .db " read in delay slot failed\n", 0
-TestLoad_DelaySlotWrite_Msg:    .db " write in delay slot failed\n", 0
+TestLoad_Combo_Msg:             .db "lwl and lwr ", 0
+TestLoad_Failed_Msg:            .db "failed.\n", 0
+TestLoad_DirFailed_Msg:         .db " old content didn't persist or delay slot failed.\n", 0
+TestLoad_DelaySlotRead_Msg:     .db " read in delay slot failed.\n", 0
+TestLoad_DelaySlotWrite_Msg:    .db " write in delay slot failed (via 'or' instruction).\n", 0
+TestLoad_NoDelaySlot_Msg:       .db " delay slot should not exist.\n", 0
 
 .align 4
 TestLoad_WordDir:   .dw 0xdeadbeef, 0xbaadf00d
