@@ -28,7 +28,7 @@ typedef enum R3051_Exception
 } R3051_Exception;
 
 
-typedef union R3051CP0
+typedef union R3051_CP0
 {
     u32 R[32];
     struct {
@@ -50,7 +50,7 @@ typedef union R3051CP0
         u32 EPC;
         u32 PrID;
     };
-} R3051CP0;
+} R3051_CP0;
 
 
 
@@ -68,8 +68,7 @@ typedef struct R3051
     u32 PCSave[R3051_PIPESTAGE_COUNT];
     u32 Instruction[R3051_PIPESTAGE_COUNT];
     Bool8 InstructionIsBranch[R3051_PIPESTAGE_COUNT];
-    int ExecuteStageDstIdx;
-    u32 ExecuteStageData;
+
     int PipeStage;
     int HiLoCyclesLeft;
     Bool8 HiLoBlocking;
@@ -83,7 +82,7 @@ typedef struct R3051
     R3051AddrVerifyFn VerifyDataAddr;
 
 
-    R3051CP0 CP0;
+    R3051_CP0 CP0;
 } R3051;
 
 R3051 R3051_Init(
@@ -125,6 +124,13 @@ void R3051_StepClock(R3051 *This);
 #define WRITE_BYTE(u32Addr, u8Byte) This->WriteFn(This->UserData, u32Addr, u8Byte, DATA_BYTE)
 #define WRITE_HALF(u32Addr, u16Half) This->WriteFn(This->UserData, u32Addr, u16Half, DATA_HALF)
 #define WRITE_WORD(u32Addr, u32Word) This->WriteFn(This->UserData, u32Addr, u32Word, DATA_WORD)
+
+typedef struct R3051_StageStatus
+{
+    Bool8 HasException;
+    u8 RegIndex;
+    u32 WritebackData;
+} R3051_StageStatus;
 
 
 
@@ -499,16 +505,14 @@ j:
 }
 
 
-static void R3051_SetExecuteStageWriteback(R3051 *This, uint Reg, u32 Data)
-{
-    This->ExecuteStageDstIdx = Reg;
-    This->ExecuteStageData = Data;
-}
 
 /* returns true if exception was raised during this stage, false otherwise */
-static Bool8 R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
+static R3051_StageStatus R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
 {
-    u32 *Rd = &This->R[REG(Instruction, RD)];
+    R3051_StageStatus Status = { 0 };
+    uint RegIndex = REG(Instruction, RD);
+    u32 *Rd = &This->R[RegIndex];
+
     switch (FUNCT(Instruction)) 
     {
     /* group 0: alu shift */
@@ -553,12 +557,12 @@ static Bool8 R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
     case 021: /* mthi */
     {
         This->Hi = Rs;
-        return false;
+        return Status;
     } break;
     case 023: /* mtlo */
     {
         This->Lo = Rs;
-        return false;
+        return Status;
     } break;
 
 
@@ -574,7 +578,7 @@ static Bool8 R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
         i64 Result = (i64)(i32)Rt * (i64)(i32)Rs;
         This->Hi = (u64)Result >> 32;
         This->Lo = (u64)Result & 0xFFFFFFFF;
-        return false;
+        return Status;
     } break;
     case 031: /* multu */
     {
@@ -587,7 +591,7 @@ static Bool8 R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
         u64 Result = (u64)Rt * Rs;
         This->Hi = Result >> 32;
         This->Lo = Result & 0xFFFFFFFF;
-        return false;
+        return Status;
     } break;
     case 032: /* div */
     {
@@ -611,7 +615,7 @@ static Bool8 R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
             This->Lo = SignedRt / SignedRs;
             This->Hi = SignedRt % SignedRs;
         }
-        return false;
+        return Status;
     } break;
     case 033: /* divu */
     {
@@ -626,7 +630,7 @@ static Bool8 R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
             This->Lo = Rs / Rt;
             This->Hi = Rs % Rt;
         }
-        return false;
+        return Status;
     } break;
 
 
@@ -641,7 +645,8 @@ static Bool8 R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
                 EXCEPTION_OVF, 
                 R3051_CurrentPipeStage(This, EXECUTE_STAGE)
             );
-            return true;
+            Status.HasException = true;
+            return Status;
         }
         else
         {
@@ -663,7 +668,8 @@ static Bool8 R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
                 EXCEPTION_OVF, 
                 R3051_CurrentPipeStage(This, EXECUTE_STAGE)
             );
-            return true;
+            Status.HasException = true;
+            return Status;
         }
         else
         {
@@ -701,12 +707,13 @@ static Bool8 R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
         *Rd = Rs < Rt;
     } break;
 
-    default: return false;
+    default: return Status;
     }
 
     ASSERT(Rd);
-    R3051_SetExecuteStageWriteback(This, REG(Instruction, RD), *Rd);
-    return false;
+    Status.RegIndex = RegIndex;
+    Status.WritebackData = *Rd;
+    return Status;
 }
 
 
@@ -717,16 +724,16 @@ static Bool8 R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
  *=============================================================================================*/
 
 /* returns true if an exception has occured during this stage, false otherwise */
-static Bool8 R3051_Execute(R3051 *This)
+static R3051_StageStatus R3051_Execute(R3051 *This)
 {
     u32 Instruction = R3051_InstructionAt(This, EXECUTE_STAGE);
-    u32 *Rt = &This->R[REG(Instruction, RT)];
+    uint RegIndex = REG(Instruction, RT);
+    u32 *Rt = &This->R[RegIndex];
     u32 Rs = This->R[REG(Instruction, RS)];
 
     u32 SignedImm = (i32)(i16)(Instruction & 0xFFFF);
     u32 UnsignedImm = Instruction & 0xFFFF;
-
-    Bool8 ExceptionRaisedThisStage = false;
+    R3051_StageStatus Status = { 0 };
 
     /* only care about ALU ops */
     switch (OP(Instruction)) /* group and mode of op */
@@ -747,7 +754,8 @@ static Bool8 R3051_Execute(R3051 *This)
                 EXCEPTION_OVF, 
                 R3051_CurrentPipeStage(This, EXECUTE_STAGE)
             );
-            return true;
+            Status.HasException = true;
+            return Status;
         }
         else
         {
@@ -836,22 +844,20 @@ static Bool8 R3051_Execute(R3051 *This)
         } break;
         default: goto DifferentInstruction;
         }
+        TODO("COP2 instructions");
+        Rt = NULL;
     } break;
 
 DifferentInstruction:
-    default: return false;
+    default: return Status;
     }
 
     if (Rt)
     {
-        This->ExecuteStageData = *Rt;
-        This->ExecuteStageDstIdx = REG(Instruction, RT);
+        Status.RegIndex = RegIndex;
+        Status.WritebackData = *Rt;
     }
-    else 
-    {
-        This->ExecuteStageDstIdx = 0;
-    }
-    return ExceptionRaisedThisStage;
+    return Status;
 }
 
 
@@ -860,7 +866,7 @@ DifferentInstruction:
  *=============================================================================================*/
 
 /* returns true if an exception has occured during this stage, false otherwise */
-static Bool8 R3051_Memory(R3051 *This)
+static R3051_StageStatus R3051_Memory(R3051 *This)
 {
     u32 Instruction = R3051_InstructionAt(This, MEMORY_STAGE);
     u32 Addr; /* calculate effective addr */
@@ -869,12 +875,15 @@ static Bool8 R3051_Memory(R3051 *This)
         u32 Base = This->R[REG(Instruction, RS)];
         Addr = Base + Offset;
     }
-    u32 *Rt = &This->R[REG(Instruction, RT)];
+    uint RegIndex = REG(Instruction, RT);
+    u32 Rt = This->R[RegIndex];
     u32 DataRead = 0;
+    R3051_StageStatus Status = { 0 };
 
     /* verify memory addr */
     if (!This->VerifyDataAddr(This->UserData, Addr))
     {
+        Status.HasException = true;
         if ((OP_GROUP(Instruction) & 0x1)) /* store instruction */
             goto StoreAddrError;
         else goto LoadAddrError;
@@ -916,28 +925,28 @@ static Bool8 R3051_Memory(R3051 *This)
 
     case 050: /* sb */
     {
-        WRITE_BYTE(Addr, *Rt & 0xFF);
-        return false;
+        WRITE_BYTE(Addr, Rt & 0xFF);
+        return Status;
     } break;
     case 051: /* sh */
     {
         if (Addr & 1)
             goto StoreAddrError;
-        WRITE_HALF(Addr, *Rt & 0xFFFF);
-        return false;
+        WRITE_HALF(Addr, Rt & 0xFFFF);
+        return Status;
     } break;
     case 053: /* sw */
     {
         if (Addr & 3)
             goto StoreAddrError;
-        WRITE_WORD(Addr, *Rt);
-        return false;
+        WRITE_WORD(Addr, Rt);
+        return Status;
     } break;
 
 
     case 046: /* lwl */
     {
-        /* reads 'up' from a given addr until it hits an addr that's divisble by 4 */
+        /* reads 'down' from a given addr to one that's divisible by 4 */
         u32 Data = 0;
         u32 Mask = 0;
         int BytesRead = 0;
@@ -946,12 +955,12 @@ static Bool8 R3051_Memory(R3051 *This)
             Data |= (u32)READ_BYTE(Addr) << BytesRead*8;
             BytesRead++;
         } while (++Addr & 0x3);
-        DataRead = *Rt;
+        DataRead = Rt;
         MASKED_LOAD(DataRead, Data, Mask);
     } break;
     case 042: /* lwr */
     {
-        /* reads 'down' from a given addr to one that's divisible by 4 */
+        /* reads 'up' from a given addr until it hits an addr that's divisble by 4 */
         u32 Data = 0;
         u32 Mask = 0;
         int BytesRead = 0;
@@ -960,44 +969,46 @@ static Bool8 R3051_Memory(R3051 *This)
             Data |= (u32)READ_BYTE(Addr) << (3 - BytesRead)*8;
             BytesRead++;
         } while (Addr-- & 0x3);
-        DataRead = *Rt;
+        DataRead = Rt;
         MASKED_LOAD(DataRead, Data, Mask);
     } break;
+
     case 056: /* swl */
     {
-        /* stores 'up' from a given addr to one that's divisible by 4 */
-        u32 Src = *Rt;
+        /* stores 'down' from a given addr + 4 to one that's divisible by 4 */
+        u32 Src = Rt;
         do {
             WRITE_BYTE(Addr, Src & 0xFF);
             Src >>= 8;
         } while (Addr++ & 0x3);
-        return false;
+        return Status;
     } break;
     case 052: /* swr */
     {
-        /* stores 'down' from a given addr + 4 to one that's divisible by 4 */
-        u32 Src = *Rt;
+        /* stores 'up' from a given addr to one that's divisible by 4 */
+        u32 Src = Rt;
         Addr += 4;
         do {
             WRITE_BYTE(Addr, (Src >> 24) & 0xFF);
             Src <<= 8;
         } while (--Addr & 0x3);
-        return false;
+        return Status;
     } break;
 
-    default: return false;
+    default: return Status;
     }
 
     ASSERT(Rt);
-    *Rt = DataRead;
-    return false;
+    Status.WritebackData = DataRead;
+    Status.RegIndex = RegIndex;
+    return Status;
 
 LoadAddrError:
     R3051_RaiseMemoryException(This, EXCEPTION_ADEL, Addr);
-    return true;
+    return Status;
 StoreAddrError:
     R3051_RaiseMemoryException(This, EXCEPTION_ADES, Addr);
-    return true;
+    return Status;
 }
 
 
@@ -1107,26 +1118,22 @@ void R3051_StepClock(R3051 *This)
      * This also helps with forwarding, especially the fact that execute stage can forward their result to the decode stage, 
      * e.g. an alu instruction followed by a branch/jump consuming the result of the alu instruction.
      */
-    R3051_Writeback(This);
-    This->R[0] = 0;
 
-    HasException = R3051_Execute(This);
-    INVALIDATE_PIPELINE_IF(HasException, DECODE_STAGE);
-    This->R[0] = 0;
+    R3051_StageStatus MemoryStage = R3051_Memory(This);
+    INVALIDATE_PIPELINE_IF(MemoryStage.HasException, EXECUTE_STAGE);
+    R3051_StageStatus ExecuteStage = R3051_Execute(This);
+    INVALIDATE_PIPELINE_IF(ExecuteStage.HasException, DECODE_STAGE);
 
-    HasException = R3051_Memory(This);
-    INVALIDATE_PIPELINE_IF(HasException, EXECUTE_STAGE);
-    This->R[0] = 0;
-
-    /* overide data of the load instruction */
-    if (This->ExecuteStageDstIdx) 
-    {
-        This->R[This->ExecuteStageDstIdx] = This->ExecuteStageData;
-        This->ExecuteStageDstIdx = 0;
-    }
+    if (MemoryStage.RegIndex)
+        This->R[MemoryStage.RegIndex] = MemoryStage.WritebackData;
+    if (ExecuteStage.RegIndex)
+        This->R[ExecuteStage.RegIndex] = ExecuteStage.WritebackData;
 
     HasException = R3051_Decode(This);
     INVALIDATE_PIPELINE_IF(HasException, FETCH_STAGE);
+    This->R[0] = 0;
+
+    R3051_Writeback(This);
     This->R[0] = 0;
     return;
 

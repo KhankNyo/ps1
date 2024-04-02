@@ -84,7 +84,7 @@ InfLoop:
 
 
 
-; prints string in $a0 by writing its content to SYS_WRITE
+; PrintStr: prints string in $a0 by writing its content to SYS_WRITE
 ; args:     const char *$a0
 ; destroys: $t0, $ra
 PrintStr: 
@@ -95,7 +95,7 @@ PrintStr:
 
 
 
-; prints string in $a0 and then string in $a1
+; TestFailed: prints string in $a0 and then string in $a1
 ; args:     const char *$a0, $a1
 ; returns:  1 in $v0
 ; destroys: $t0, $t1, $v0, $ra
@@ -111,7 +111,7 @@ TestFailed:
 
 
 
-; tests:            bltz, bgez, blez, bgtz, bltzal, bgezal, 
+; TestBranch:       bltz, bgez, blez, bgtz, bltzal, bgezal
 ; assumes working:  beq, bne
 ; returns:          $v0: 0 for success, 1 for failure
 ; destroys:         $t0..9, $a0..1, $v0, $ra
@@ -357,7 +357,7 @@ TestBranch_Bgezal_Ok2:
 
 
 
-; tests lb, lh, lw, lbu, lhu, lwl, lwr instructions
+; TestLoad: lb, lh, lw, lbu, lhu, lwl, lwr
 ; returns:  $v0: 1 for failure, 0 for success
 ; destroys: $t0..9, $a0, $a1, $at, $ra, $v0
 .loadNop 0
@@ -378,15 +378,18 @@ TestLoad:
     move $t0, $t1
     lb $t0, 0($at)
         bne $t0, $t1, TestFailed    ; NOTE: in delay slot
+        bne $t0, $t9, TestFailed    ; delay slot over, value should be loaded by now
     lb $t0, 1($at)
         bne $t0, $t9, TestFailed
+        bne $t0, $t8, TestFailed
     lb $t0, 2($at)
         bne $t0, $t8, TestFailed
+        bne $t0, $t7, TestFailed
     lb $t0, 3($at)
         bne $t0, $t7, TestFailed
+        bne $t0, $t6, TestFailed
     lb $t0, 4($at)
         bne $t0, $t6, TestFailed
-        nop
     bne $t0, $t5, TestFailed
         nop
 
@@ -406,15 +409,17 @@ TestLoad:
     move $t0, $t1
     lh $t0, 0($at)
         bne $t0, $t1, TestFailed    ; NOTE: in delay slot
+        bne $t0, $t9, TestFailed
     lh $t0, 2($at)
         bne $t0, $t9, TestFailed
+        bne $t0, $t8, TestFailed
     lh $t0, 4($at)
         bne $t0, $t8, TestFailed
+        bne $t0, $t7, TestFailed
     lh $t0, 6($at)
         bne $t0, $t7, TestFailed
     lh $t0, 8($at)
         bne $t0, $t6, TestFailed
-        nop
     bne $t0, $t5, TestFailed
         nop
     la $a1, TestLoad_DelaySlotWrite_Msg
@@ -433,15 +438,18 @@ TestLoad:
     move $t0, $t1
     lw $t0, 0($at)
         bne $t0, $t1, TestFailed    ; NOTE: in delay slot
+        bne $t0, $t9, TestFailed
     lw $t0, 4($at)
         bne $t0, $t9, TestFailed
+        bne $t0, $t8, TestFailed
     lw $t0, 8($at)
         bne $t0, $t8, TestFailed
+        bne $t0, $t7, TestFailed
     lw $t0, 12($at)
         bne $t0, $t7, TestFailed
+        bne $t0, $t6, TestFailed
     lw $t0, 16($at)
         bne $t0, $t6, TestFailed
-        nop
     bne $t0, $t5, TestFailed
         nop
     la $a1, TestLoad_DelaySlotWrite_Msg
@@ -461,13 +469,15 @@ TestLoad:
     lbu $t0, 0($at)
     lbu $t0, 1($at)
         bne $t0, $t9, TestFailed    ; NOTE: in delay slot
+        bne $t0, $t8, TestFailed
     lbu $t0, 2($at)
         bne $t0, $t8, TestFailed
+        bne $t0, $t7, TestFailed
     lbu $t0, 3($at)
         bne $t0, $t7, TestFailed
+        bne $t0, $t6, TestFailed
     lbu $t0, 4($at)
         bne $t0, $t6, TestFailed
-        nop
     bne $t0, $t5, TestFailed
         nop
     la $a1, TestLoad_DelaySlotWrite_Msg
@@ -484,16 +494,21 @@ TestLoad:
     la $a0, TestLoad_Lhu_Msg
     la $at, TestLoad_Half
 
+    move $t0, $t1
     lhu $t0, 0($at)
+        bne $t0, $t1, TestFailed    ; NOTE: delay slot
+        bne $t0, $t9, TestFailed
     lhu $t0, 2($at)
-        bne $t0, $t9, TestFailed    ; NOTE: in delay slot
+        bne $t0, $t9, TestFailed
+        bne $t0, $t8, TestFailed
     lhu $t0, 4($at)
         bne $t0, $t8, TestFailed
+        bne $t0, $t7, TestFailed
     lhu $t0, 6($at)
         bne $t0, $t7, TestFailed
+        bne $t0, $t6, TestFailed
     lhu $t0, 8($at)
         bne $t0, $t6, TestFailed
-        nop
     bne $t0, $t5, TestFailed
         nop
     la $a1, TestLoad_DelaySlotWrite_Msg
@@ -515,13 +530,15 @@ TestLoad:
     move $t1, $t0
     lwl $t0, 0($at)
         bne $t0, $t1, TestFailed    ; NOTE: in delay slot 
+        bne $t0, $t6, TestFailed
     lwl $t0, 1($at)
         bne $t0, $t6, TestFailed
+        bne $t0, $t7, TestFailed
     lwl $t0, 2($at)
         bne $t0, $t7, TestFailed
+        bne $t0, $t8, TestFailed
     lwl $t0, 3($at)
         bne $t0, $t8, TestFailed
-        nop
     bne $t0, $t9, TestFailed
         nop
 
@@ -545,13 +562,15 @@ TestLoad:
     move $t1, $t0
     lwr $t0, 3($at)
         bne $t0, $t1, TestFailed    ; NOTE: in delay slot 
+        bne $t0, $t6, TestFailed
     lwr $t0, 2($at)
         bne $t0, $t6, TestFailed
+        bne $t0, $t7, TestFailed
     lwr $t0, 1($at)
         bne $t0, $t7, TestFailed
+        bne $t0, $t8, TestFailed
     lwr $t0, 0($at)
         bne $t0, $t8, TestFailed
-        nop
     bne $t0, $t9, TestFailed
         nop
 
@@ -564,7 +583,7 @@ TestLoad:
 
     ; test lwl, lwr combo
     la $a0, TestLoad_Combo_Msg
-    la $a1, TestLoad_Failed_Msg
+    la $a1, Test_Failed_Msg
     la $t1, TestLoad_WordDir
     la $t2, 0x0D_DEAD_BE
     la $t3, 0xF00D_DEAD_
@@ -584,7 +603,7 @@ TestLoad:
     lwr $t0, 3($t1)                 ; 0x____-__de
         nop
     bne $t0, $t4, TestFailed
-        nop
+        ; don't care about delay slot
 
     move $v0, $zero
     ret 
@@ -594,14 +613,118 @@ TestLoad:
 
 
 
+.branchNop 0
+.loadNop 0
+.jumpNop 0
 TestStore:
-    move $v0, $zero
+    move $t9, $ra
+
+    ; test sb:
+    ; memcpy(FreeMemorySection, TestStore_ByteResult, TestStore_ByteSize)
+    la $t1, FreeMemorySection
+    la $t0, TestStore_ByteResult
+    addiu $t2, $t0, TestStore_ByteSize
+TestStore_Bytes: 
+    lb $t3, 0($t0)
+    addiu $t0, 1
+    sb $t3, 0($t1)
+    bne $t0, $t2, TestStore_Bytes
+        addiu $t1, 1                    ; NOTE: in branch delay slot
+
+    ; memcmp(FreeMemorySection, TestStore_ByteResult, TestStore_ByteSize)
+    la $a0, FreeMemorySection
+    la $a1, TestStore_ByteResult
+    jal Memcmp
+        ori $a2, $zero, TestStore_ByteSize  ; NOTE: in jump delay slot
+    la $a0, TestStore_Sb_Msg
+    la $a1, Test_Failed_Msg
+    bez $v0, TestFailed                 ; fail if buffer not equal
+        move $ra, $t9                   ; return while we're at it
+
+    ; test sh:
+    la $t1, FreeMemorySection
+    la $t0, TestStore_HalfResult
+    addiu $t2, $t0, TestStore_HalfSize
+TestStore_Half:
+    lh $t3, 0($t0)
+    addiu $t0, 2
+    sh $t3, 0($t1)
+    bne $t0, $t2, TestStore_Half
+        addiu $t1, 2
+
+    ; memcmp(FreeMemorySection, TestStore_HalfResult, TestStore_HalfSize)
+    la $a0, FreeMemorySection
+    la $a1, TestStore_HalfResult
+    jal Memcmp
+        ori $a2, $zero, TestStore_HalfSize ; NOTE: jump delay
+    la $a0, TestStore_Sh_Msg
+    la $a1, Test_Failed_Msg
+    bez $v0, TestFailed                 ; fail if buffer not equal
+        move $ra, $t9                   ; return while we're at it
+
+    ; test sw:
+    la $t1, FreeMemorySection
+    la $t0, TestStore_WordResult
+    addiu $t2, $t0, TestStore_WordSize
+TestStore_Word:
+    lw $t3, 0($t0)
+    addiu $t0, 4
+    sw $t3, 0($t1)
+    bne $t0, $t2, TestStore_Word
+        addiu $t1, 4
+
+    ; memcmp(FreeMemorySection, TestStore_WordResult, TestStore_WordSize)
+    la $a0, FreeMemorySection
+    la $a1, TestStore_WordResult
+    jal Memcmp
+        ori $a2, $zero, TestStore_WordSize ; NOTE: jump delay
+    la $a0, TestStore_Sw_Msg
+    la $a1, Test_Failed_Msg
+    bez $v0, TestFailed                 ; fail if buffer not equal
+        move $ra, $t9                   ; return while we're at it
+
+TestStore_WordLeft:
+TestStore_WordRight:
+TestStore_WordCombo:
     ret 
+    move $v0, $zero
+.jumpNop 1
+.loadNop 1
+.branchNop 1
 
 
 
 
-; tests arithmetic instructions involving immediate values: 
+; Memcmp:   compares 2 buffer byte for byte (slow!)
+; args:     const Byte *$a0, $a1; u32 $a2
+; returns:  $v0: 1 if buffer in $a0 is equal to buffer in $a1 byte for byte, otherwise 0
+; destroys: $a0, $a1, $v0, $t0..2
+.loadNop 0
+.branchNop 0
+.jumpNop 0
+Memcmp:
+    addu $t0, $a1, $a2              ; end = $a1 + $a2
+Memcmp_Loop:
+    lb $t1, 0($a0)                  ; tmp1 = [a0]
+    lb $t2, 0($a1)                  ; tmp2 = [a1],  NOTE: in load delay slot
+    addiu $a0, 1                    ; a0++,         NOTE: in load delay slot waiting for $t2 to be completely loaded
+    beq $t1, $t2, Memcmp_Continue   ; if tmp1 == tmp2, continue
+    addiu $a1, 1                    ; a1++,         NOTE: in branch delay slot, will always be executed
+        ret                         ; else return 0
+        move $v0, $zero
+Memcmp_Continue:
+    bne $t0, $a1, Memcmp_Loop       ; if end != a1, continue
+        nop
+    ret                             ; return 1
+    ori $v0, $zero, 1
+.jumpNop 1
+.branchNop 1
+.loadNop 1
+
+
+
+
+; TestImmArith: tests arithmetic instructions involving immediate values: 
 ;   addiu, sltiu, slti, andi, ori, xori, lui
 ; destroys: $a0, $a1, $t0, $t1, $t2, $v0, $ra
 .jumpNop 0 
@@ -673,6 +796,7 @@ TestStatus_Branch_Msg:          .db "Branch instructions: ", 0
 TestStatus_ImmArith_Msg:        .db "Alu with immediate instructions: ", 0
 TestStatus_Ok_Msg:              .db "OK\n", 0
 TestFinished_Msg:               .db "All tests passed.\n", 0
+Test_Failed_Msg:                .db " failed.\n", 0
 
 TestPrerequisite_Failed_Msg:    .db "Test preqrequisite failed: jal.\n", 0
 
@@ -711,20 +835,34 @@ TestLoad_Lhu_Msg:               .db "lhu:", 0
 TestLoad_Lw_Msg:                .db "lw:", 0
 TestLoad_Lwl_Msg:               .db "lwl:", 0
 TestLoad_Lwr_Msg:               .db "lwr:", 0
-TestLoad_Combo_Msg:             .db "lwl and lwr ", 0
-TestLoad_Failed_Msg:            .db "failed.\n", 0
+TestLoad_Combo_Msg:             .db "lwl and lwr", 0
 TestLoad_DirFailed_Msg:         .db " old content didn't persist or delay slot failed.\n", 0
 TestLoad_DelaySlotRead_Msg:     .db " read in delay slot failed.\n", 0
 TestLoad_DelaySlotWrite_Msg:    .db " write in delay slot failed (via 'or' instruction).\n", 0
 TestLoad_NoDelaySlot_Msg:       .db " delay slot should not exist.\n", 0
 
 .align 4
-TestLoad_WordDir:   .dw 0xdeadbeef, 0xbaadf00d
-TestLoad_Word:      .dw 1, -1, 0x8000_0000, 0x7FFF_FFFF, 0
-TestLoad_Half:      .dh 1, -1, 0x8000, 0x7FFF, 0
-TestLoad_Byte:      .db 1, -1, 0x80, 0x7F, 0
+TestLoad_WordDir:               .dw 0xdeadbeef, 0xbaadf00d
+TestLoad_Word:                  .dw 1, -1, 0x8000_0000, 0x7FFF_FFFF, 0
+TestLoad_Half:                  .dh 1, -1, 0x8000, 0x7FFF, 0
+TestLoad_Byte:                  .db 1, -1, 0x80, 0x7F, 0
 
+TestStore_Sb_Msg:               .db "sb", 0
+TestStore_Sh_Msg:               .db "sh", 0
+TestStore_Sw_Msg:               .db "sw", 0
+TestStore_Swl_Msg:              .db "swl", 0
+TestStore_Swr_Msg:              .db "swr", 0
+TestStore_Combo_Msg:            .db "swl and swr", 0
 
+.align 4
+TestStore_WordResult:           .dw 1, -1, 0x7F69_1337, 0x8000_0000, 0x89AB_CDEF
+TestStore_WordSize = 5*4
+TestStore_HalfResult:           .dh 1, -1, 0x7FAB, 0x8000, 0xABCD
+TestStore_HalfSize = 5*2
+TestStore_ByteResult:           .db 1, -1, 0x7F, 0x80, 0x69
+TestStore_ByteSize = 5
+
+.align 4
 FreeMemorySection:
 .resv MEMORY_SIZE
 FreeMemoryEnd:
