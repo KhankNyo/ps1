@@ -147,6 +147,7 @@ typedef struct AsmLabel
 {
     AsmToken Token;
     u64 Value;
+    u32 Hash;
 } AsmLabel;
 
 typedef struct AsmIncompleteDefinition
@@ -205,6 +206,7 @@ typedef struct Assembler
 
     AsmLabel Labels[2048];
     uint LabelCount;
+    uint LabelCap;
     AsmIncompleteDefinition IncompleteDefinitions[1024];
     uint IncompleteDefinitionCount;
     AsmIncompleteExpr IncompleteExprs[1024];
@@ -1401,29 +1403,87 @@ static void AsmPushIncompleteDefinition(Assembler *Asm, AsmToken Token, AsmExpre
     };
 }
 
-static void AsmPushLabel(Assembler *Asm, AsmToken Token, u64 Value)
+
+/* FNV-1a hashing */
+static u32 AsmHashStr(const char* Str, u32 Len)
 {
-    ASSERT(Asm->LabelCount < STATIC_ARRAY_SIZE(Asm->Labels));
-    Asm->Labels[Asm->LabelCount++] = (AsmLabel) {
-        .Token = Token,
-        .Value = Value,
-    };
+    u32 Hash = 2166136261u;
+    for (u32 i = 0; i < Len; i++)
+    {
+        Hash = (u32)(Hash ^ (u8)Str[i]) * 16777619;
+    }
+    return Hash;
 }
 
-static AsmLabel *AsmFindIdentifier(Assembler *Asm, StringView Str)
-{
-    for (uint i = 0; i < Asm->LabelCount; i++)
+#define ENTRY_IS_EMPTY(pLblEntry) ((pLblEntry)->Token.Str.Ptr == NULL)
+static AsmLabel *AsmFindLabelEntry(Assembler *Asm, StringView Str, u32 Hash)
+{    
+    u32 Index = Hash & (Asm->LabelCap - 1);
+    u32 SlotsEncountered = 0;
+    while (SlotsEncountered < Asm->LabelCap)
     {
-        AsmLabel *Entry = &Asm->Labels[i];
-        if (Str.Len == Entry->Token.Str.Len 
-        && Str.Ptr[0] == Entry->Token.Str.Ptr[0]
+        AsmLabel *Entry = &Asm->Labels[Index];
+        /* empty slot */
+        if (ENTRY_IS_EMPTY(Entry))
+        {
+            return Entry;
+        }
+        /* found an entry, it is the matching entry */
+        else if (Str.Len == Entry->Token.Str.Len 
+        && Hash == Entry->Hash 
         && AsmStrEqual(Str.Ptr, Entry->Token.Str.Ptr, Str.Len))
         {
             return Entry;
         }
+
+        /* slot is not available, advance */
+        Index = (Index + 1) & (Asm->LabelCap - 1);
+        SlotsEncountered++;
     }
     return NULL;
 }
+
+static void AsmPushLabel(Assembler *Asm, AsmToken Token, u64 Value)
+{
+    if (Asm->LabelCount >= Asm->LabelCap * 2/3)
+    {
+        TODO("resize label buffer");
+    }
+
+    u32 Hash = AsmHashStr(Token.Str.Ptr, Token.Str.Len);
+    AsmLabel *Entry = AsmFindLabelEntry(Asm, Token.Str, Hash);
+    if (NULL == Entry)
+        return;
+
+    if (!ENTRY_IS_EMPTY(Entry))
+    {
+        AsmErrorAtToken(Asm, &Token, 
+            "Redefinition of label '%.*s' that was declared on line %d.", 
+            Token.Str.Len, Token.Str.Ptr, Entry->Token.Line
+        );
+        return;
+    }
+
+    Entry->Token = Token;
+    Entry->Value = Value;
+    Entry->Hash = Hash;
+    Asm->LabelCount++;
+}
+
+static AsmLabel *AsmFindIdentifier(Assembler *Asm, StringView Str)
+{
+    if (Asm->LabelCount == 0)
+        return NULL;
+
+    u32 Hash = AsmHashStr(Str.Ptr, Str.Len);
+    AsmLabel *Entry = AsmFindLabelEntry(Asm, Str, Hash);
+    if (NULL == Entry || ENTRY_IS_EMPTY(Entry))
+        return NULL;
+
+    return Entry;
+}
+
+#undef ENTRY_IS_EMPTY
 
 static Bool8 AsmCheckShamt(Assembler *Asm, const AsmExpression *ShamtExpr)
 {
@@ -2207,6 +2267,8 @@ ByteBuffer R3051_Assemble(
         .BranchNop = true,
         .LoadNop = true,
         .JumpNop = true,
+
+        .LabelCap = STATIC_ARRAY_SIZE(Asm.Labels),
     };
     if (!AsmResizeBuffer(&Asm, 1024*4))
         return (ByteBuffer) { 0 };
