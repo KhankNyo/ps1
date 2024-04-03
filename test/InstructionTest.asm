@@ -1,12 +1,13 @@
 ;.littleEndian
 
-SYS_WRITE   = 0x7000_0000
-SYS_CLRSCR  = 0x7100_0000
-SYS_EXIT    = 0x7200_0000
+SYS_WRITESTR    = 0x7000_0000
+SYS_WRITEHEX    = 0x7001_0000
+SYS_CLRSCR      = 0x7100_0000
+SYS_EXIT        = 0x7200_0000
 
-RESET_VEC   = 0xBFC0_0000
-START       = RESET_VEC + 0x0180
-MEMORY_SIZE = 4096
+RESET_VEC       = 0xBFC0_0000
+START           = RESET_VEC + 0x0180
+MEMORY_SIZE     = 4096
 
 
 .org RESET_VEC
@@ -15,6 +16,7 @@ MEMORY_SIZE = 4096
 ;   j,   jal, 
 ;   lui, ori
 .jumpNop 0
+.branchNop 0
     j Reset1                    ; NOTE: jump to delay slot
 Reset1:
     nop
@@ -33,10 +35,11 @@ Reset_LinkAddr:
     nop
 ResetTrap: 
     la $t0, TestPrerequisite_Failed_Msg
-    li $t1, SYS_WRITE
+    li $t1, SYS_WRITESTR
     sw $t0, 0($t1)
     beq $zero, $zero, ResetTrap
 .jumpNop 1
+.branchNop 1
 ResetEnd:
 .resv START - ResetEnd
 
@@ -84,26 +87,36 @@ InfLoop:
 
 
 
-; PrintStr: prints string in $a0 by writing its content to SYS_WRITE
+; PrintStr: prints string in $a0 by writing its content to SYS_WRITESTR
 ; args:     const char *$a0
-; destroys: $t0, $ra
+; destroys: $t0
 PrintStr: 
-    li $t0, SYS_WRITE
+    li $t0, SYS_WRITESTR
     sw $a0, 0($t0)          ; call sys_write(Str)
     ret 
 
+; PrintHex: prints hexadecimal number in $a0
+; args:     u32 $a0
+; destroys: $t0
+PrintHex:
+    li $t0, SYS_WRITEHEX
+    sw $a0, 0($t0)
+    ret
 
 
 
-; TestFailed: prints string in $a0 and then string in $a1
-; args:     const char *$a0, $a1
+
+; TestFailed: prints string pointed to by $a0 and $a1, prints he addr pointed to by $a2
+; args:     const char *$a0, $a1; u32 $a2
 ; returns:  1 in $v0
-; destroys: $t0, $t1, $v0, $ra
+; destroys: $t0..1, $a0, $v0
 TestFailed:
     move $t1, $ra                   ; save return addr 
         jal PrintStr
         move $a0, $a1
         jal PrintStr
+        move $a0, $a2
+        jal PrintHex
     move $ra, $t1                   ; restore return addr 
     ori $v0, $zero, 1               ; returns test failed (not using jump delay slot here)
     ret
@@ -133,18 +146,20 @@ TestBranch:
     addiu $t4, $t3, -1
 
     ; test bltz
+TestBranch_Bltz:
     la $a1, TestBranch_Bltz_Msg
+    la $a2, TestBranch_Bltz
     move $t7, $zero                 ; branch delday counter 
     bltz $t3, TestBranch_Bltz_Ok0   ; assert (i32)(0x8000_0000) < 0
         addiu $t7, 1
         bra TestFailed
         nop
-TestBranch_Bltz_Ok0:
+    TestBranch_Bltz_Ok0:
     bltz $t2, TestBranch_Bltz_Ok1   ; assert (i32)0xFFFF_FFFF < 0
         addiu $t7, 1
         bra TestFailed
         nop
-TestBranch_Bltz_Ok1:
+    TestBranch_Bltz_Ok1:
     bltz $t4, TestFailed            ; assert !( (i32)0x7FFF_FFFF < 0 )
         addiu $t7, 1
     bltz $t9, TestFailed            ; assert !( 1 < 0 )
@@ -157,23 +172,25 @@ TestBranch_Bltz_Ok1:
         nop
 
     ; test bgez
+TestBranch_Bgez:
     la $a1, TestBranch_Bgez_Msg
+    la $a2, TestBranch_Bgez
     move $t7, $zero
     bgez $t8, TestBranch_Bgez_Ok0   ; assert 0 >= 0
         addiu $t7, 1
         bra TestFailed
         nop
-TestBranch_Bgez_Ok0:
+    TestBranch_Bgez_Ok0:
     bgez $t9, TestBranch_Bgez_Ok1   ; assert 1 >= 0
         addiu $t7, 1
         bra TestFailed
         nop
-TestBranch_Bgez_Ok1:
+    TestBranch_Bgez_Ok1:
     bgez $t4, TestBranch_Bgez_Ok2   ; assert (i32)0x7FFF_FFFF >= 0
         addiu $t7, 1
         bra TestFailed
         nop
-TestBranch_Bgez_Ok2:
+    TestBranch_Bgez_Ok2:
     bgez $t2, TestFailed            ; assert !( (i32)0xFFFF_FFFF >= 0 )
         addiu $t7, 1
     bgez $t3, TestFailed            ; assert !( (i32)0x8000_0000 >= 0 )
@@ -184,23 +201,25 @@ TestBranch_Bgez_Ok2:
         nop
 
     ; test blez
+TestBranch_Blez:
     la $a1, TestBranch_Blez_Msg
+    la $a2, TestBranch_Blez
     move $t7, $zero
     blez $t8, TestBranch_Blez_Ok0   ; assert 0 <= 0
         addiu $t7, 1
         bra TestFailed
         nop
-TestBranch_Blez_Ok0:
+    TestBranch_Blez_Ok0:
     blez $t2, TestBranch_Blez_Ok1   ; assert (i32)0xFFFF_FFFF <= 1
         addiu $t7, 1
         bra TestFailed
         nop
-TestBranch_Blez_Ok1:
+    TestBranch_Blez_Ok1:
     blez $t3, TestBranch_Blez_Ok3   ; assert (i32)0x8000_0000 <= 0
         addiu $t7, 1
         bra TestFailed
         nop
-TestBranch_Blez_Ok3:
+    TestBranch_Blez_Ok3:
     blez $t9, TestFailed            ; assert !( 1 <= 0 )
         addiu $t7, 1
     blez $t4, TestFailed            ; assert !( (i32)0x7FFF_FFFF <= 0 )
@@ -211,18 +230,20 @@ TestBranch_Blez_Ok3:
 
 
     ; test bgtz
+TestBranch_Bgtz:
     la $a1, TestBranch_Bgtz_Msg
+    la $a2, TestBranch_Bgtz
     move $t7, $zero                 ; branch delay counter
     bgtz $t9, TestBranch_Bgtz_Ok0   ; assert 1 > 0
         addiu $t7, 1
         bra TestFailed
         nop
-TestBranch_Bgtz_Ok0:
+    TestBranch_Bgtz_Ok0:
     bgtz $t4, TestBranch_Bgtz_Ok1   ; assert (i32)0x7FFF_FFFF > 0
         addiu $t7, 1
         bra TestFailed
         nop
-TestBranch_Bgtz_Ok1:
+    TestBranch_Bgtz_Ok1:
     bgtz $t8, TestFailed            ; assert !( 0 > 0 )
         addiu $t7, 1
     bgtz $t2, TestFailed            ; assert !( (i32)0xFFFF_FFFF > 0 )
@@ -235,8 +256,10 @@ TestBranch_Bgtz_Ok1:
 
     move $t5, $ra                       ; save return reg 
     ; test bltzal
+TestBranch_Bltzal:
     la $a3, TestBranch_Bltzal_Msg
-    la $a2, TestBranch_BltzalRetAddr_Msg
+    la $t0, TestBranch_BltzalRetAddr_Msg
+    la $a2, TestBranch_Bltzal
     move $t7, $zero                     ; branch delay counter
     bltzal $t2, TestBranch_Bltzal_Ok1   ; assert (i32)0xFFFF_FFFF < 0
         addiu $t7, 1
@@ -245,10 +268,11 @@ TestBranch_Bgtz_Ok1:
         jal TestFailed
         move $a1, $a3                   ; set instruction error msg (in delay slot)
         move $ra, $t6
-TestBranch_Bltzal_Ok1:
+    TestBranch_Bltzal_Ok1:
         la $t6, TestBranch_Bltzal_Addr0
+        move $a1, $t0                   ; ret addr error msg
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bltzal_Addr0
-        move $a1, $a2
+            move $ra, $t5               ; restore return reg
 
     bltzal $t3, TestBranch_Bltzal_Ok2   ; assert (i32)0x8000_0000 < 0
         addiu $t7, 1
@@ -257,42 +281,48 @@ TestBranch_Bltzal_Ok1:
         jal TestFailed
         move $a1, $a3                   ; NOTE: arg in delay slot
         move $ra, $t6
-TestBranch_Bltzal_Ok2:
+    TestBranch_Bltzal_Ok2:
         la $t6, TestBranch_Bltzal_Addr1
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bltzal_Addr1
-        move $a1, $a2                   ; ret addr error msg
+        move $a1, $t0                   ; ret addr error msg (in delay slot)
+            move $ra, $t5               ; restore return reg
 
     move $a1, $a3                       ; instruction error msg
     bltzal $t8, TestFailed              ; assert !( 0 < 0 ) 
         addiu $t7, 1
     TestBranch_Bltzal_Addr2:
         la $t6, TestBranch_Bltzal_Addr2
+        move $a1, $t0                   ; ret addr error msg (in delay slot)
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bltzal_Addr2
-        move $a1, $a2                   ; ret addr error msg (in delay slot)
+            move $ra, $t5               ; restore return reg
 
     move $a1, $a3                       ; instruction error msg
     bltzal $t9, TestFailed              ; assert !( 1 < 0 )
         addiu $t7, 1
     TestBranch_Bltzal_Addr3:
         la $t6, TestBranch_Bltzal_Addr3
+        move $a1, $t0                   ; ret addr error msg (in delay slot)
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bltzal_Addr3
-        move $a1, $a2                   ; ret addr error msg (in delay slot
+            move $ra, $t5               ; restore return reg
 
     move $a1, $a3                       ; instruction error msg
     bltzal $t4, TestFailed              ; assert !( 1 < 0 ) 
         addiu $t7, 1
     TestBranch_Bltzal_Addr4:
         la $t6, TestBranch_Bltzal_Addr4
+        move $a1, $t0                   ; ret addr error msg (in delay slot)
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bltzal_Addr4
-        move $a1, $a2                   ; ret addr error msg (in delay slot)
+            move $ra, $t5               ; restore return reg
     li $t6, 5
     la $a1, TestBranch_BltzalDelaySlot_Msg
     bne $t6, $t7, TestFailed            ; assert branch delay counter == 5
-        nop
+        move $ra, $t5                   ; restore return reg
 
     ; test bgezal
+TestBranch_Bgezal:
     la $a3, TestBranch_Bgezal_Msg
-    la $a2, TestBranch_BgezalRetAddr_Msg
+    la $t0, TestBranch_BgezalRetAddr_Msg
+    la $a2, TestBranch_Bgezal
     move $t7, $zero
     bgezal $t8, TestBranch_Bgezal_Ok0
         addiu $t7, 1
@@ -301,10 +331,11 @@ TestBranch_Bltzal_Ok2:
         jal TestFailed
         move $a1, $a3
         move $ra, $t6
-TestBranch_Bgezal_Ok0:
+    TestBranch_Bgezal_Ok0:
         la $t6, TestBranch_Bgezal_Addr0
+        move $a1, $t0                   ; error msg
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bgezal_Addr0
-        move $a1, $a2
+            move $ra, $t5               ; restore return reg
 
     bgezal $t9, TestBranch_Bgezal_Ok1
         addiu $t7, 1
@@ -313,10 +344,11 @@ TestBranch_Bgezal_Ok0:
         jal TestFailed
         move $a1, $a3
         move $ra, $t6
-TestBranch_Bgezal_Ok1:
+    TestBranch_Bgezal_Ok1:
         la $t6, TestBranch_Bgezal_Addr1
+        move $a1, $t0                   ; error msg
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bgezal_Addr1
-        move $a1, $a2
+            move $ra, $t5               ; restore return reg
     
     bgezal $t4, TestBranch_Bgezal_Ok2
         addiu $t7, 1
@@ -325,35 +357,38 @@ TestBranch_Bgezal_Ok1:
         jal TestFailed
         move $a1, $a3
         move $ra, $t6
-TestBranch_Bgezal_Ok2:
+    TestBranch_Bgezal_Ok2:
         la $t6, TestBranch_Bgezal_Addr2
+        move $a1, $t0                   ; error msg
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bgezal_Addr2
-        move $a1, $a2
+            move $ra, $t5               ; restore return reg
 
     move $a1, $a3
     bgezal $t2, TestFailed
         addiu $t7, 1
     TestBranch_Bgezal_Addr3:
         la $t6, TestBranch_Bgezal_Addr3
+        move $a1, $t0                   ; error msg
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bgezal_Addr3
-        move $a1, $a2
+            move $ra, $t5               ; restore return reg
 
     move $a1, $a3
     bgezal $t3, TestFailed
         addiu $t7, 1
     TestBranch_Bgezal_Addr4:
         la $t6, TestBranch_Bgezal_Addr4
+        move $a1, $t0                   ; error msg
         bne $ra, $t6, TestFailed        ; assert ra == TestBranch_Bgezal_Addr4
-        move $a1, $a2
+            move $ra, $t5               ; restore return reg
     li $t6, 5
     la $a1, TestBranch_BgezalDelaySlot_Msg
     bne $t6, $t7, TestFailed            ; assert branch delay counter == 5
-        nop
+        move $ra, $t5                   ; restore return reg
+
+    ret 
+    nop
 .branchNop 1
 .jumpNop 1
-
-    move $ra, $t5                   ; restore return reg
-    ret 
 
 
 
@@ -371,6 +406,8 @@ TestLoad:
     move $t5, $zero
 
     ; test lb (signed)
+TestLoad_Lb:
+    la $a2, TestLoad_Lb
     la $a1, TestLoad_DelaySlotRead_Msg
     la $a0, TestLoad_Lb_Msg
     la $at, TestLoad_Byte
@@ -400,8 +437,10 @@ TestLoad:
         nop
 
     ; test lh (signed)
-    la $a0, TestLoad_Lh_Msg
+TestLoad_Lh:
+    la $a2, TestLoad_Lh
     la $a1, TestLoad_DelaySlotRead_Msg
+    la $a0, TestLoad_Lh_Msg
     la $at, TestLoad_Half
     li $t7, -0x8000
     li $t6, 0x7FFF
@@ -429,8 +468,10 @@ TestLoad:
         nop
 
     ; test lw (signed)
-    la $a0, TestLoad_Lw_Msg
+TestLoad_Lw:
+    la $a2, TestLoad_Lw
     la $a1, TestLoad_DelaySlotRead_Msg
+    la $a0, TestLoad_Lw_Msg
     la $at, TestLoad_Word
     li $t7, -0x8000_0000
     la $t6,  0x7FFF_FFFF
@@ -459,12 +500,14 @@ TestLoad:
         nop
 
     ; test lbu
-    li $t6, 0x7F
-    li $t7, 0x80
-    li $t8, 0xFF
+TestLoad_Lbu:
+    la $a2, TestLoad_Lbu
     la $a1, TestLoad_DelaySlotRead_Msg
     la $a0, TestLoad_Lbu_Msg
     la $at, TestLoad_Byte
+    li $t6, 0x7F
+    li $t7, 0x80
+    li $t8, 0xFF
 
     lbu $t0, 0($at)
     lbu $t0, 1($at)
@@ -487,12 +530,14 @@ TestLoad:
         nop
 
     ; test lhu
-    li $t6, 0x7FFF
-    li $t7, 0x8000
-    li $t8, 0xFFFF
+TestLoad_Lhu:
+    la $a2, TestLoad_Lhu
     la $a1, TestLoad_DelaySlotRead_Msg
     la $a0, TestLoad_Lhu_Msg
     la $at, TestLoad_Half
+    li $t6, 0x7FFF
+    li $t7, 0x8000
+    li $t8, 0xFFFF
 
     move $t0, $t1
     lhu $t0, 0($at)
@@ -518,9 +563,11 @@ TestLoad:
         nop
 
     ; test lwl
-    la $at, TestLoad_WordDir
-    la $a0, TestLoad_Lwl_Msg
+TestLoad_Lwl:
+    la $a2, TestLoad_Lwl
     la $a1, TestLoad_DirFailed_Msg
+    la $a0, TestLoad_Lwl_Msg
+    la $at, TestLoad_WordDir
 
     la $t9, 0xdeadbeef
     la $t8, 0xadbeef77
@@ -550,9 +597,11 @@ TestLoad:
         nop
 
     ; test lwr
-    la $at, TestLoad_WordDir
-    la $a0, TestLoad_Lwl_Msg
+TestLoad_Lwr:
+    la $a2, TestLoad_Lwl
     la $a1, TestLoad_DirFailed_Msg
+    la $a0, TestLoad_Lwl_Msg
+    la $at, TestLoad_WordDir
 
     la $t9, 0xdeadbeef
     la $t8, 0x77deadbe
@@ -582,8 +631,10 @@ TestLoad:
         nop
 
     ; test lwl, lwr combo
-    la $a0, TestLoad_Combo_Msg
+TestLoad_Combo:
+    la $a2, TestLoad_Combo
     la $a1, Test_Failed_Msg
+    la $a0, TestLoad_Combo_Msg
     la $t1, TestLoad_WordDir
     la $t2, 0x0D_DEAD_BE
     la $t3, 0xF00D_DEAD_
@@ -607,6 +658,7 @@ TestLoad:
 
     move $v0, $zero
     ret 
+    nop
 .loadNop 1
 .branchNop 1
 
@@ -621,14 +673,15 @@ TestStore:
 
     ; test sb:
     ; memcpy(FreeMemorySection, TestStore_ByteResult, TestStore_ByteSize)
+TestStore_Sb:
     la $t1, FreeMemorySection
     la $t0, TestStore_ByteResult
     addiu $t2, $t0, TestStore_ByteSize
-TestStore_Bytes: 
-    lb $t3, 0($t0)
-    addiu $t0, 1
-    sb $t3, 0($t1)
-    bne $t0, $t2, TestStore_Bytes
+    TestStore_Bytes_Loop: 
+        lb $t3, 0($t0)
+        addiu $t0, 1
+        sb $t3, 0($t1)
+    bne $t0, $t2, TestStore_Bytes_Loop
         addiu $t1, 1                    ; NOTE: in branch delay slot
 
     ; memcmp(FreeMemorySection, TestStore_ByteResult, TestStore_ByteSize)
@@ -638,18 +691,20 @@ TestStore_Bytes:
         ori $a2, $zero, TestStore_ByteSize  ; NOTE: in jump delay slot
     la $a0, TestStore_Sb_Msg
     la $a1, Test_Failed_Msg
+    la $a2, TestStore_Sb
     bez $v0, TestFailed                 ; fail if buffer not equal
         move $ra, $t9                   ; return while we're at it
 
     ; test sh:
+TestStore_Sh:
     la $t1, FreeMemorySection
     la $t0, TestStore_HalfResult
     addiu $t2, $t0, TestStore_HalfSize
-TestStore_Half:
-    lh $t3, 0($t0)
-    addiu $t0, 2
-    sh $t3, 0($t1)
-    bne $t0, $t2, TestStore_Half
+    TestStore_Half_Loop:
+        lh $t3, 0($t0)
+        addiu $t0, 2
+        sh $t3, 0($t1)
+    bne $t0, $t2, TestStore_Half_Loop
         addiu $t1, 2
 
     ; memcmp(FreeMemorySection, TestStore_HalfResult, TestStore_HalfSize)
@@ -659,18 +714,20 @@ TestStore_Half:
         ori $a2, $zero, TestStore_HalfSize ; NOTE: jump delay
     la $a0, TestStore_Sh_Msg
     la $a1, Test_Failed_Msg
+    la $a2, TestStore_Sh
     bez $v0, TestFailed                 ; fail if buffer not equal
         move $ra, $t9                   ; return while we're at it
 
     ; test sw:
+TestStore_Sw:
     la $t1, FreeMemorySection
     la $t0, TestStore_WordResult
     addiu $t2, $t0, TestStore_WordSize
-TestStore_Word:
-    lw $t3, 0($t0)
-    addiu $t0, 4
-    sw $t3, 0($t1)
-    bne $t0, $t2, TestStore_Word
+    TestStore_Word_Loop:
+        lw $t3, 0($t0)
+        addiu $t0, 4
+        sw $t3, 0($t1)
+    bne $t0, $t2, TestStore_Word_Loop
         addiu $t1, 4
 
     ; memcmp(FreeMemorySection, TestStore_WordResult, TestStore_WordSize)
@@ -680,14 +737,164 @@ TestStore_Word:
         ori $a2, $zero, TestStore_WordSize ; NOTE: jump delay
     la $a0, TestStore_Sw_Msg
     la $a1, Test_Failed_Msg
+    la $a2, TestStore_Sw
     bez $v0, TestFailed                 ; fail if buffer not equal
         move $ra, $t9                   ; return while we're at it
 
-TestStore_WordLeft:
-TestStore_WordRight:
-TestStore_WordCombo:
+    ; test swl
+    li $t0, 0x44_33_22_11
+    la $t1, 0x88_77_66_55
+    la $t2, FreeMemorySection
+TestStore_Swr:
+    la $a0, TestStore_Swr_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestStore_Swr
+
+    la $t3, 0xAA_BB_CC_DD
+    la $t6, 0xBB_CC_DD_11
+    la $t7, 0xCC_DD_22_11
+    la $t8, 0xDD_33_22_11
+
+    sw $t1, 4($t2)
+    sw $t0, 0($t2)                      ;  11 22 33 44  55 66 77 88
+
+    swr $t3, 3($t2)                     ;  11 22 33[DD] 55 66 77 88
+    lw $t4, 0($t2)
+    lw $t5, 4($t2)
+    bne $t4, $t8, TestFailed
+        nop
+    bne $t5, $t1, TestFailed
+        ; delay slot doesn't matter
+
+    swr $t3, 2($t2)                     ; 11 22[DD CC] 55 66 77 88
+    lw $t4, 0($t2)
+    lw $t5, 4($t2)
+    bne $t4, $t7, TestFailed
+        nop
+    bne $t5, $t1, TestFailed
+        ; delay slot doesn't matter
+ 
+    swr $t3, 1($t2)                     ; 11[DD CC BB] 55 66 77 88
+    lw $t4, 0($t2)
+    lw $t5, 4($t2)
+    bne $t4, $t6, TestFailed
+        nop
+    bne $t5, $t1, TestFailed
+        ; delay slot doesn't matter
+ 
+    swr $t3, 0($t2)                     ; [DD CC BB AA] 55 66 77 88
+    lw $t4, 0($t2)
+    lw $t5, 4($t2)
+    bne $t4, $t3, TestFailed
+        nop
+    bne $t5, $t1, TestFailed
+        nop
+
+TestStore_Swl:
+    la $a0, TestStore_Swl_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestStore_Swl
+
+    la $t3, 0xAA_BB_CC_DD
+    la $t6, 0x88_AA_BB_CC
+    la $t7, 0x88_77_AA_BB
+    la $t8, 0x88_77_66_AA
+
+    sw $t0, 0($t2)                      ; 11 22 33 44  55 66 77 88
+    sw $t1, 4($t2)
+
+    swl $t3, 1+3($t2)                   ; 11 22 33 44 [AA]66 77 88
+    lw $t4, 0($t2)
+    lw $t5, 4($t2)
+    bne $t4, $t0, TestFailed
+        nop
+    bne $t5, $t8, TestFailed
+        ; delay slot doesn't matter
+
+    swl $t3, 2+3($t2)                   ; 11 22 33 44 [BB AA]77 88
+    lw $t4, 0($t2)
+    lw $t5, 4($t2)
+    bne $t4, $t0, TestFailed
+        nop
+    bne $t5, $t7, TestFailed
+        ; delay slot doesn't matter
+
+    swl $t3, 3+3($t2)                   ; 11 22 33 44 [CC BB AA]88
+    lw $t4, 0($t2)
+    lw $t5, 4($t2)
+    bne $t4, $t0, TestFailed
+        nop
+    bne $t5, $t6, TestFailed
+        ; delay slot doesn't matter
+
+    swl $t3, 4+3($t2)                     ; 11 22 33 44 [DD CC BB AA]
+    lw $t4, 0($t2)
+    lw $t5, 4($t2)
+    bne $t4, $t0, TestFailed
+        nop
+    bne $t5, $t3, TestFailed
+        ; delay slot doesn't matter
+
+TestStore_Combo:
+    ; https://student.cs.uwaterloo.ca/~cs350/common/r3000-manual.pdf
+    ; wtf is there a mistake between appendix A-72 and A-74??
+    ; it said swl reg, n(base); swr reg, n(base) can be used to load an unaligned word, 
+    ; shouldn't it be swl reg, n+3(base); swr reg, n(base)???
+    la $a0, TestStore_Combo_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestStore_Combo
+
+    li $t0, 0x1337C0DE
+    la $t1, FreeMemorySection
+    li $t2, 0x44_33_22_11
+
+    ; offset by 1
+    sw $t2, 0($t1)                      ; 11 22 33 44  11 22 33 44
+    sw $t2, 4($t1)
+
+    swr $t0, 1($t1)                     ; 11[DE C0 37] 11 22 33 44
+    swl $t0, 1+3($t1)                   ; 11[DE C0 37  13]22 33 44
+
+    lw $t3, 0($t1)
+    li $t4, 0x37_C0DE_11
+    bne $t3, $t4, TestFailed
+    lw $t3, 4($t1)
+    li $t4, 0x44_33_22_13
+    bne $t3, $t4, TestFailed
+        ; delay slot doesn't matter
+
+    ; offset by 2
+    sw $t2, 0($t1)                      ; 11 22 33 44  11 22 33 44
+    sw $t2, 4($t1)
+
+    swr $t0, 2($t1)                     ; 11 22[DE C0] 11 22 33 44
+    swl $t0, 2+3($t1)                   ; 11 22[DE C0  37 13]33 44
+
+    lw $t3, 0($t1)
+    la $t4, 0xC0DE_22_11
+    bne $t3, $t4, TestFailed
+    lw $t3, 4($t1)
+    la $t4, 0x44_33_1337
+    bne $t3, $t4, TestFailed
+        ; delay slot doesn't matter
+
+    ; offset by 3
+    sw $t2, 0($t1)                      ; 11 22 33 44  11 22 33 44
+    sw $t2, 4($t1)
+
+    swr $t0, 3($t1)                     ; 11 22 33[DE] 11 22 33 44
+    swl $t0, 3+3($t1)                   ; 11 22 33[DE  C0 37 13]44
+
+    lw $t3, 0($t1)
+    la $t4, 0xDE_33_22_11
+    bne $t3, $t4, TestFailed
+    lw $t3, 4($t1)
+    li $t4, 0x44_1337_C0
+    bne $t3, $t4, TestFailed
+        move $v0, $zero
+
     ret 
-    move $v0, $zero
+    nop
 .jumpNop 1
 .loadNop 1
 .branchNop 1

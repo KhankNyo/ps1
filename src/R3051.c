@@ -944,9 +944,9 @@ static R3051_StageStatus R3051_Memory(R3051 *This)
     } break;
 
 
-    case 046: /* lwl */
+    case 046: /* lwr */
     {
-        /* reads 'down' from a given addr to one that's divisible by 4 */
+        /* reads 'up' from a given addr until it hits an addr that's divisble by 4 */
         u32 Data = 0;
         u32 Mask = 0;
         int BytesRead = 0;
@@ -958,9 +958,9 @@ static R3051_StageStatus R3051_Memory(R3051 *This)
         DataRead = Rt;
         MASKED_LOAD(DataRead, Data, Mask);
     } break;
-    case 042: /* lwr */
+    case 042:  /* lwl */
     {
-        /* reads 'up' from a given addr until it hits an addr that's divisble by 4 */
+        /* reads 'down' from a given addr to one that's divisible by 4 */
         u32 Data = 0;
         u32 Mask = 0;
         int BytesRead = 0;
@@ -973,26 +973,24 @@ static R3051_StageStatus R3051_Memory(R3051 *This)
         MASKED_LOAD(DataRead, Data, Mask);
     } break;
 
-    case 056: /* swl */
-    {
-        /* stores 'down' from a given addr + 4 to one that's divisible by 4 */
-        u32 Src = Rt;
-        do {
-            WRITE_BYTE(Addr, Src & 0xFF);
-            Src >>= 8;
-        } while (Addr++ & 0x3);
-        return Status;
-    } break;
-    case 052: /* swr */
+    case 056: /* swr */
     {
         /* stores 'up' from a given addr to one that's divisible by 4 */
-        u32 Src = Rt;
-        Addr += 4;
         do {
-            WRITE_BYTE(Addr, (Src >> 24) & 0xFF);
-            Src <<= 8;
-        } while (--Addr & 0x3);
+            WRITE_BYTE(Addr, Rt & 0xFF);
+            Rt >>= 8;
+        } while (++Addr & 0x3);
         return Status;
+    } break;
+    case 052: /* swl */
+    {
+        /* stores 'down' from a given addr + 4 to one that's divisible by 4 */
+        do {
+            WRITE_BYTE(Addr, Rt >> 24);
+            Rt <<= 8;
+        } while (Addr-- & 0x3);
+        return Status;
+
     } break;
 
     default: return Status;
@@ -1178,9 +1176,14 @@ InvalidatePipeline:
 #include "Disassembler.c"
 
 
+typedef enum ScreenFlag 
+{
+    SCREEN_CLEAR_ON_Y_WRAP = 1,
+} ScreenFlag;
 typedef enum TestSyscall 
 {
     TESTSYS_WRITESTR    = 0x70000000,
+    TESTSYS_WRITEHEX    = 0x70010000,
     TESTSYS_CLRSCR      = 0x71000000,
     TESTSYS_EXIT        = 0x72000000,
 } TestSyscall;
@@ -1196,6 +1199,7 @@ typedef struct ScreenBuffer
     iSize BufferSizeBytes;
     int Width, Height, XOffset, YOffset;
     Vec2i WriteCursor;
+    ScreenFlag Flags;
 } ScreenBuffer;
 
 typedef struct Buffer 
@@ -1207,9 +1211,9 @@ typedef struct Buffer
 
 
 #define STREQU(Buf, ConstStr) (0 == strncmp(Buf, ConstStr, sizeof ConstStr - 1))
-#define STATUS_HEIGHT (24)
+#define STATUS_HEIGHT (21)
 #define STATUS_WIDTH (14*4)
-#define LOG_HEIGHT (3)
+#define LOG_HEIGHT (4)
 #define LOG_WIDTH STATUS_WIDTH
 #define SEPARATOR_WIDTH 1
 #define SEPARATOR_HEIGHT 1
@@ -1249,7 +1253,8 @@ static ScreenBuffer sLogWindow = {
     .YOffset = STATUS_HEIGHT + SEPARATOR_HEIGHT,
     .Width = LOG_WIDTH,
     .Height = LOG_HEIGHT,
-    .BufferSizeBytes = sizeof sMasterScreenBuffer
+    .BufferSizeBytes = sizeof sMasterScreenBuffer,
+    .Flags = SCREEN_CLEAR_ON_Y_WRAP,
 };
 
 
@@ -1299,40 +1304,6 @@ static uint ScreenIncPos(ScreenBuffer *Screen)
     return WrapFlags;
 }
 
-
-static void ScreenWriteStr(ScreenBuffer *Screen, const char *Str, iSize MaxLen, uint Flags)
-{
-    while (MaxLen --> 0 && *Str)
-    {
-        char Ch = *Str++;
-        /* write the char */
-        switch (Ch)
-        {
-        default:
-        {
-            char *WritePtr = ScreenGetWritePtr(Screen, Screen->WriteCursor.x, Screen->WriteCursor.y);
-            *WritePtr = Ch;
-
-            uint Wrapped = ScreenIncPos(Screen);
-            if (!(Flags & WRAP_X) && (Wrapped & WRAP_X))
-                goto Out;
-            if (!(Flags & WRAP_Y) && (Wrapped & WRAP_Y))
-                goto Out;
-        } break;
-        case '\n':
-        {
-            ScreenNewline(Screen);
-        } break;
-        case '\r':
-        {
-            ScreenMoveWriteCursorTo(Screen, 0, Screen->WriteCursor.y - 1);
-        } break;
-        }
-    }
-Out:
-    ;
-}
-
 static void ScreenClear(ScreenBuffer *Screen, char Ch)
 {
     ScreenMoveWriteCursorTo(Screen, 0, 0);
@@ -1346,6 +1317,45 @@ static void ScreenClear(ScreenBuffer *Screen, char Ch)
     } while (!(WRAP_Y & ScreenIncPos(Screen)));
     ScreenMoveWriteCursorTo(Screen, 0, 0);
 }
+
+
+static void ScreenWriteStr(ScreenBuffer *Screen, const char *Str, iSize MaxLen, uint Flags)
+{
+    if ((Screen->Flags & SCREEN_CLEAR_ON_Y_WRAP)
+    && Screen->WriteCursor.x == 0 && Screen->WriteCursor.y == 0)
+    {
+        ScreenClear(Screen, ' ');
+    }
+
+    while (MaxLen --> 0 && *Str)
+    {
+        char Ch = *Str++;
+        /* write the char */
+        switch (Ch)
+        {
+        default:
+        {
+            char *WritePtr = ScreenGetWritePtr(Screen, Screen->WriteCursor.x, Screen->WriteCursor.y);
+            *WritePtr = Ch;
+
+            uint Wrapped = ScreenIncPos(Screen);
+            if (!(Flags & WRAP_X) && (Wrapped & WRAP_X))
+                return;
+            if (!(Flags & WRAP_Y) && (Wrapped & WRAP_Y))
+                return;
+        } break;
+        case '\n':
+        {
+            ScreenNewline(Screen);
+        } break;
+        case '\r':
+        {
+            ScreenMoveWriteCursorTo(Screen, 0, Screen->WriteCursor.y - 1);
+        } break;
+        }
+    }
+}
+
 
 static void ScreenInit(void)
 {
@@ -1403,6 +1413,7 @@ static u32 TranslateAddr(u32 LogicalAddr)
     switch (LogicalAddr)
     {
     case TESTSYS_WRITESTR:
+    case TESTSYS_WRITEHEX:
     case TESTSYS_EXIT:
     case TESTSYS_CLRSCR:
     {
@@ -1432,6 +1443,10 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
             ScreenWriteStr(&sTerminalWindow, (const char *)&Buf->Ptr[Data], MaxLength, false);
         }
     }
+    else if (Addr == (u32)TESTSYS_WRITEHEX)
+    {
+        SCREEN_PRINTF(&sTerminalWindow, 0, "0x%x", Data);
+    }
     else if (Addr == (u32)TESTSYS_CLRSCR)
     {
         ScreenClear(&sTerminalWindow, ' ');
@@ -1440,8 +1455,12 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
     {
         sShouldContinue = false;
     }
-    else if (Addr + Size <= Buf->Size)
+    else if (Addr + Size <= Buf->Size && Addr < Buf->Size)
     {
+        SCREEN_PRINTF(&sLogWindow, WRAP_X, 
+            "Writing 0x%0*x to 0x%08x\n", 
+            Size, Data, Addr + R3051_RESET_VEC
+        );
         for (int i = 0; i < (int)Size; i++)
         {
             Buf->Ptr[Addr + i] = Data & 0xFF;
@@ -1461,7 +1480,7 @@ static u32 MipsRead(void *UserData, u32 Addr, R3051_DataSize Size)
 {
     Buffer *Buf = UserData;
     Addr = TranslateAddr(Addr);
-    if (Addr + Size <= Buf->Size)
+    if (Addr + Size <= Buf->Size && Addr < Buf->Size)
     {
         u32 Data = 0;
         for (int i = 0; i < (int)Size; i++)
@@ -1567,7 +1586,7 @@ static void UpdateDisassembly(ScreenBuffer *Screen, const R3051 *Mips, int Start
         for (int i = 0; i < NUM_INS; i++)
         {
             u32 PhysAddr = TranslateAddr(CurrentPC);
-            if (PhysAddr + 4 <= Buf->Size)
+            if (PhysAddr + 4 <= Buf->Size && PhysAddr < Buf->Size)
             {
                 u32 Instruction;
                 memcpy(&Instruction, Buf->Ptr + PhysAddr, sizeof Instruction);
@@ -1614,8 +1633,12 @@ static void DumpState(const R3051 *Mips)
     int RegisterBoxPerLine = 4;
     int y = 0;
 
-    /* dump regs */
     ScreenClear(&sStatusWindow, ' ');
+    if (sLogWindow.WriteCursor.x == 0 && sLogWindow.WriteCursor.y == 0)
+    {
+        ScreenClear(&sLogWindow, ' ');
+    }
+    /* dump regs */
     const char *Display = "========== Registers ==========";
     int DisplayX = (sStatusWindow.Width - strlen(Display)) / 2;
     ScreenMoveWriteCursorTo(&sStatusWindow, DisplayX, y);
