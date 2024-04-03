@@ -75,6 +75,13 @@ ResetEnd:
     la $a0, TestStatus_Ok_Msg
     jal PrintStr
 
+    la $a0, TestStatus_Arith_Msg
+    jal PrintStr
+    jal TestArith
+    bnz $v0, Fail
+    la $a0, TestStatus_Ok_Msg
+    jal PrintStr
+
     la $a0, TestFinished_Msg ; else success, print msg 
     jal PrintStr
 Fail:
@@ -996,11 +1003,17 @@ TestImmArith:
 .jumpNop 1
 
 
+TestArith:
+    move $v0, $zero
+    ret
+
+
 DataSection:
 TestStatus_Load_Msg:            .db "Load instructions: ", 0
 TestStatus_Store_Msg:           .db "Store instructions: ", 0
 TestStatus_Branch_Msg:          .db "Branch instructions: ", 0
 TestStatus_ImmArith_Msg:        .db "Alu with immediate instructions: ", 0
+TestStatus_Arith_Msg:           .db "Alu instructions: ", 0
 TestStatus_Ok_Msg:              .db "OK\n", 0
 TestFinished_Msg:               .db "All tests passed.\n", 0
 Test_Failed_Msg:                .db " failed.\n", 0
