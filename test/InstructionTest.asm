@@ -68,13 +68,6 @@ ResetEnd:
     la $a0, TestStatus_Ok_Msg
     jal PrintStr
 
-    la $a0, TestStatus_ImmArith_Msg
-    jal PrintStr
-    jal TestImmArith
-    bnz $v0, Fail           
-    la $a0, TestStatus_Ok_Msg
-    jal PrintStr
-
     la $a0, TestStatus_Arith_Msg
     jal PrintStr
     jal TestArith
@@ -690,7 +683,6 @@ TestStore_Sb:
         sb $t3, 0($t1)
     bne $t0, $t2, TestStore_Bytes_Loop
         addiu $t1, 1                    ; NOTE: in branch delay slot
-
     ; memcmp(FreeMemorySection, TestStore_ByteResult, TestStore_ByteSize)
     la $a0, FreeMemorySection
     la $a1, TestStore_ByteResult
@@ -937,99 +929,479 @@ Memcmp_Continue:
 
 
 
-
-; TestImmArith: tests arithmetic instructions involving immediate values: 
-;   addiu, sltiu, slti, andi, ori, xori, lui
-; destroys: $a0, $a1, $t0, $t1, $t2, $v0, $ra
-.jumpNop 0 
-TestImmArith:
-    ; test r0:
-    la $a1, TestImmArith_R0_Msg
-    move $1, $zero
-    move $2, $zero
-    addiu $0, $0, 10                ; r0 = 0 (should not be 10)
-    addu $1, $0, $0                 ; r1 = 0 (should not be 20)
-    bne $1, $0, TestFailed          ; assert r1 == r0
-
-    ; test addiu: sign extension
-    la $a1, TestImmArith_AddiuSex_Msg
-    addiu $t0, $zero, -1            ; t0 =  0xFFFF_FFFF
-    addiu $t0, 1                    ; t0 += 0x0000_0001
-    bne $t0, $zero, TestFailed      ; assert t0 == 0
-
-    ; test ori: zero extension
-    la $a1, TestImmArith_OriZex_Msg
-    ori $t0, $zero, 0xFFFF          ; t0 = 0x0000_FFFF
-    addiu $t1, $zero, -1            ; t1 = 0xFFFF_FFFF
-    beq $t0, $t1, TestFailed        ; assert t0 != t1 
-
-    ; test lui, andi: 
-    la $a1, TestImmArith_LuiAndi_Msg
-    ori $t0, $zero, 0xFFFF          ; t0 =  0x0000_FFFF
-    lui $t0, 0xFFFF                 ; t0 =  0xFFFF_0000
-    andi $t0, $t0, 0xFFFF           ; t0 &= 0x0000_FFFF
-    bne $t0, $zero, TestFailed      ; assert t0 == 0
-
-    ; test xori:
-    la $a1, TestImmArith_Xori_Msg       
-    addiu $t0, $zero, -1            ; t0 =  0xFFFF_FFFF
-    xori $t0, 0xF00F                ; t0 ^= 0x0000_F00F
-    la $t1, 0xFFFF_0FF0             ; expected 
-    bne $t1, $t0, TestFailed        ; assert t0 == 0xFFFF_0FF0
-
-    ; test slti: true case 
-    la $a1, TestImmArith_Slti_Msg
-    slti $t0, $zero, 1              ; t1 = 0 < 1
-    bez $t0, TestFailed             ; assert condition true
-
-    ; test slti: false case, negative
-    la $a1, TestImmArith_SltiNeg_Msg
-    slti $t0, $zero, -1             ; t0 = 0 < -1
-    bnz $t0, TestFailed             ; assert condition false
-
-    ; test sltiu: true case, unsigned
-    la $a1, TestImmArith_SltiuUnsigned_Msg
-    sltiu $t0, $zero, -1            ; t0 = 0 < 0xFFFF_FFFF
-    bez $t0, TestFailed             ; assert condition true
-
-    ; test sltiu: false case, sign extension
-    la $a1, TestImmArith_SltiuSex_Msg
-    li $t1, -1
-    sltiu $t0, $t1, (-1 << 15)      ; t0 = 0xFFFF_FFFF < 0xFFFF_8000
-    bnz $t0, TestFailed             ; assert condition false
-
-    ret
-    move $v0, $zero                 ; returns test success 
-.jumpNop 1
-
-
+.branchNop 0
 TestArith:
+    ; ori
+TestArith_Ori:
+    la $a2, TestArith_Ori
+    la $a1, TestArith_ZeroExtend_Msg
+    la $a0, TestArith_Ori_Msg
+    ori $t0, $zero, 0x8000              ; 0x0000_8000
+    blez $t0, TestFailed                ; assert t0 > 0
+        ; delay slot shouldn't matter
+    ori $t0, $t0, 0x7FFF                ; 0x0000_FFFF
+    la $a1, Test_Failed_Msg
+    ori $t1, $zero, 0xFFFF              ; 0x0000_FFFF
+    bne $t0, $t1, TestFailed            ; assert equal 
+        ; delay slot doesn't matter
+TestArith_Ori_R0:
+    ori $zero, $t0, 0xFFFF
+    la $a2, TestArith_Ori_R0
+    la $a1, Test_R0_Msg
+    bnz $zero, TestFailed
+        ; delay slot doesn't matter
+
+    ; lui
+TestArith_Lui:
+    ori $t0, $zero, 0xFFFF              ; 0x0000_FFFF
+    la $a2, TestArith_Lui
+    la $a1, TestArith_ClearLowerFailed_Msg
+    la $a0, TestArith_Lui_Msg
+    lui $t0, 0                          ; 0x0000_0000
+    bnz $t0, TestFailed
+        ; delay slot doesn't matter 
+    lui $t0, 0x8000                     ; 0x8000_0000
+    la $a1, TestArith_SignExtend_Msg
+    bgez $t0, TestFailed                ; assert sign bit 
+        ; delay slot doesn't matter
+TestArith_Lui_R0:
+    lui $zero, 0xFFFF
+    la $a2, TestArith_Lui_R0
+    la $a1, Test_R0_Msg
+    bnz $zero, TestFailed
+        ; delay slot doesn't matter
+
+    ; addiu
+TestArith_Addiu:
+    lui $t0, 0xFFFF                     ; 0xFFFF_0000
+    la $a0, TestArith_Addiu_Msg
+    la $a1, TestArith_ZeroExtend_Msg
+    la $a2, TestArith_Addiu
+    addiu $t0, $zero, 0x7FFF            ; 0x0000_7FFF
+    blez $t0, TestFailed
+        ; delay slot shouldn't matter
+    addiu $t0, $zero, -0x8000           ; 0xFFFF_8000
+    la $a1, TestArith_SignExtend_Msg
+    bgez $t0, TestFailed
+        ; delay slot shouldn't matter
+TestArith_Addiu_R0:
+    addiu $zero, $t0, 1
+    la $a2, TestArith_Addiu_R0
+    la $a1, Test_R0_Msg
+    bnz $zero, TestFailed
+        ; delay slot doesn't matter
+
+    ; addu
+TestArith_Addu:
+    move $t4, $t0
+    ori $t1, $zero, 0x8420              ; 0x0000_8420
+    move $t5, $t1
+    la $a0, TestArith_Addu_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Addu
+    addu $t2, $t1, $t0                  ; t2 = 0x0420, t1 stays, t0 stays
+    ori $t3, $zero, 0x0420
+    bne $t2, $t3, TestFailed
+        nop
+    bne $t1, $t5, TestFailed
+        nop
+    bne $t0, $t4, TestFailed
+        ; delay slot shouldn't matter
+TestArith_Addu_R0:
+    addu $zero, $t1, $t1
+    la $a2, TestArith_Addu_R0
+    la $a1, Test_R0_Msg
+    bnz $zero, TestFailed
+        ; delay slot shouldn't matter
+
+    ; subu
+TestArith_Subu:
+    la $a0, TestArith_Subu_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Subu
+    li $t0, -0x8000_0000
+    li $t1, 1
+    li $t5, 0x7FFF_FFFF
+    move $t3, $t0
+    move $t4, $t1
+    subu $t2, $t0, $t1
+    bne $t2, $t5, TestFailed
+        nop
+    bne $t0, $t3, TestFailed
+        nop
+    bne $t1, $t4, TestFailed
+TestArith_Subu_R0:
+    subu $zero, $t0, $t1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Subu_R0
+    bnz $zero, TestFailed
+
+    ; andi
+TestArith_Andi:
+    ori $t1, $zero, 0xFFFF
+    li $t0, -1
+    andi $t0, $t0, 0xFFFF               ; 0x0000_FFFF
+    la $a0, TestArith_Andi_Msg
+    la $a1, TestArith_ZeroExtend_Msg
+    la $a2, TestArith_Andi
+    bne $t0, $t1, TestFailed
+        ; delay slot shouldn't matter
+TestArith_Andi_R0:
+    ori $t0, $zero, 0xFFFF
+    andi $zero, $t0, 0x0FF0
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Andi_R0
+    bnz $zero, TestFailed
+        ; delay slot shouldn't matter
+    
+    ; and 
+TestArith_And:
+    la $t0, 0xF0F0F23F
+    move $t3, $t0
+    la $t1, 0x10200001
+    move $t4, $t1
+    and $t2, $t1, $t0
+    li $t5, 0x10200001
+    la $a0, TestArith_And_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_And
+    bne $t5, $t2, TestFailed
+        nop 
+    bne $t4, $t1, TestFailed
+        nop
+    bne $t3, $t0, TestFailed
+        ; delay slot shouldn't matter
+TestArith_And_R0:
+    li $t0, 0x0FF0F0F0
+    li $t1, -1
+    and $zero, $t0, $t1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_And_R0
+    bnz $zero, TestFailed
+        ; delay slot shoudn't matter
+
+    ; xori  
+TestArith_Xori:
+    la $t0, 0x1234FF00
+    xori $t1, $t0, 0xFFFF               ; 0x123400FF
+    la $t2, 0x123400FF
+    la $a0, TestArith_Xori_Msg
+    la $a1, TestArith_ZeroExtend_Msg
+    la $a2, TestArith_Xori
+    bne $t1, $t2, TestFailed
+        ; delay slot shouldn't matter
+TestArith_Xori_R0:
+    xori $zero, $zero, 0xFFFF
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Xori_R0
+    bnz $zero, TestFailed
+        ; delay slot shouldn't matter
+
+    ; xor
+TestArith_Xor:
+    li $t0, -1
+    li $t1, 0
+    move $t3, $t0
+    move $t4, $t1
+    xor $t2, $t0, $t1                   ; 0xFFFF_FFFF ^ 0x0000_0000
+    li $t5, -1
+    la $a0, TestArith_Xor_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Xor
+    bne $t5, $t2, TestFailed
+        nop
+    bne $t4, $t1, TestFailed
+        nop
+    bne $t3, $t0, TestFailed
+        ; delay slot shouldn't matter
+TestArith_Xor_R0:
+    li $t0, -1
+    li $t1, 0
+    xor $zero, $t0, $t1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Xor_R0
+    bnz $zero, TestFailed
+        ; delay slot shouldn't matter
+
+    ; or
+TestArith_Or:
+    la $a0, TestArith_Or_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Or
+    la $t0, 0xFF00_0F0F
+    la $t1, 0x0F0F_F0F0
+    move $t3, $t0
+    move $t4, $t1
+    or $t2, $t1, $t0
+    la $t5, 0xFF0F_FFFF
+    bne $t2, $t5, TestFailed
+        nop
+    bne $t1, $t4, TestFailed
+        nop
+    bne $t0, $t3, TestFailed
+        ; delay slot shouldn't matter
+TestArith_Or_R0:
+    or $zero, $t0, $t1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Or_R0
+    bnz $zero, TestFailed
+        ; delay slot shouldn't matter
+
+TestArith_Nor:
+    la $t0, 0xFF00_FF00
+    la $t1, 0x0FF0_0FF0
+    move $t3, $t0
+    move $t4, $t1
+    la $t5, 0x000F_000F
+    nor $t2, $t1, $t0
+    la $a0, TestArith_Nor_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Nor
+    bne $t2, $t5, TestFailed
+        nop
+    bne $t1, $t4, TestFailed
+        nop
+    bne $t0, $t3, TestFailed
+        ; delay slot shouldn't matter
+TestArith_Nor_R0:
+    nor $zero, $t0, $t1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Nor_R0
+    bnz $zero, TestFailed
+        ; delay slot shouldn't matter
+
+    ; slt*
+    ; 0x800_0000, 0xFFFF_FFFF, 0, 1
+    li $t0, -0x8000
+    li $t1, -1
+    li $t2, 0
+    li $t3, 1
+TestArith_Sltiu:
+    la $a0, TestArith_Sltiu_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Sltiu
+    sltiu $t4, $t0, -0x8000     ; 0x8000 < 0x8000?
+    bnz $t4, TestFailed         ; no
+    sltiu $t4, $t0, -1          ; 0x8000 < 0xFFFF?
+    bez $t4, TestFailed         ; yes
+    sltiu $t4, $t0, 0           ; 0x8000 < 0?
+    bnz $t4, TestFailed         ; no
+    sltiu $t4, $t0, 1           ; 0x8000 < 1?
+    bnz $t4, TestFailed         ; no
+
+    sltiu $t4, $t1, -0x8000     ; 0xFFFF < 0x8000?
+    bnz $t4, TestFailed         ; no
+    sltiu $t4, $t1, -1          ; 0xFFFF < 0xFFFF?
+    bnz $t4, TestFailed         ; no
+    sltiu $t4, $t1, 0           ; 0xFFFF < 0?
+    bnz $t4, TestFailed         ; no
+    sltiu $t4, $t1, 1           ; 0xFFFF < 1?
+    bnz $t4, TestFailed         ; no
+
+    sltiu $t4, $t2, -0x8000     ; 0 < 0x8000?
+    bez $t4, TestFailed         ; yes
+    sltiu $t4, $t2, -1          ; 0 < 0xFFFF?
+    bez $t4, TestFailed         ; yes
+    sltiu $t4, $t2, 0           ; 0 < 0?
+    bnz $t4, TestFailed         ; no
+    sltiu $t4, $t2, 1           ; 0 < 1?
+    bez $t4, TestFailed         ; yes
+
+    sltiu $t4, $t3, -0x8000     ; 1 < 0x8000?
+    bez $t4, TestFailed         ; yes
+    sltiu $t4, $t3, -1          ; 1 < 0xFFFF?
+    bez $t4, TestFailed         ; yes
+    sltiu $t4, $t3, 0           ; 1 < 0?
+    bnz $t4, TestFailed         ; no
+    sltiu $t4, $t3, 1           ; 1 < 1?
+    bnz $t4, TestFailed         ; no
+        ; delay slot shouldn't matter
+TestArith_Sltiu_R0:
+    sltiu $zero, $zero, 1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Sltiu_R0
+    bnz $zero, TestFailed
+        ; delay slot shouldn't matter
+
+TestArith_Slti:
+    slti $t4, $t0, -0x8000      ; -0x8000 < -0x8000?
+    la $a0, TestArith_Slti_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Slti
+    bnz $t4, TestFailed         ; no
+    slti $t4, $t0, -1           ; -0x8000 < -1?
+    bez $t4, TestFailed         ; yes
+    slti $t4, $t0, 0            ; -0x8000 < 0?
+    bez $t4, TestFailed         ; yes
+    slti $t4, $t0, 1            ; -0x8000 < 1?
+    bez $t4, TestFailed         ; yes
+
+    slti $t4, $t1, -0x8000      ; -1 < -0x8000?
+    bnz $t4, TestFailed         ; no
+    slti $t4, $t1, -1           ; -1 < -1?
+    bnz $t4, TestFailed         ; no
+    slti $t4, $t1, 0            ; -1 < 0?
+    bez $t4, TestFailed         ; yes
+    slti $t4, $t1, 1            ; -1 < 1?
+    bez $t4, TestFailed         ; yes
+
+    slti $t4, $t2, -0x8000      ; 0 < -0x8000?
+    bnz $t4, TestFailed         ; no
+    slti $t4, $t2, -1           ; 0 < -1?
+    bnz $t4, TestFailed         ; no
+    slti $t4, $t2, 0            ; 0 < 0?
+    bnz $t4, TestFailed         ; no
+    slti $t4, $t2, 1            ; 0 < 1?
+    bez $t4, TestFailed         ; yes
+
+    slti $t4, $t3, -0x8000      ; 1 < -0x8000?
+    bnz $t4, TestFailed         ; no
+    slti $t4, $t3, -1           ; 1 < -1?
+    bnz $t4, TestFailed         ; no
+    slti $t4, $t3, 0            ; 1 < 0?
+    bnz $t4, TestFailed         ; no
+    slti $t4, $t3, 1            ; 1 < 1?
+    bnz $t4, TestFailed         ; no
+        ; delay slot shouldn't matter
+TestArith_Slti_R0:
+    slti $zero, $zero, 1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Slti_R0
+    bnz $zero, TestFailed
+        ; delay slot shouldn't matter
+
+TestArith_Sltu:
+    sltu $t4, $t0, $t0          ; 0x8000 < 0x8000?
+    la $a0, TestArith_Sltu_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Sltu
+    bnz $t4, TestFailed         ; no
+    sltu $t4, $t0, $t1          ; 0x8000 < 0xFFFF?
+    bez $t4, TestFailed         ; yes
+    sltu $t4, $t0, $t2          ; 0x8000 < 0?
+    bnz $t4, TestFailed         ; no
+    sltu $t4, $t0, $t3          ; 0x8000 < 1?
+    bnz $t4, TestFailed         ; no
+
+    sltu $t4, $t1, $t0          ; 0xFFFF < 0x8000?
+    bnz $t4, TestFailed         ; no
+    sltu $t4, $t1, $t1          ; 0xFFFF < 0xFFFF?
+    bnz $t4, TestFailed         ; no
+    sltu $t4, $t1, $t2          ; 0xFFFF < 0?
+    bnz $t4, TestFailed         ; no
+    sltu $t4, $t1, $t3          ; 0xFFFF < 1?
+    bnz $t4, TestFailed         ; no
+
+    sltu $t4, $t2, $t0          ; 0 < 0x8000?
+    bez $t4, TestFailed         ; yes
+    sltu $t4, $t2, $t1          ; 0 < 0xFFFF?
+    bez $t4, TestFailed         ; yes
+    sltu $t4, $t2, $t2          ; 0 < 0?
+    bnz $t4, TestFailed         ; no
+    sltu $t4, $t2, $t3          ; 0 < 1?
+    bez $t4, TestFailed         ; yes
+
+    sltu $t4, $t3, $t0          ; 1 < 0x8000?
+    bez $t4, TestFailed         ; yes
+    sltu $t4, $t3, $t1          ; 1 < 0xFFFF?
+    bez $t4, TestFailed         ; yes
+    sltu $t4, $t3, $t2          ; 1 < 0?
+    bnz $t4, TestFailed         ; no
+    sltu $t4, $t3, $t3          ; 1 < 1?
+    bnz $t4, TestFailed         ; no
+        ; delay slot shouldn't matter
+TestArith_Sltu_R0:
+    sltu $zero, $zero, $t3
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Sltu_R0
+    bnz $zero, TestFailed
+        ; delay slot shouldn't matter
+
+TestArith_Slt:
+    slt $t4, $t0, $t0           ; -0x8000 < -0x8000?
+    la $a0, TestArith_Slt_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Slt
+    bnz $t4, TestFailed         ; no
+    slt $t4, $t0, $t1           ; -0x8000 < -1?
+    bez $t4, TestFailed         ; yes
+    slt $t4, $t0, $t2           ; -0x8000 < 0?
+    bez $t4, TestFailed         ; yes
+    slt $t4, $t0, $t3           ; -0x8000 < 1?
+    bez $t4, TestFailed         ; yes
+
+    slt $t4, $t1, $t0           ; -1 < -0x8000?
+    bnz $t4, TestFailed         ; no
+    slt $t4, $t1, $t1           ; -1 < -1?
+    bnz $t4, TestFailed         ; no
+    slt $t4, $t1, $t2           ; -1 < 0?
+    bez $t4, TestFailed         ; yes
+    slt $t4, $t1, $t3           ; -1 < 1?
+    bez $t4, TestFailed         ; yes
+
+    slt $t4, $t2, $t0           ; 0 < -0x8000?
+    bnz $t4, TestFailed         ; no
+    slt $t4, $t2, $t1           ; 0 < -1?
+    bnz $t4, TestFailed         ; no
+    slt $t4, $t2, $t2           ; 0 < 0?
+    bnz $t4, TestFailed         ; no
+    slt $t4, $t2, $t3           ; 0 < 1?
+    bez $t4, TestFailed         ; yes
+
+    slt $t4, $t3, $t0           ; 1 < -0x8000?
+    bnz $t4, TestFailed         ; no
+    slt $t4, $t3, $t1           ; 1 < -1?
+    bnz $t4, TestFailed         ; no
+    slt $t4, $t3, $t2           ; 1 < 0?
+    bnz $t4, TestFailed         ; no
+    slt $t4, $t3, $t3           ; 1 < 1?
+    bnz $t4, TestFailed         ; no
+        ; delay slot shouldn't matter
+TestArith_Slt_R0:
+    sltu $zero, $zero, $t3
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Slt_R0
+    bnz $zero, TestFailed
+        ; delay slot shouldn't matter
+
     move $v0, $zero
     ret
+.branchNop 1
 
 
 DataSection:
 TestStatus_Load_Msg:            .db "Load instructions: ", 0
 TestStatus_Store_Msg:           .db "Store instructions: ", 0
 TestStatus_Branch_Msg:          .db "Branch instructions: ", 0
-TestStatus_ImmArith_Msg:        .db "Alu with immediate instructions: ", 0
 TestStatus_Arith_Msg:           .db "Alu instructions: ", 0
 TestStatus_Ok_Msg:              .db "OK\n", 0
 TestFinished_Msg:               .db "All tests passed.\n", 0
 Test_Failed_Msg:                .db " failed.\n", 0
+Test_R0_Msg:                    .db " modified the zero register\n", 0
 
 TestPrerequisite_Failed_Msg:    .db "Test preqrequisite failed: jal.\n", 0
 
-TestImmArith_Failed_Msg:        .db "Arithmetic test failed: ", 0
-TestImmArith_R0_Msg:            .db "R0 should always be zero.\n", 0
-TestImmArith_AddiuSex_Msg:      .db "addiu should sign extend its immediate value.\n", 0
-TestImmArith_OriZex_Msg:        .db "ori should zero extend its immediate value.\n", 0
-TestImmArith_LuiAndi_Msg:       .db "lui, andi.\n", 0
-TestImmArith_Xori_Msg:          .db "xori should zero extend its immediate value.\n", 0
-TestImmArith_Slti_Msg:          .db "slti.\n", 0
-TestImmArith_SltiNeg_Msg:       .db "slti failed on negative values.\n", 0
-TestImmArith_SltiuUnsigned_Msg: .db "Operands of sltiu should be treated as unsigned.\n", 0
-TestImmArith_SltiuSex_Msg:      .db "Immediate of sltiu must be sign extended.\n", 0
+TestArith_Lui_Msg:              .db "lui", 0
+TestArith_Ori_Msg:              .db "ori", 0
+TestArith_Or_Msg:               .db "or", 0
+TestArith_Nor_Msg:              .db "nor", 0
+TestArith_Andi_Msg:             .db "andi", 0
+TestArith_And_Msg:              .db "and", 0
+TestArith_Xori_Msg:             .db "xori", 0
+TestArith_Xor_Msg:              .db "xor", 0
+TestArith_Addiu_Msg:            .db "addiu", 0
+TestArith_Addi_Msg:             .db "addi", 0
+TestArith_Addu_Msg:             .db "addu", 0
+TestArith_Add_Msg:              .db "add", 0
+TestArith_Subu_Msg:             .db "subu", 0
+TestArith_Sub_Msg:              .db "sub", 0
+TestArith_Sltiu_Msg:            .db "sltiu", 0
+TestArith_Slti_Msg:             .db "slti", 0
+TestArith_Sltu_Msg:             .db "sltu", 0
+TestArith_Slt_Msg:              .db "slt", 0
+TestArith_ZeroExtend_Msg:       .db " failed to zero extend.\n", 0
+TestArith_SignExtend_Msg:       .db " failed to sign extend.\n", 0
+TestArith_ClearLowerFailed_Msg: .db " failed to clear bottom 16 bits.\n", 0
 
 TestBranch_Failed_Msg:          .db "Branch test failed: ", 0
 TestBranch_Bltz_Msg:            .db "bltz.\n", 0
