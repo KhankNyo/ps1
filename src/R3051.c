@@ -538,7 +538,7 @@ static R3051_StageStatus R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 
     case 006: /* srlv */
     {
         Rs &= 0x1F;
-        *Rd = Rt << Rs;
+        *Rd = Rt >> Rs;
     } break;
     case 007: /* srav */
     {

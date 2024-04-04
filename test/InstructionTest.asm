@@ -1362,7 +1362,141 @@ TestArith_Slt_R0:
     la $a1, Test_R0_Msg
     la $a2, TestArith_Slt_R0
     bnz $zero, TestFailed
-        ; delay slot shouldn't matter
+        nop
+
+    ; sll
+TestArith_Sll:
+    li $t0, 1
+    sll $t1, $t0, 1             ; should be 2
+    la $a0, TestArith_Sll_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Sll
+    li $t2, 2                   ; check rd
+    bne $t1, $t2, TestFailed
+    li $t2, 1                   ; check rs
+    bne $t0, $t2, TestFailed
+    sll $t1, 31                 ; should be 0
+    bnz $t1, TestFailed
+        ; delay slot 
+TestArith_Sll_R0:
+    sll $zero, $t0, 1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Sll_R0
+    bnz $zero, TestFailed
+        ; delay slot
+
+    ; srl
+TestArith_Srl:
+    lui $t0, 0x8000
+    srl $t1, $t0, 1             ; should be 0x4000_0000
+    la $a0, TestArith_Srl_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Srl
+    lui $t2, 0x4000              ; check rd
+    bne $t1, $t2, TestFailed
+    lui $t2, 0x8000              ; check rs
+    bne $t0, $t2, TestFailed
+    srl $t1, 31                 ; should be 0
+    bnz $t1, TestFailed
+        ; delay slot
+TestArith_Srl_R0:
+    srl $zero, $t0, 1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Srl_R0
+    bnz $zero, TestFailed
+        ; delay slot
+
+    ; sra 
+TestArith_Sra:
+    lui $t0, 0x8000
+    sra $t1, $t0, 1             ; should be 0xC000_0000
+    la $a0, TestArith_Sra_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Sra
+    lui $t2, 0xC000
+    bne $t1, $t2, TestFailed
+    lui $t2, 0x8000
+    bne $t0, $t2, TestFailed
+    sra $t1, 31                 ; should be -1
+    li $t2, -1
+    bne $t1, $t2, TestFailed
+        ; delay slot
+TestArith_Sra_R0:
+    sra $zero, $t0, 1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Sra_R0
+    bnz $zero, TestFailed
+        ; delay slot
+
+    ; sllv
+TestArith_Sllv:
+    li $t0, 1
+    li $t1, 33
+    sllv $t2, $t0, $t1          ; should be 2
+    la $a0, TestArith_Sllv_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Sllv
+    li $t3, 2
+    bne $t3, $t2, TestFailed
+    li $t3, 1
+    bne $t3, $t0, TestFailed
+    li $t1, -1                  ; 31
+    sllv $t2, $t1               ; should be 0
+    bnz $t2, TestFailed
+        ; delay slot
+TestArith_Sllv_R0:
+    li $t1, 1
+    sllv $zero, $t0, $t1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Sllv_R0
+    bnz $zero, TestFailed
+        ; delay slot
+
+    ; srlv
+TestArith_Srlv:
+    lui $t0, 0x8000
+    li $t1, 1
+    srlv $t2, $t0, $t1          ; should be 0x4000_0000
+    la $a0, TestArith_Srlv_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Srlv
+    lui $t3, 0x4000
+    bne $t2, $t3, TestFailed
+    lui $t3, 0x8000
+    bne $t0, $t3, TestFailed
+    li $t1, 63
+    srlv $t2, $t1               ; should be 0
+    bnz $t2, TestFailed
+        ; delay slot
+TestArith_Srlv_R0:
+    srlv $zero, $t0, $t1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Srlv_R0
+    bnz $zero, TestFailed
+        ; delay slot
+
+    ; srav
+TestArith_Srav:
+    lui $t0, 0x8000
+    li $t1, 1
+    srav $t2, $t0, $t1          ; should be 0xC000_0000
+    la $a0, TestArith_Srav_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestArith_Srav
+    lui $t3, 0xC000
+    bne $t2, $t3, TestFailed
+    li $t1, -1
+    srav $t2, $t1               ; should be -1
+    li $t3, -1
+    bne $t2, $t3, TestFailed
+        ; delay slot
+TestArith_Srav_R0:
+    li $t1, 1
+    srav $zero, $t0, $t1
+    la $a1, Test_R0_Msg
+    la $a2, TestArith_Srav_R0
+    bnz $zero, TestFailed
+        ; delay slot
 
     move $v0, $zero
     ret
@@ -1399,6 +1533,12 @@ TestArith_Sltiu_Msg:            .db "sltiu", 0
 TestArith_Slti_Msg:             .db "slti", 0
 TestArith_Sltu_Msg:             .db "sltu", 0
 TestArith_Slt_Msg:              .db "slt", 0
+TestArith_Sll_Msg:              .db "sll", 0
+TestArith_Srl_Msg:              .db "srl", 0
+TestArith_Sra_Msg:              .db "sra", 0
+TestArith_Sllv_Msg:             .db "sllv", 0
+TestArith_Srlv_Msg:             .db "srlv", 0
+TestArith_Srav_Msg:             .db "srav", 0
 TestArith_ZeroExtend_Msg:       .db " failed to zero extend.\n", 0
 TestArith_SignExtend_Msg:       .db " failed to sign extend.\n", 0
 TestArith_ClearLowerFailed_Msg: .db " failed to clear bottom 16 bits.\n", 0

@@ -106,6 +106,7 @@ typedef enum AsmTokenType
     TOK_INS_R_TYPE_RD,
     TOK_INS_R_TYPE_RS,
     TOK_INS_R_TYPE_SHAMT,
+    TOK_INS_R_TYPE_SHREG,
 
     TOK_INS_NO_ARG,
 
@@ -511,11 +512,11 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
             INS("swr",      I_TYPE_MEM,     0xB8000000),
 
             INS("sll",      R_TYPE_SHAMT,   0x00000000),
-            INS("sllv",     R_TYPE_3,       0x00000004),
+            INS("sllv",     R_TYPE_SHREG,   0x00000004),
             INS("sra",      R_TYPE_SHAMT,   0x00000003),
-            INS("srav",     R_TYPE_3,       0x00000007),
+            INS("srav",     R_TYPE_SHREG,   0x00000007),
             INS("srl",      R_TYPE_SHAMT,   0x00000002),
-            INS("srlv",     R_TYPE_3,       0x00000006),
+            INS("srlv",     R_TYPE_SHREG,   0x00000006),
 
             INS("sub",      R_TYPE_3,       0x00000022),
             INS("subu",     R_TYPE_3,       0x00000023),
@@ -1691,6 +1692,32 @@ static void AsmRType3Operands(Assembler *Asm)
     AsmEmit32(Asm, Opcode);
 }
 
+static void AsmRTypeShiftVariable(Assembler *Asm)
+{
+    /* shift instruction rd, rt, rs
+     * shift instruction rd, rs */
+    u32 Opcode = Asm->CurrentToken.As.Opcode;
+    uint Rd = AsmConsumeGPRegister(Asm, "destination");
+    ASM_CONSUME_COMMA(Asm, "destination register.");
+
+    uint Rt = AsmConsumeGPRegister(Asm, "a");
+    uint Rs;
+    if (AsmConsumeIfNextTokenIs(Asm, TOK_COMMA))
+    {
+        Rs = AsmConsumeGPRegister(Asm, "shift amount");
+    }
+    else
+    {
+        Rs = Rt;
+        Rt = Rd;
+    }
+
+    Opcode |= (Rd & 0x1F) << RD;
+    Opcode |= (Rs & 0x1F) << RS;
+    Opcode |= (Rt & 0x1F) << RT;
+    AsmEmit32(Asm, Opcode);
+}
+
 static void AsmRType1Operand(Assembler *Asm, const char *RegisterType, int Offset, Bool8 IsJump)
 {
     u32 Opcode = Asm->CurrentToken.As.Opcode;
@@ -2081,6 +2108,7 @@ static void AsmConsumeStmt(Assembler *Asm)
     case TOK_INS_R_TYPE_RTRD:   AsmRType2Operands(Asm, "general", "coprocessor", RT, RD, false); break;
     case TOK_INS_R_TYPE_RSRT:   AsmRType2Operands(Asm, "a", "a second", RS, RT, false); break;
     case TOK_INS_R_TYPE_SHAMT:  AsmRTypeShift(Asm); break;
+    case TOK_INS_R_TYPE_SHREG:  AsmRTypeShiftVariable(Asm); break;
 
     case TOK_INS_I_TYPE_U16:
     case TOK_INS_I_TYPE_I16:    AsmIType3Operands(Asm, TOK_INS_I_TYPE_I16 == Asm->CurrentToken.Type); break;
