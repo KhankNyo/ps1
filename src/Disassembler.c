@@ -98,8 +98,8 @@ static void R3051_DisasmSpecial(u32 Instruction, const char **RegName, char *Out
         static const char MnemonicTable[][5] = {
             "mfhi", "mthi", "mflo", "mtlo"
         };
-        const char *Reg = Mode & 0x1?  /* 'from' instructions? */
-            Rd: Rs;
+        const char *Reg = Mode & 0x1?  /* 'to' instructions? */
+            Rs: Rd;
 
         if (Mode > 3) 
             goto UnknownOpcode;

@@ -564,6 +564,18 @@ static R3051_StageStatus R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 
         This->Lo = Rs;
         return Status;
     } break;
+    case 020: /* mfhi */
+    {
+        if (This->HiLoCyclesLeft)
+            This->HiLoBlocking = true;
+        else This->R[REG(Instruction, RD)] = This->Hi;
+    } break;
+    case 022: /* mflo */
+    {
+        if (This->HiLoCyclesLeft)
+            This->HiLoBlocking = true;
+        else This->R[REG(Instruction, RD)] = This->Lo;
+    } break;
 
 
     /* group 3: mult(u)/div(u) */
@@ -1016,35 +1028,7 @@ StoreAddrError:
 
 static void R3051_Writeback(R3051 *This)
 {
-    /* NOTE: writeback only reads hi and lo, execute stage writes to hi and lo, 
-     * that's **probably** 
-     * the reason by one must wait 2 instructions to write to hi/lo after reading them to avoid curruption
-     *
-     * https://devblogs.microsoft.com/oldnewthing/20180404-00/?p=98435
-     */
-
-    u32 Instruction = R3051_InstructionAt(This, WRITEBACK_STAGE);
-    switch (OP(Instruction) | FUNCT(Instruction))
-    {
-    case 0x00000010: /* mfhi */
-    {
-        if (This->HiLoCyclesLeft)
-        {
-            This->HiLoBlocking = true;
-            break;
-        }
-        This->R[REG(Instruction, RD)] = This->Hi;
-    } break;
-    case 0x00000012: /* mflo */
-    {
-        if (This->HiLoCyclesLeft)
-        {
-            This->HiLoBlocking = true;
-            break;
-        }
-        This->R[REG(Instruction, RD)] = This->Lo;
-    } break;
-    }
+    (void)This;
 }
 
 
@@ -1058,85 +1042,96 @@ static void R3051_AdvancePipeStage(R3051 *This)
         This->PipeStage = 0;   
 }
 
-
-void R3051_StepClock(R3051 *This)
+/* returns -1 if execution should resume normally, 
+ * otherwise an exception was encountered and 
+ * returns the stage right before the stage that encountered the exception 
+ */
+static int R3051_ExecutePipeline(R3051 *This)
 {
-#define INVALIDATE_PIPELINE_IF(Cond, CurrentStageAndBelow) do {\
-        if (Cond) {\
-            StageToInvalidate = CurrentStageAndBelow;\
-            goto InvalidatePipeline;\
-        }\
-    } while (0)
-
-    if (This->HiLoCyclesLeft)
-    {
-        This->HiLoCyclesLeft--;
-        if (This->HiLoBlocking) /* suspend execution if we're waiting for hi/lo result */
-        {
-            if (This->HiLoCyclesLeft == 0)
-                This->HiLoBlocking = false;
-            return;
-        }
-    }
-
-
-    int StageToInvalidate;
-    Bool8 HasException;
-    R3051_AdvancePipeStage(This);
-    if (This->ExceptionRaised)
-    {
-        if (This->ExceptionCyclesLeft) /* needs to empty all instruction in the pipeline */
-        {
-            /* don't do fetch when emptying out instructions in the pipeline, 
-             * put nops in their place instead */
-
-            int FetchStage = R3051_CurrentPipeStage(This, FETCH_STAGE);
-            This->Instruction[FetchStage] = 0;
-            This->ExceptionCyclesLeft--;
-        }
-        else /* emptied all instructions in the pipeline */
-        {
-            R3051_HandleException(This);
-            /* starts fetching from the exception handler */
-            R3051_Fetch(This);
-        }
-    }
-    else /* no exception, normal fetching */
-    {
-        R3051_Fetch(This);
-    }
-
-
-    /*
-     * NOTE: this weird pipeline ordering is because Mips exception has to follow instruction order, 
-     * but because of Mip's pipelined nature, 
-     * some instructions can trigger exception before instructions behind it can even execute.
-     * So the solution is to execute the stages of earlier instructions first, 
-     * so they can have a chance to trigger exceptions before the instructions after them.
-     * This also helps with forwarding, especially the fact that execute stage can forward their result to the decode stage, 
-     * e.g. an alu instruction followed by a branch/jump consuming the result of the alu instruction.
-     */
-
     R3051_StageStatus MemoryStage = R3051_Memory(This);
-    INVALIDATE_PIPELINE_IF(MemoryStage.HasException, EXECUTE_STAGE);
-    R3051_StageStatus ExecuteStage = R3051_Execute(This);
-    INVALIDATE_PIPELINE_IF(ExecuteStage.HasException, DECODE_STAGE);
+    if (MemoryStage.HasException)
+        return EXECUTE_STAGE;
 
+    R3051_StageStatus ExecuteStage = R3051_Execute(This);
+    This->R[0] = 0;
     if (MemoryStage.RegIndex)
         This->R[MemoryStage.RegIndex] = MemoryStage.WritebackData;
+
+    if (ExecuteStage.HasException)
+        return DECODE_STAGE;
+    if (This->HiLoBlocking)
+        return -1;
+
     if (ExecuteStage.RegIndex)
         This->R[ExecuteStage.RegIndex] = ExecuteStage.WritebackData;
 
-    HasException = R3051_Decode(This);
-    INVALIDATE_PIPELINE_IF(HasException, FETCH_STAGE);
+    Bool8 HasException = R3051_Decode(This);
     This->R[0] = 0;
+    if (HasException)
+        return FETCH_STAGE;
 
     R3051_Writeback(This);
     This->R[0] = 0;
-    return;
+    return -1;
+}
 
 
-InvalidatePipeline:
+void R3051_StepClock(R3051 *This)
+{
+    if (This->HiLoBlocking)
+    {
+        if (This->HiLoCyclesLeft)
+        {
+            /* NOTE: busy wait until hi/lo are free, 
+             * because some instruction tried to access hi/lo while it's still busy */
+            This->HiLoCyclesLeft--;
+            return;
+        }
+        else 
+        {
+            /* free hi/lo and resume execution */
+            This->HiLoBlocking = false;
+        }
+    }
+    else
+    {
+        /* emulating the divider and multiplier working in the background, 
+         * NOTE: hi/lo is not being accessed, so we don't busy wait unlike above */
+        if (This->HiLoCyclesLeft)
+            This->HiLoCyclesLeft--;
+
+        R3051_AdvancePipeStage(This);
+        if (This->ExceptionRaised)
+        {
+            if (This->ExceptionCyclesLeft)
+            {
+                /* needs to empty all instruction in the pipeline */
+                /* don't do fetching when emptying out instructions in the pipeline, 
+                 * put nops in their place instead */
+
+                int FetchStage = R3051_CurrentPipeStage(This, FETCH_STAGE);
+                This->Instruction[FetchStage] = 0;
+                This->ExceptionCyclesLeft--;
+            }
+            else /* emptied all instructions in the pipeline */
+            {
+                R3051_HandleException(This);
+
+                /* starts fetching from the exception handler */
+                R3051_Fetch(This);
+            }
+        }
+        else /* no exception, normal fetching */
+        {
+            R3051_Fetch(This);
+        }
+    }
+
+
+    int StageToInvalidate = R3051_ExecutePipeline(This);
+    if (-1 == StageToInvalidate)
+        return;
+
     while (StageToInvalidate >= FETCH_STAGE)
     {
         int Stage = R3051_CurrentPipeStage(This, StageToInvalidate);
@@ -1144,7 +1139,6 @@ InvalidatePipeline:
         This->Instruction[Stage] = 0;
         StageToInvalidate--;
     }
-#undef INVALIDATE_PIPELINE_IF
 }
 
 

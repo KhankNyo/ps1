@@ -75,6 +75,13 @@ ResetEnd:
     la $a0, TestStatus_Ok_Msg
     jal PrintStr
 
+    la $a0, TestStatus_HiLo_Msg
+    jal PrintStr
+    jal TestHiLo
+    bnz $v0, Fail
+    la $a0, TestStatus_Ok_Msg
+    jal PrintStr
+
     la $a0, TestFinished_Msg ; else success, print msg 
     jal PrintStr
 Fail:
@@ -948,7 +955,8 @@ TestArith_Ori_R0:
     ori $zero, $t0, 0xFFFF
     la $a2, TestArith_Ori_R0
     la $a1, Test_R0_Msg
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot doesn't matter
 
     ; lui
@@ -968,7 +976,8 @@ TestArith_Lui_R0:
     lui $zero, 0xFFFF
     la $a2, TestArith_Lui_R0
     la $a1, Test_R0_Msg
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot doesn't matter
 
     ; addiu
@@ -988,11 +997,13 @@ TestArith_Addiu_R0:
     addiu $zero, $t0, 1
     la $a2, TestArith_Addiu_R0
     la $a1, Test_R0_Msg
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot doesn't matter
 
     ; addu
 TestArith_Addu:
+    li $t0, -0x8000
     move $t4, $t0
     ori $t1, $zero, 0x8420              ; 0x0000_8420
     move $t5, $t1
@@ -1011,7 +1022,8 @@ TestArith_Addu_R0:
     addu $zero, $t1, $t1
     la $a2, TestArith_Addu_R0
     la $a1, Test_R0_Msg
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot shouldn't matter
 
     ; subu
@@ -1034,7 +1046,8 @@ TestArith_Subu_R0:
     subu $zero, $t0, $t1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Subu_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
 
     ; andi
 TestArith_Andi:
@@ -1051,7 +1064,8 @@ TestArith_Andi_R0:
     andi $zero, $t0, 0x0FF0
     la $a1, Test_R0_Msg
     la $a2, TestArith_Andi_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot shouldn't matter
     
     ; and 
@@ -1077,7 +1091,8 @@ TestArith_And_R0:
     and $zero, $t0, $t1
     la $a1, Test_R0_Msg
     la $a2, TestArith_And_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot shoudn't matter
 
     ; xori  
@@ -1094,7 +1109,8 @@ TestArith_Xori_R0:
     xori $zero, $zero, 0xFFFF
     la $a1, Test_R0_Msg
     la $a2, TestArith_Xori_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot shouldn't matter
 
     ; xor
@@ -1120,7 +1136,8 @@ TestArith_Xor_R0:
     xor $zero, $t0, $t1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Xor_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot shouldn't matter
 
     ; or
@@ -1144,7 +1161,8 @@ TestArith_Or_R0:
     or $zero, $t0, $t1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Or_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot shouldn't matter
 
 TestArith_Nor:
@@ -1167,7 +1185,8 @@ TestArith_Nor_R0:
     nor $zero, $t0, $t1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Nor_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot shouldn't matter
 
     ; slt*
@@ -1220,7 +1239,8 @@ TestArith_Sltiu_R0:
     sltiu $zero, $zero, 1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Sltiu_R0
-    bnz $zero, TestFailed
+    li $t5, 0
+    bne $zero, $t5, TestFailed
         ; delay slot shouldn't matter
 
 TestArith_Slti:
@@ -1267,7 +1287,8 @@ TestArith_Slti_R0:
     slti $zero, $zero, 1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Slti_R0
-    bnz $zero, TestFailed
+    li $t5, 0
+    bne $zero, $t5, TestFailed
         ; delay slot shouldn't matter
 
 TestArith_Sltu:
@@ -1314,7 +1335,8 @@ TestArith_Sltu_R0:
     sltu $zero, $zero, $t3
     la $a1, Test_R0_Msg
     la $a2, TestArith_Sltu_R0
-    bnz $zero, TestFailed
+    li $t5, 0
+    bne $zero, $t5, TestFailed
         ; delay slot shouldn't matter
 
 TestArith_Slt:
@@ -1361,8 +1383,9 @@ TestArith_Slt_R0:
     sltu $zero, $zero, $t3
     la $a1, Test_R0_Msg
     la $a2, TestArith_Slt_R0
-    bnz $zero, TestFailed
-        nop
+    li $t5, 0
+    bne $zero, $t5, TestFailed
+        ; delay slot shouldn't matter
 
     ; sll
 TestArith_Sll:
@@ -1382,7 +1405,8 @@ TestArith_Sll_R0:
     sll $zero, $t0, 1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Sll_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot
 
     ; srl
@@ -1403,7 +1427,8 @@ TestArith_Srl_R0:
     srl $zero, $t0, 1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Srl_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot
 
     ; sra 
@@ -1425,7 +1450,8 @@ TestArith_Sra_R0:
     sra $zero, $t0, 1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Sra_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot
 
     ; sllv
@@ -1449,7 +1475,8 @@ TestArith_Sllv_R0:
     sllv $zero, $t0, $t1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Sllv_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot
 
     ; srlv
@@ -1472,7 +1499,8 @@ TestArith_Srlv_R0:
     srlv $zero, $t0, $t1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Srlv_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot
 
     ; srav
@@ -1495,10 +1523,99 @@ TestArith_Srav_R0:
     srav $zero, $t0, $t1
     la $a1, Test_R0_Msg
     la $a2, TestArith_Srav_R0
-    bnz $zero, TestFailed
+    li $t0, 0
+    bne $zero, $t0, TestFailed
         ; delay slot
 
     move $v0, $zero
+    ret
+.branchNop 1
+
+
+.branchNop 0
+TestHiLo:
+TestHiLo_MoveHi:
+    la $a0, TestHiLo_MoveHi_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestHiLo_MoveHi
+    la $t0, 0x11223344
+    mthi $t0
+    mfhi $t1
+    bne $t1, $t0, TestFailed
+        ; delay slot
+TestHiLo_MoveHi_R0:
+    mfhi $zero
+    la $a1, Test_R0_Msg
+    la $a2, TestHiLo_MoveHi_R0
+    li $t0, 0
+    bne $zero, $t0, TestFailed
+        ; delay slot
+
+TestHiLo_MoveLo:
+    la $a0, TestHiLo_MoveLo_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestHiLo_MoveLo
+    la $t1, 0x55667788
+    mtlo $t0
+    mflo $t1
+    bne $t0, $t1, TestFailed
+        ; delay slot
+TestHiLo_MoveLo_R0:
+    mflo $zero
+    la $a1, Test_R0_Msg
+    la $a2, TestHiLo_MoveLo_R0
+    li $t0, 0
+    bne $zero, $t0, TestFailed
+        ; delay slot
+
+TestHiLo_Mult:
+    la $a0, TestHiLo_Mult_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestHiLo_Mult
+    li $t0, -2
+    li $t1, 3
+    mult $t0, $t1               ; -2*3
+    mfhi $t2
+    li $t3, -1
+    bne $t3, $t2, TestFailed    ; bits 63..32 = -1
+        mflo $t2
+    li $t3, -6
+    bne $t3, $t2, TestFailed    ; bits 31..0 = -6
+
+    li $t0, -2
+    li $t1, -3
+    mult $t0, $t1               ; -2*-3
+    mfhi $t2
+    bnz $t2, TestFailed         ; bits 63..32 = 0
+        mflo $t2
+    li $t3, 6
+    bne $t3, $t2, TestFailed    ; bits 31..0 = 6
+
+    li $t0, 0x7FFF_FFFF
+    mult $t0, $t0
+    mfhi $t1
+    li $t2, (0x7FFF_FFFF*0x7FFF_FFFF) >> 32
+    bne $t1, $t2, TestFailed
+        mflo $t1
+    la $t2, (0x7FFF_FFFF*0x7FFF_FFFF) & 0xFFFF_FFFF
+    bne $t2, $t1, TestFailed
+        nop
+
+TestHiLo_Multu:
+    la $a0, TestHiLo_Multu_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestHiLo_Multu
+    lui $t0, 0x8000
+    multu $t0, $t0
+    mfhi $t1
+    la $t2, (0x8000_0000 * 0x8000_0000) >> 32
+    bne $t2, $t1, TestFailed
+        mflo $t1
+    la $t2, (0x8000_0000 * 0x8000_0000) & 0xFFFF_FFFF
+    bne $t2, $t1, TestFailed
+        nop
+    
+    move $t0, $zero
     ret
 .branchNop 1
 
@@ -1508,6 +1625,7 @@ TestStatus_Load_Msg:            .db "Load instructions: ", 0
 TestStatus_Store_Msg:           .db "Store instructions: ", 0
 TestStatus_Branch_Msg:          .db "Branch instructions: ", 0
 TestStatus_Arith_Msg:           .db "Alu instructions: ", 0
+TestStatus_HiLo_Msg:            .db "Hi and Lo instructions: ", 0
 TestStatus_Ok_Msg:              .db "OK\n", 0
 TestFinished_Msg:               .db "All tests passed.\n", 0
 Test_Failed_Msg:                .db " failed.\n", 0
@@ -1593,6 +1711,16 @@ TestStore_HalfResult:           .dh 1, -1, 0x7FAB, 0x8000, 0xABCD
 TestStore_HalfSize = 5*2
 TestStore_ByteResult:           .db 1, -1, 0x7F, 0x80, 0x69
 TestStore_ByteSize = 5
+
+TestHiLo_MoveHi_Msg:            .db "mfhi and mthi", 0
+TestHiLo_MoveLo_Msg:            .db "mflo and mtlo", 0
+TestHiLo_Mult_Msg:              .db "mult", 0
+TestHiLo_Multu_Msg:             .db "multu", 0
+TestHiLo_Div_Msg:               .db "div", 0
+TestHiLo_Divu_Msg:              .db "divu", 0
+
+TestExcept_Mem_Counter:         .dw 0
+TestExcept_Arith_Counter:       .dw 0
 
 .align 4
 FreeMemorySection:
