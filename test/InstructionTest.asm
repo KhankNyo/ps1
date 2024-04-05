@@ -422,22 +422,38 @@ TestLoad_Lb:
     move $t0, $t1
     lb $t0, 0($at)
         bne $t0, $t1, TestFailed    ; NOTE: in delay slot
+    lb $t0, 0($at)
+        nop
         bne $t0, $t9, TestFailed    ; delay slot over, value should be loaded by now
+
     lb $t0, 1($at)
         bne $t0, $t9, TestFailed
+    lb $t0, 1($at)
+        nop
         bne $t0, $t8, TestFailed
+
     lb $t0, 2($at)
         bne $t0, $t8, TestFailed
+    lb $t0, 2($at)
+        nop
         bne $t0, $t7, TestFailed
+
     lb $t0, 3($at)
         bne $t0, $t7, TestFailed
+    lb $t0, 3($at)
+        nop
         bne $t0, $t6, TestFailed
+
     lb $t0, 4($at)
         bne $t0, $t6, TestFailed
+    lb $t0, 4($at)
+        nop
     bne $t0, $t5, TestFailed
         nop
 
+TestLoad_LbDelaySlotWrite:
     la $a1, TestLoad_DelaySlotWrite_Msg
+    la $a2, TestLoad_LbDelaySlotWrite
     lb $t0, 0($at)
         or $t0, $t1, $zero          ; NOTE: despite delay slot, writes should be in order
     bne $t0, $t1, TestFailed
@@ -455,20 +471,38 @@ TestLoad_Lh:
     move $t0, $t1
     lh $t0, 0($at)
         bne $t0, $t1, TestFailed    ; NOTE: in delay slot
+    lh $t0, 0($at)
+        nop 
         bne $t0, $t9, TestFailed
+
     lh $t0, 2($at)
         bne $t0, $t9, TestFailed
+    lh $t0, 2($at)
+        nop
         bne $t0, $t8, TestFailed
+
     lh $t0, 4($at)
         bne $t0, $t8, TestFailed
+    lh $t0, 4($at)
+        nop
         bne $t0, $t7, TestFailed
+
     lh $t0, 6($at)
         bne $t0, $t7, TestFailed
+    lh $t0, 6($at)
+        nop
+        bne $t0, $t6, TestFailed
+
     lh $t0, 8($at)
         bne $t0, $t6, TestFailed
+    lh $t0, 8($at)
+        nop
     bne $t0, $t5, TestFailed
         nop
+
+TestLoad_LhDelayWrite:
     la $a1, TestLoad_DelaySlotWrite_Msg
+    la $a2, TestLoad_LhDelayWrite
     lh $t0, 0($at)
         or $t0, $t1, $zero          ; NOTE: despite delay slot, writes should be in order
     bne $t0, $t1, TestFailed
@@ -486,21 +520,38 @@ TestLoad_Lw:
     move $t0, $t1
     lw $t0, 0($at)
         bne $t0, $t1, TestFailed    ; NOTE: in delay slot
+    lw $t0, 0($at)
+        nop
         bne $t0, $t9, TestFailed
+
     lw $t0, 4($at)
         bne $t0, $t9, TestFailed
+    lw $t0, 4($at)
+        nop
         bne $t0, $t8, TestFailed
+
     lw $t0, 8($at)
         bne $t0, $t8, TestFailed
+    lw $t0, 8($at)
+        nop
         bne $t0, $t7, TestFailed
+
     lw $t0, 12($at)
         bne $t0, $t7, TestFailed
+    lw $t0, 12($at)
+        nop
         bne $t0, $t6, TestFailed
+
     lw $t0, 16($at)
         bne $t0, $t6, TestFailed
+    lw $t0, 16($at)
+        nop
     bne $t0, $t5, TestFailed
         nop
+
+TestLoad_LwDelayWrite:
     la $a1, TestLoad_DelaySlotWrite_Msg
+    la $a2, TestLoad_LwDelayWrite
     lw $t0, 0($at)
         or $t0, $t1, $zero          ; NOTE: despite delay slot, writes should be in order
     bne $t0, $t1, TestFailed
@@ -516,21 +567,41 @@ TestLoad_Lbu:
     li $t7, 0x80
     li $t8, 0xFF
 
+    move $t0, $t1
     lbu $t0, 0($at)
+        bne $t0, $t1, TestFailed    ; NOTE: in delay slot
+    lbu $t0, 0($at)
+        nop
+        bne $t0, $t9, TestFailed
+        
     lbu $t0, 1($at)
-        bne $t0, $t9, TestFailed    ; NOTE: in delay slot
+        bne $t0, $t9, TestFailed
+    lbu $t0, 1($at)
+        nop
         bne $t0, $t8, TestFailed
+
     lbu $t0, 2($at)
         bne $t0, $t8, TestFailed
+    lbu $t0, 2($at)
+        nop
         bne $t0, $t7, TestFailed
+
     lbu $t0, 3($at)
         bne $t0, $t7, TestFailed
+    lbu $t0, 3($at)
+        nop
         bne $t0, $t6, TestFailed
+
     lbu $t0, 4($at)
         bne $t0, $t6, TestFailed
+    lbu $t0, 4($at)
+        nop
     bne $t0, $t5, TestFailed
         nop
+
+TestLoad_LbuDelaySlotWrite:
     la $a1, TestLoad_DelaySlotWrite_Msg
+    la $a2, TestLoad_LbuDelaySlotWrite
     lbu $t0, 0($at)
         or $t0, $t1, $zero          ; NOTE: despite delay slot, writes should be in order
     bne $t0, $t1, TestFailed
@@ -549,21 +620,38 @@ TestLoad_Lhu:
     move $t0, $t1
     lhu $t0, 0($at)
         bne $t0, $t1, TestFailed    ; NOTE: delay slot
+    lhu $t0, 0($at)
+        nop
         bne $t0, $t9, TestFailed
+
     lhu $t0, 2($at)
         bne $t0, $t9, TestFailed
+    lhu $t0, 2($at)
+        nop
         bne $t0, $t8, TestFailed
+
     lhu $t0, 4($at)
         bne $t0, $t8, TestFailed
+    lhu $t0, 4($at)
+        nop
         bne $t0, $t7, TestFailed
+
     lhu $t0, 6($at)
         bne $t0, $t7, TestFailed
+    lhu $t0, 6($at)
+        nop
         bne $t0, $t6, TestFailed
+
     lhu $t0, 8($at)
         bne $t0, $t6, TestFailed
+    lhu $t0, 8($at)
+        nop
     bne $t0, $t5, TestFailed
         nop
+
+TestLoad_LhDelaySlotWrite:
     la $a1, TestLoad_DelaySlotWrite_Msg
+    la $a2, TestLoad_LhDelaySlotWrite
     lhu $t0, 0($at)
         or $t0, $t1, $zero          ; NOTE: despite delay slot, writes should be in order
     bne $t0, $t1, TestFailed
@@ -584,19 +672,32 @@ TestLoad_Lwl:
     move $t1, $t0
     lwl $t0, 0($at)
         bne $t0, $t1, TestFailed    ; NOTE: in delay slot 
+    lwl $t0, 0($at)
+        nop
         bne $t0, $t6, TestFailed
+
     lwl $t0, 1($at)
         bne $t0, $t6, TestFailed
+    lwl $t0, 1($at)
+        nop
         bne $t0, $t7, TestFailed
+
     lwl $t0, 2($at)
         bne $t0, $t7, TestFailed
+    lwl $t0, 2($at)
+        nop
         bne $t0, $t8, TestFailed
+
     lwl $t0, 3($at)
         bne $t0, $t8, TestFailed
+    lwl $t0, 3($at)
+        nop
     bne $t0, $t9, TestFailed
         nop
 
+TestLoad_LwlDelaySlotWrite:
     la $a1, TestLoad_DelaySlotWrite_Msg
+    la $a2, TestLoad_LwlDelaySlotWrite
     li $t1, 0x1337C0DE
     lwl $t0, 2($at)
         or $t0, $zero, $t1          ; NOTE: should overwrite loaded content
@@ -618,19 +719,32 @@ TestLoad_Lwr:
     move $t1, $t0
     lwr $t0, 3($at)
         bne $t0, $t1, TestFailed    ; NOTE: in delay slot 
+    lwr $t0, 3($at)
+        nop
         bne $t0, $t6, TestFailed
+
     lwr $t0, 2($at)
         bne $t0, $t6, TestFailed
+    lwr $t0, 2($at)
+        nop
         bne $t0, $t7, TestFailed
+
     lwr $t0, 1($at)
         bne $t0, $t7, TestFailed
+    lwr $t0, 1($at)
+        nop
         bne $t0, $t8, TestFailed
+
     lwr $t0, 0($at)
         bne $t0, $t8, TestFailed
+    lwr $t0, 0($at)
+        nop
     bne $t0, $t9, TestFailed
         nop
 
+TestLoad_LwrDelaySlotWrite:
     la $a1, TestLoad_DelaySlotWrite_Msg
+    la $a2, TestLoad_LwrDelaySlotWrite
     li $t1, 0x1337C0DE
     lwr $t0, 2($at)
         or $t0, $zero, $t1          ; NOTE: should overwrite loaded content
