@@ -1706,20 +1706,20 @@ TestHiLo_Mult:
     bne $t3, $t2, TestFailed    ; bits 31..0 = 6
 
     li $t0, 0x7FFF_FFFF
-    mult $t0, $t0
+    mult $t0, $t0               ; 0x7FFF_FFFF^2
     mfhi $t1
     li $t2, (0x7FFF_FFFF*0x7FFF_FFFF) >> 32
     bne $t1, $t2, TestFailed
         mflo $t1
     la $t2, (0x7FFF_FFFF*0x7FFF_FFFF) & 0xFFFF_FFFF
     bne $t2, $t1, TestFailed
-        nop
+        ; delay slot
 
 TestHiLo_Multu:
+    lui $t0, 0x8000
     la $a0, TestHiLo_Multu_Msg
     la $a1, Test_Failed_Msg
     la $a2, TestHiLo_Multu
-    lui $t0, 0x8000
     multu $t0, $t0
     mfhi $t1
     la $t2, (0x8000_0000 * 0x8000_0000) >> 32
@@ -1727,8 +1727,95 @@ TestHiLo_Multu:
         mflo $t1
     la $t2, (0x8000_0000 * 0x8000_0000) & 0xFFFF_FFFF
     bne $t2, $t1, TestFailed
-        nop
+        ; delay slot
+
+TestHiLo_Div:
+    li $t0, 100
+    la $a0, TestHiLo_Div_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestHiLo_Div
+
+    li $t1, -10
+    div $t0, $t1                ; 100 / -10
+    mfhi $t2
+    bnz $t2, TestFailed
+        mflo $t2
+    li $t4, -10
+    bne $t2, $t4, TestFailed
+        ; delay slot
+        
+    li $t0, 69
+    li $t1, 420
+    div $t0, $t1                ; 69 / 420
+    mflo $t2
+    bnz $t2, TestFailed         ; assert result == 0
+        mfhi $t2
+    bne $t2, $t0, TestFailed    ; assert remainder == 69
+        ; delay slot
+
+    la $t0, 0x7FFF_FFFF
+    div $t0, $zero              ; 0x7FFF_FFFF / 0
+    la $a1, TestHiLo_Div0Positive_Msg
+    li $t2, -1
+    mflo $t1
+    bne $t1, $t2, TestFailed    ; assert Lo == -1
+        mfhi $t1
+    bne $t1, $t0, TestFailed    ; assert Hi == Rs
+        ; delay slot
+
+    li $t0, -0x8000_0000
+    div $t0, $zero             ; -0x8000_0000 / 0
+    li $t1, 1
+    mflo $t2
+    bne $t1, $t2, TestFailed    ; assert lo == 1
+        mfhi $t2
+    bne $t2, $t0, TestFailed    ; assert hi == src
+        ; delay slot
+
+    li $t1, -1
+    div $t0, $t1                ; -0x8000_0000 / -1
+    la $a1, TestHiLo_Div0Negative_Msg
+    mflo $t2
+    bne $t2, $t0, TestFailed    ; assert Lo == -0x8000_0000 
+        mfhi $t2
+    bnz $t2, TestFailed         ; assert Hi == 0
+        ; delay slot
+
+
+TestHiLo_Divu:
+    la $t0, 0x8000_0001
+    la $a0, TestHiLo_Divu_Msg
+    la $a1, Test_Failed_Msg
+    la $a2, TestHiLo_Divu
+
+    la $t1, 0x4000_0000
+    divu $t0, $t1               ; 0x8000_0001 / 0x4000_0000
+    li $t3, 2
+    mflo $t2
+    bne $t2, $t3, TestFailed    ; assert result == 2
+        li $t3, 1
+    mfhi $t2
+    bne $t2, $t3, TestFailed    ; assert remainder == 1
+        ; delay slot
     
+    lui $t0, 0x8000
+    la $a1, TestHiLo_DivuZeroFailed_Msg
+    divu $t0, $zero             ; 0x8000_0000 / 0 
+    li $t2, -1
+    mflo $t1
+    bne $t1, $t2, TestFailed    ; assert result == -1
+        mfhi $t1
+    bne $t1, $t0, TestFailed    ; assert remainder == rs
+        ; delay slot
+
+    li $t0, -1
+    divu $t0, $zero             ; 0xFFFF_FFFF / 0
+    mflo $t1
+    bne $t0, $t1, TestFailed    ; assert result == 0xFFFF_FFFF
+        mfhi $t1
+    bne $t0, $t1, TestFailed    ; assert remainder == rs
+        ; delay slot 
+
     move $t0, $zero
     ret
 .branchNop 1
@@ -1832,6 +1919,10 @@ TestHiLo_Mult_Msg:              .db "mult", 0
 TestHiLo_Multu_Msg:             .db "multu", 0
 TestHiLo_Div_Msg:               .db "div", 0
 TestHiLo_Divu_Msg:              .db "divu", 0
+TestHiLo_Div0Positive_Msg:      .db " by 0 and a positive number must return -1 in Lo, Rs in Hi.\n"   
+TestHiLo_DivuZeroFailed_Msg:    .db " by 0 must return -1 in Lo, Rs in Hi.\n"
+TestHiLo_Div0Negative_Msg:      .db " by 0 and a negative number must return 1 in Lo, Rs in Hi.\n"
+TestHiLo_Div80000000_Msg:       .db " between 0x80000000 and -1 must return 0x80000000 in Lo, 0 in Hi.\n"
 
 TestExcept_Mem_Counter:         .dw 0
 TestExcept_Arith_Counter:       .dw 0

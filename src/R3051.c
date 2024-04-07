@@ -613,7 +613,7 @@ static R3051_StageStatus R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 
         if (SignedRt == 0)
         {
             /* NOTE: returns 1 if sign bit is set, otherwise return -1 */
-            This->Lo = Rs & 0x80000000?
+            This->Lo = SignedRs < 0?
                 1: -1;
             This->Hi = Rs;
         }
@@ -624,8 +624,8 @@ static R3051_StageStatus R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 
         }
         else
         {
-            This->Lo = SignedRt / SignedRs;
-            This->Hi = SignedRt % SignedRs;
+            This->Lo = SignedRs / SignedRt;
+            This->Hi = SignedRs % SignedRt;
         }
         return Status;
     } break;
