@@ -1,17 +1,17 @@
-#ifndef R3051_C
-#define R3051_C
+#ifndef R3000A_C
+#define R3000A_C
 
 #include "Common.h"
 
-typedef enum R3051_DataSize 
+typedef enum R3000A_DataSize 
 {
     DATA_BYTE = sizeof(u8),
     DATA_HALF = sizeof(u16),
     DATA_WORD = sizeof(u32),
-} R3051_DataSize;
+} R3000A_DataSize;
 
 
-typedef enum R3051_Exception 
+typedef enum R3000A_Exception 
 {
     EXCEPTION_INT = 0, /* INTerrrupt */
     /* NOTE: 1..3 are TLB exception, 
@@ -25,10 +25,10 @@ typedef enum R3051_Exception
     EXCEPTION_RI,   /* Reserved Instruction */
     EXCEPTION_CPU,  /* CoProcessor Unusable */
     EXCEPTION_OVF,  /* arithmetic OVerFlow */
-} R3051_Exception;
+} R3000A_Exception;
 
 
-typedef union R3051_CP0
+typedef union R3000A_CP0
 {
     u32 R[32];
     struct {
@@ -50,24 +50,26 @@ typedef union R3051_CP0
         u32 EPC;
         u32 PrID;
     };
-} R3051_CP0;
+} R3000A_CP0;
 
 
 
-#define R3051_RESET_VEC 0xBFC00000
-#define R3051_PIPESTAGE_COUNT 5
-typedef void (*R3051Write)(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size);
-typedef u32 (*R3051Read)(void *UserData, u32 Addr, R3051_DataSize Size);
-typedef Bool8 (*R3051AddrVerifyFn)(void *UserData, u32 Addr);
-typedef struct R3051 
+#define R3000A_RESET_VEC 0xBFC00000
+#define R3000A_EXCEPTION_VEC 0xBFC00080
+#define R3000A_CACHED_EXCEPTION_VEC 0x80000080
+#define R3000A_PIPESTAGE_COUNT 5
+typedef void (*R3000AWrite)(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size);
+typedef u32 (*R3000ARead)(void *UserData, u32 Addr, R3000A_DataSize Size);
+typedef Bool8 (*R3000AAddrVerifyFn)(void *UserData, u32 Addr);
+typedef struct R3000A 
 {
     u32 R[32];
     u32 Hi, Lo;
 
     u32 PC;
-    u32 PCSave[R3051_PIPESTAGE_COUNT];
-    u32 Instruction[R3051_PIPESTAGE_COUNT];
-    Bool8 InstructionIsBranch[R3051_PIPESTAGE_COUNT];
+    u32 PCSave[R3000A_PIPESTAGE_COUNT];
+    u32 Instruction[R3000A_PIPESTAGE_COUNT];
+    Bool8 InstructionIsBranch[R3000A_PIPESTAGE_COUNT];
 
     int PipeStage;
     int HiLoCyclesLeft;
@@ -76,21 +78,21 @@ typedef struct R3051
     int ExceptionCyclesLeft;
 
     void *UserData;
-    R3051Read ReadFn;
-    R3051Write WriteFn;
-    R3051AddrVerifyFn VerifyInstructionAddr;
-    R3051AddrVerifyFn VerifyDataAddr;
+    R3000ARead ReadFn;
+    R3000AWrite WriteFn;
+    R3000AAddrVerifyFn VerifyInstructionAddr;
+    R3000AAddrVerifyFn VerifyDataAddr;
 
 
-    R3051_CP0 CP0;
-} R3051;
+    R3000A_CP0 CP0;
+} R3000A;
 
-R3051 R3051_Init(
+R3000A R3000A_Init(
     void *UserData, 
-    R3051Read ReadFn, R3051Write WriteFn,
-    R3051AddrVerifyFn DataAddrVerifier, R3051AddrVerifyFn InstructionAddrVerifier
+    R3000ARead ReadFn, R3000AWrite WriteFn,
+    R3000AAddrVerifyFn DataAddrVerifier, R3000AAddrVerifyFn InstructionAddrVerifier
 );
-void R3051_StepClock(R3051 *This);
+void R3000A_StepClock(R3000A *This);
 
 
 
@@ -125,23 +127,23 @@ void R3051_StepClock(R3051 *This);
 #define WRITE_HALF(u32Addr, u16Half) This->WriteFn(This->UserData, u32Addr, u16Half, DATA_HALF)
 #define WRITE_WORD(u32Addr, u32Word) This->WriteFn(This->UserData, u32Addr, u32Word, DATA_WORD)
 
-typedef struct R3051_StageStatus
+typedef struct R3000A_StageStatus
 {
     Bool8 HasException;
     u8 RegIndex;
     u32 WritebackData;
-} R3051_StageStatus;
+} R3000A_StageStatus;
 
 
 
-R3051 R3051_Init(
+R3000A R3000A_Init(
     void *UserData, 
-    R3051Read ReadFn, R3051Write WriteFn,
-    R3051AddrVerifyFn DataAddrVerifier, R3051AddrVerifyFn InstructionAddrVerifier
+    R3000ARead ReadFn, R3000AWrite WriteFn,
+    R3000AAddrVerifyFn DataAddrVerifier, R3000AAddrVerifyFn InstructionAddrVerifier
 )
 {
-    u32 ResetVector = R3051_RESET_VEC;
-    R3051 Mips = {
+    u32 ResetVector = R3000A_RESET_VEC;
+    R3000A Mips = {
         .PC = ResetVector,
         .PCSave = { 0 },
         .Instruction = { 0 },
@@ -162,19 +164,19 @@ R3051 R3051_Init(
 }
 
 
-static int R3051_CurrentPipeStage(const R3051 *This, int Stage)
+static int R3000A_CurrentPipeStage(const R3000A *This, int Stage)
 {
     int CurrentStage = This->PipeStage - Stage;
     if (CurrentStage < 0)
-        CurrentStage += R3051_PIPESTAGE_COUNT;
-    if (CurrentStage >= R3051_PIPESTAGE_COUNT)
-        CurrentStage -= R3051_PIPESTAGE_COUNT;
+        CurrentStage += R3000A_PIPESTAGE_COUNT;
+    if (CurrentStage >= R3000A_PIPESTAGE_COUNT)
+        CurrentStage -= R3000A_PIPESTAGE_COUNT;
     return CurrentStage;
 }
 
-static u32 R3051_InstructionAt(const R3051 *This, int Stage)
+static u32 R3000A_InstructionAt(const R3000A *This, int Stage)
 {
-    int CurrentStage = R3051_CurrentPipeStage(This, Stage);
+    int CurrentStage = R3000A_CurrentPipeStage(This, Stage);
     return This->Instruction[CurrentStage];
 }
 
@@ -182,11 +184,11 @@ static u32 R3051_InstructionAt(const R3051 *This, int Stage)
 
 
 
-static void R3051_SetException(R3051 *This, R3051_Exception Exception, int Stage)
+static void R3000A_SetException(R3000A *This, R3000A_Exception Exception, int Stage)
 {
     int LastStage = Stage - 1;
     if (LastStage < 0)
-        LastStage = R3051_PIPESTAGE_COUNT - 1;
+        LastStage = R3000A_PIPESTAGE_COUNT - 1;
 
     /* set EPC */
     if (This->InstructionIsBranch[LastStage])
@@ -210,34 +212,34 @@ static void R3051_SetException(R3051 *This, R3051_Exception Exception, int Stage
 }
 
 
-static void R3051_RaiseInternalException(R3051 *This, R3051_Exception Exception, int Stage)
+static void R3000A_RaiseInternalException(R3000A *This, R3000A_Exception Exception, int Stage)
 {
     This->ExceptionRaised = true;
-    R3051_SetException(This, Exception, Stage);
+    R3000A_SetException(This, Exception, Stage);
 }
 
-static void R3051_RaiseMemoryException(R3051 *This, R3051_Exception Exception, u32 Addr)
+static void R3000A_RaiseMemoryException(R3000A *This, R3000A_Exception Exception, u32 Addr)
 {
-    int Stage = R3051_CurrentPipeStage(This, MEMORY_STAGE);
+    int Stage = R3000A_CurrentPipeStage(This, MEMORY_STAGE);
     This->ExceptionRaised = true;
     This->CP0.BadVAddr = Addr;
-    R3051_SetException(This, Exception, Stage);
+    R3000A_SetException(This, Exception, Stage);
 }
 
 /* sets PC to the appropriate exception routine, 
  * sets CP0 to the appriate state for the exception, 
  * caller decides whether or not to start fetching from that addr */
-static void R3051_HandleException(R3051 *This)
+static void R3000A_HandleException(R3000A *This)
 {
     ASSERT(This->ExceptionRaised);
     ASSERT(This->ExceptionCyclesLeft == 0);
     This->ExceptionRaised = false;
     /* General exception vector */
-    This->PC = 0x80000080;
+    This->PC = R3000A_EXCEPTION_VEC;
 }
 
 
-static u32 R3051CP0_Read(const R3051 *This, uint RegIndex)
+static u32 R3000ACP0_Read(const R3000A *This, uint RegIndex)
 {
     switch (RegIndex)
     {
@@ -255,7 +257,7 @@ static u32 R3051CP0_Read(const R3051 *This, uint RegIndex)
     }
 }
 
-static void R3051CP0_Write(R3051 *This, u32 RdIndex, u32 Data)
+static void R3000ACP0_Write(R3000A *This, u32 RdIndex, u32 Data)
 {
     This->CP0.R[RdIndex % STATIC_ARRAY_SIZE(This->CP0.R)] = Data;
 }
@@ -267,7 +269,7 @@ static void R3051CP0_Write(R3051 *This, u32 RdIndex, u32 Data)
  *=============================================================================================*/
 
 
-static void R3051_Fetch(R3051 *This)
+static void R3000A_Fetch(R3000A *This)
 {
     This->PCSave[This->PipeStage] = This->PC;
     This->Instruction[This->PipeStage] = READ_WORD(This->PC);
@@ -276,9 +278,9 @@ static void R3051_Fetch(R3051 *This)
 
 
 
-static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction, Bool8 *ExceptionRaisedThisStage, Bool8 *IsBranchingInstruction)
+static Bool8 R3000A_DecodeSpecial(R3000A *This, u32 Instruction, Bool8 *ExceptionRaisedThisStage, Bool8 *IsBranchingInstruction)
 {
-    int CurrentStage = R3051_CurrentPipeStage(This, DECODE_STAGE);
+    int CurrentStage = R3000A_CurrentPipeStage(This, DECODE_STAGE);
     Bool8 IsValidInstruction = true;
     *ExceptionRaisedThisStage = false;
     *IsBranchingInstruction = false;
@@ -308,7 +310,7 @@ static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction, Bool8 *ExceptionR
             Bool8 TargetAddrIsValid = This->VerifyInstructionAddr(This->UserData, Rs); /* TODO: check this? */
             if ((Rs & 0x3) || !TargetAddrIsValid)
             {
-                R3051_RaiseInternalException(
+                R3000A_RaiseInternalException(
                     This, 
                     EXCEPTION_ADEL, 
                     CurrentStage
@@ -324,7 +326,7 @@ static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction, Bool8 *ExceptionR
         } break;
         case 5: /* syscall */
         {
-            R3051_RaiseInternalException(
+            R3000A_RaiseInternalException(
                 This, 
                 EXCEPTION_SYS, 
                 CurrentStage
@@ -333,7 +335,7 @@ static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction, Bool8 *ExceptionR
         } break;
         case 6: /* break */
         {
-            R3051_RaiseInternalException(
+            R3000A_RaiseInternalException(
                 This, 
                 EXCEPTION_BP, 
                 CurrentStage
@@ -371,7 +373,7 @@ static Bool8 R3051_DecodeSpecial(R3051 *This, u32 Instruction, Bool8 *ExceptionR
  *=============================================================================================*/
 
 /* returns true if an exception was raised during this stage, false otherwise */
-static Bool8 R3051_Decode(R3051 *This)
+static Bool8 R3000A_Decode(R3000A *This)
 {
 #define BRANCH_IF(Cond) \
     if (Cond) \
@@ -379,8 +381,8 @@ static Bool8 R3051_Decode(R3051 *This)
 
     /* NOTE: decode stage determines next PC value and checks for illegal instruction  */
     u32 NextInstructionAddr = This->PC;
-    u32 Instruction = R3051_InstructionAt(This, DECODE_STAGE);
-    int CurrentStage = R3051_CurrentPipeStage(This, DECODE_STAGE);
+    u32 Instruction = R3000A_InstructionAt(This, DECODE_STAGE);
+    int CurrentStage = R3000A_CurrentPipeStage(This, DECODE_STAGE);
     u32 Rs = This->R[REG(Instruction, RS)];
     u32 Rt = This->R[REG(Instruction, RT)];
     Bool8 InstructionIsIllegal = false;
@@ -391,7 +393,7 @@ static Bool8 R3051_Decode(R3051 *This)
     {
     case 000: /* special */
     {
-        InstructionIsIllegal = !R3051_DecodeSpecial(
+        InstructionIsIllegal = !R3000A_DecodeSpecial(
             This, 
             Instruction, 
             &ExceptionRaisedThisStage, 
@@ -464,7 +466,7 @@ j:
             }
             else /* other coprocessor triggers coprocessor unusable */
             {
-                R3051_RaiseInternalException(This, EXCEPTION_CPU, CurrentStage);
+                R3000A_RaiseInternalException(This, EXCEPTION_CPU, CurrentStage);
             }
         } break;
         case 02: /* coprocessor misc group */
@@ -492,7 +494,7 @@ j:
 
     if (InstructionIsIllegal)
     {
-        R3051_RaiseInternalException(
+        R3000A_RaiseInternalException(
             This, 
             EXCEPTION_RI, 
             CurrentStage
@@ -507,9 +509,9 @@ j:
 
 
 /* returns true if exception was raised during this stage, false otherwise */
-static R3051_StageStatus R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 Rt, u32 Rs)
+static R3000A_StageStatus R3000A_ExecuteSpecial(R3000A *This, u32 Instruction, u32 Rt, u32 Rs)
 {
-    R3051_StageStatus Status = { 0 };
+    R3000A_StageStatus Status = { 0 };
     uint RegIndex = REG(Instruction, RD);
     u32 *Rd = &This->R[RegIndex];
 
@@ -652,10 +654,10 @@ static R3051_StageStatus R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 
         u32 Result = Rs + Rt;
         if (OVERFLOW_I32(Result, Rs, Rt))
         {
-            R3051_RaiseInternalException(
+            R3000A_RaiseInternalException(
                 This, 
                 EXCEPTION_OVF, 
-                R3051_CurrentPipeStage(This, EXECUTE_STAGE)
+                R3000A_CurrentPipeStage(This, EXECUTE_STAGE)
             );
             Status.HasException = true;
             return Status;
@@ -675,10 +677,10 @@ static R3051_StageStatus R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 
         u32 Result = Rs + NegatedRt;
         if (OVERFLOW_I32(Result, Rs, NegatedRt))
         {
-            R3051_RaiseInternalException(
+            R3000A_RaiseInternalException(
                 This, 
                 EXCEPTION_OVF, 
-                R3051_CurrentPipeStage(This, EXECUTE_STAGE)
+                R3000A_CurrentPipeStage(This, EXECUTE_STAGE)
             );
             Status.HasException = true;
             return Status;
@@ -736,23 +738,23 @@ static R3051_StageStatus R3051_ExecuteSpecial(R3051 *This, u32 Instruction, u32 
  *=============================================================================================*/
 
 /* returns true if an exception has occured during this stage, false otherwise */
-static R3051_StageStatus R3051_Execute(R3051 *This)
+static R3000A_StageStatus R3000A_Execute(R3000A *This)
 {
-    u32 Instruction = R3051_InstructionAt(This, EXECUTE_STAGE);
+    u32 Instruction = R3000A_InstructionAt(This, EXECUTE_STAGE);
     uint RegIndex = REG(Instruction, RT);
     u32 *Rt = &This->R[RegIndex];
     u32 Rs = This->R[REG(Instruction, RS)];
 
     u32 SignedImm = (i32)(i16)(Instruction & 0xFFFF);
     u32 UnsignedImm = Instruction & 0xFFFF;
-    R3051_StageStatus Status = { 0 };
+    R3000A_StageStatus Status = { 0 };
 
     /* only care about ALU ops */
     switch (OP(Instruction)) /* group and mode of op */
     {
     case 000:
     {
-        return R3051_ExecuteSpecial(This, Instruction, *Rt, Rs);
+        return R3000A_ExecuteSpecial(This, Instruction, *Rt, Rs);
     } break;
 
     /* group 1: alu immediate */
@@ -761,10 +763,10 @@ static R3051_StageStatus R3051_Execute(R3051 *This)
         u32 Result = Rs + SignedImm;
         if (OVERFLOW_I32(Result, Rs, SignedImm))
         {
-            R3051_RaiseInternalException(
+            R3000A_RaiseInternalException(
                 This, 
                 EXCEPTION_OVF, 
-                R3051_CurrentPipeStage(This, EXECUTE_STAGE)
+                R3000A_CurrentPipeStage(This, EXECUTE_STAGE)
             );
             Status.HasException = true;
             return Status;
@@ -820,13 +822,13 @@ static R3051_StageStatus R3051_Execute(R3051 *This)
         case 0x00:
         case 0x01: /* MFC0 */
         {
-            *Rt = R3051CP0_Read(This, REG(Instruction, RT));
+            *Rt = R3000ACP0_Read(This, REG(Instruction, RT));
             TODO("Check if coprocessor is usable for MFC0");
         } break;
         case 0x04:
         case 0x05: /* MTC0 */
         {
-            R3051CP0_Write(This, REG(Instruction, RD), *Rt);
+            R3000ACP0_Write(This, REG(Instruction, RD), *Rt);
             TODO("Check if coprocessor is usable for MTC0");
             Rt = NULL;
         } break;
@@ -878,9 +880,9 @@ DifferentInstruction:
  *=============================================================================================*/
 
 /* returns true if an exception has occured during this stage, false otherwise */
-static R3051_StageStatus R3051_Memory(R3051 *This)
+static R3000A_StageStatus R3000A_Memory(R3000A *This)
 {
-    u32 Instruction = R3051_InstructionAt(This, MEMORY_STAGE);
+    u32 Instruction = R3000A_InstructionAt(This, MEMORY_STAGE);
     u32 Addr; /* calculate effective addr */
     {
         i32 Offset = (i32)(i16)(Instruction & 0xFFFF);
@@ -890,7 +892,7 @@ static R3051_StageStatus R3051_Memory(R3051 *This)
     uint RegIndex = REG(Instruction, RT);
     u32 Rt = This->R[RegIndex];
     u32 DataRead = 0;
-    R3051_StageStatus Status = { 0 };
+    R3000A_StageStatus Status = { 0 };
 
     /* verify memory addr */
     if (!This->VerifyDataAddr(This->UserData, Addr))
@@ -1014,10 +1016,10 @@ static R3051_StageStatus R3051_Memory(R3051 *This)
     return Status;
 
 LoadAddrError:
-    R3051_RaiseMemoryException(This, EXCEPTION_ADEL, Addr);
+    R3000A_RaiseMemoryException(This, EXCEPTION_ADEL, Addr);
     return Status;
 StoreAddrError:
-    R3051_RaiseMemoryException(This, EXCEPTION_ADES, Addr);
+    R3000A_RaiseMemoryException(This, EXCEPTION_ADES, Addr);
     return Status;
 }
 
@@ -1026,7 +1028,7 @@ StoreAddrError:
  *                                         WRITEBACK STAGE
  *=============================================================================================*/
 
-static void R3051_Writeback(R3051 *This)
+static void R3000A_Writeback(R3000A *This)
 {
     (void)This;
 }
@@ -1035,10 +1037,10 @@ static void R3051_Writeback(R3051 *This)
 
 
 
-static void R3051_AdvancePipeStage(R3051 *This)
+static void R3000A_AdvancePipeStage(R3000A *This)
 {
     This->PipeStage++;
-    if (This->PipeStage >= R3051_PIPESTAGE_COUNT)
+    if (This->PipeStage >= R3000A_PIPESTAGE_COUNT)
         This->PipeStage = 0;   
 }
 
@@ -1046,13 +1048,13 @@ static void R3051_AdvancePipeStage(R3051 *This)
  * otherwise an exception was encountered and 
  * returns the stage right before the stage that encountered the exception 
  */
-static int R3051_ExecutePipeline(R3051 *This)
+static int R3000A_ExecutePipeline(R3000A *This)
 {
-    R3051_StageStatus MemoryStage = R3051_Memory(This);
+    R3000A_StageStatus MemoryStage = R3000A_Memory(This);
     if (MemoryStage.HasException)
         return EXECUTE_STAGE;
 
-    R3051_StageStatus ExecuteStage = R3051_Execute(This);
+    R3000A_StageStatus ExecuteStage = R3000A_Execute(This);
     This->R[0] = 0;
     if (MemoryStage.RegIndex)
         This->R[MemoryStage.RegIndex] = MemoryStage.WritebackData;
@@ -1065,18 +1067,18 @@ static int R3051_ExecutePipeline(R3051 *This)
     if (ExecuteStage.RegIndex)
         This->R[ExecuteStage.RegIndex] = ExecuteStage.WritebackData;
 
-    Bool8 HasException = R3051_Decode(This);
+    Bool8 HasException = R3000A_Decode(This);
     This->R[0] = 0;
     if (HasException)
         return FETCH_STAGE;
 
-    R3051_Writeback(This);
+    R3000A_Writeback(This);
     This->R[0] = 0;
     return -1;
 }
 
 
-void R3051_StepClock(R3051 *This)
+void R3000A_StepClock(R3000A *This)
 {
     if (This->HiLoBlocking)
     {
@@ -1100,7 +1102,7 @@ void R3051_StepClock(R3051 *This)
         if (This->HiLoCyclesLeft)
             This->HiLoCyclesLeft--;
 
-        R3051_AdvancePipeStage(This);
+        R3000A_AdvancePipeStage(This);
         if (This->ExceptionRaised)
         {
             if (This->ExceptionCyclesLeft)
@@ -1109,32 +1111,32 @@ void R3051_StepClock(R3051 *This)
                 /* don't do fetching when emptying out instructions in the pipeline, 
                  * put nops in their place instead */
 
-                int FetchStage = R3051_CurrentPipeStage(This, FETCH_STAGE);
+                int FetchStage = R3000A_CurrentPipeStage(This, FETCH_STAGE);
                 This->Instruction[FetchStage] = 0;
                 This->ExceptionCyclesLeft--;
             }
             else /* emptied all instructions in the pipeline */
             {
-                R3051_HandleException(This);
+                R3000A_HandleException(This);
 
                 /* starts fetching from the exception handler */
-                R3051_Fetch(This);
+                R3000A_Fetch(This);
             }
         }
         else /* no exception, normal fetching */
         {
-            R3051_Fetch(This);
+            R3000A_Fetch(This);
         }
     }
 
 
-    int StageToInvalidate = R3051_ExecutePipeline(This);
+    int StageToInvalidate = R3000A_ExecutePipeline(This);
     if (-1 == StageToInvalidate)
         return;
 
     while (StageToInvalidate >= FETCH_STAGE)
     {
-        int Stage = R3051_CurrentPipeStage(This, StageToInvalidate);
+        int Stage = R3000A_CurrentPipeStage(This, StageToInvalidate);
         This->PCSave[Stage] = 0;
         This->Instruction[Stage] = 0;
         StageToInvalidate--;
@@ -1413,22 +1415,22 @@ static u32 TranslateAddr(u32 LogicalAddr)
     {
         return LogicalAddr;
     } break;
-    default: return LogicalAddr - R3051_RESET_VEC;
+    default: return LogicalAddr - R3000A_RESET_VEC;
     }
 }
 
-static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
+static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size)
 {
     Buffer *Buf = UserData;
     Addr = TranslateAddr(Addr);
     if (Addr == (u32)TESTSYS_WRITESTR)
     {
-        Data -= R3051_RESET_VEC;
+        Data -= R3000A_RESET_VEC;
         if (Data >= Buf->Size)
         {
             SCREEN_PRINTF(&sLogWindow, WRAP_X, 
                 "Invalid string address: 0x%08x\n", 
-                Data + R3051_RESET_VEC
+                Data + R3000A_RESET_VEC
             );
         }
         else
@@ -1453,7 +1455,7 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
     {
         SCREEN_PRINTF(&sLogWindow, WRAP_X, 
             "Writing 0x%0*x to 0x%08x\n", 
-            Size, Data, Addr + R3051_RESET_VEC
+            Size, Data, Addr + R3000A_RESET_VEC
         );
         for (int i = 0; i < (int)Size; i++)
         {
@@ -1465,12 +1467,12 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3051_DataSize Size)
     {
         SCREEN_PRINTF(&sLogWindow, WRAP_X, 
             "Out of bound write to 0x%08x with %x (size %d)\n", 
-            Addr + R3051_RESET_VEC, Data, Size
+            Addr + R3000A_RESET_VEC, Data, Size
         );
     }
 }
 
-static u32 MipsRead(void *UserData, u32 Addr, R3051_DataSize Size)
+static u32 MipsRead(void *UserData, u32 Addr, R3000A_DataSize Size)
 {
     Buffer *Buf = UserData;
     Addr = TranslateAddr(Addr);
@@ -1487,7 +1489,7 @@ static u32 MipsRead(void *UserData, u32 Addr, R3051_DataSize Size)
     {
         SCREEN_PRINTF(&sLogWindow, WRAP_X,
             "Out of bound read at 0x%08x, size = %d\n", 
-            Addr + R3051_RESET_VEC, Size
+            Addr + R3000A_RESET_VEC, Size
         );
     }
     return 0;
@@ -1537,7 +1539,7 @@ static u32 ParseAddr(const char *Buf)
 }
 
 
-static Bool8 ProcessCLI(R3051 *Mips)
+static Bool8 ProcessCLI(R3000A *Mips)
 {
     static Bool8 ShouldHalt = true;
     static u32 HaltAddr = 1;
@@ -1562,7 +1564,7 @@ static Bool8 ProcessCLI(R3051 *Mips)
     return !STREQU(InputBuffer, "quit");
 }
 
-static void UpdateDisassembly(ScreenBuffer *Screen, const R3051 *Mips, int StartX, int StartY)
+static void UpdateDisassembly(ScreenBuffer *Screen, const R3000A *Mips, int StartX, int StartY)
 {
 #define NUM_INS 10
     typedef struct DisasmInfo 
@@ -1584,7 +1586,7 @@ static void UpdateDisassembly(ScreenBuffer *Screen, const R3051 *Mips, int Start
             {
                 u32 Instruction;
                 memcpy(&Instruction, Buf->Ptr + PhysAddr, sizeof Instruction);
-                R3051_Disasm(
+                R3000A_Disasm(
                     Instruction, 
                     CurrentPC,
                     0,
@@ -1620,9 +1622,9 @@ static void UpdateDisassembly(ScreenBuffer *Screen, const R3051 *Mips, int Start
 #undef NUM_INS
 }
 
-static void DumpState(const R3051 *Mips)
+static void DumpState(const R3000A *Mips)
 {
-    static R3051 LastState;
+    static R3000A LastState;
     int RegisterCount = STATIC_ARRAY_SIZE(Mips->R);
     int RegisterBoxPerLine = 4;
     int y = 0;
@@ -1679,7 +1681,7 @@ int main(int argc, char **argv)
         return 1;
 
     ScreenInit();
-    R3051 Mips = R3051_Init(
+    R3000A Mips = R3000A_Init(
         &Buf, 
         MipsRead, MipsWrite,
         MipsVerify, MipsVerify
@@ -1687,7 +1689,7 @@ int main(int argc, char **argv)
 
     sShouldContinue = true;
     do {
-        R3051_StepClock(&Mips);
+        R3000A_StepClock(&Mips);
         DumpState(&Mips);
         if (!CLIDisable)
         {
@@ -1700,5 +1702,5 @@ int main(int argc, char **argv)
 }
 #endif /* STANDALONE */
 
-#endif /* R3051_C */
+#endif /* R3000A_C */
 
