@@ -1,106 +1,15 @@
 #ifndef R3000A_C
 #define R3000A_C
-
-#include "Common.h"
-
-typedef enum R3000A_DataSize 
-{
-    DATA_BYTE = sizeof(u8),
-    DATA_HALF = sizeof(u16),
-    DATA_WORD = sizeof(u32),
-} R3000A_DataSize;
-
-
-typedef enum R3000A_Exception 
-{
-    EXCEPTION_INT = 0, /* INTerrrupt */
-    /* NOTE: 1..3 are TLB exception, 
-     * but not immplemented because the PS1 does not have virtual addr */
-    EXCEPTION_ADEL = 4, /* Address Error on Load */
-    EXCEPTION_ADES, /* Address Error on Store */
-    EXCEPTION_IBE,  /* Instruction Bus Error */
-    EXCEPTION_DBE,  /* Data Bus Error */
-    EXCEPTION_SYS,  /* SYScall */
-    EXCEPTION_BP,   /* BreakPoint */
-    EXCEPTION_RI,   /* Reserved Instruction */
-    EXCEPTION_CPU,  /* CoProcessor Unusable */
-    EXCEPTION_OVF,  /* arithmetic OVerFlow */
-} R3000A_Exception;
-
-
-typedef union R3000A_CP0
-{
-    u32 R[32];
-    struct {
-        u32 Reserved0[3];
-        u32 BPC;                /* breakpoint on execute */
-
-        u32 Reserved1;
-        u32 BDA;                /* breakpoint on data access */
-        u32 JumpDest;           /* random memorized jump addr */
-        u32 DCIC;               /* breakpoint ctrl */
-
-        u32 BadVAddr;           /* bad virtual addr */
-        u32 BDAM;               /* data access breakpoint mask */
-        u32 Reserved2;
-        u32 BPCM;               /* execute breakpoint mask */
-
-        u32 Status;
-        u32 Cause;
-        u32 EPC;
-        u32 PrID;
-    };
-} R3000A_CP0;
-
-
-
-#define R3000A_RESET_VEC 0xBFC00000
-#define R3000A_EXCEPTION_VEC 0xBFC00080
-#define R3000A_CACHED_EXCEPTION_VEC 0x80000080
-#define R3000A_PIPESTAGE_COUNT 5
-typedef void (*R3000AWrite)(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size);
-typedef u32 (*R3000ARead)(void *UserData, u32 Addr, R3000A_DataSize Size);
-typedef Bool8 (*R3000AAddrVerifyFn)(void *UserData, u32 Addr);
-typedef struct R3000A 
-{
-    u32 R[32];
-    u32 Hi, Lo;
-
-    u32 PC;
-    u32 PCSave[R3000A_PIPESTAGE_COUNT];
-    u32 Instruction[R3000A_PIPESTAGE_COUNT];
-    Bool8 InstructionIsBranch[R3000A_PIPESTAGE_COUNT];
-
-    int PipeStage;
-    int HiLoCyclesLeft;
-    Bool8 HiLoBlocking;
-    Bool8 ExceptionRaised;
-    int ExceptionCyclesLeft;
-
-    void *UserData;
-    R3000ARead ReadFn;
-    R3000AWrite WriteFn;
-    R3000AAddrVerifyFn VerifyInstructionAddr;
-    R3000AAddrVerifyFn VerifyDataAddr;
-
-
-    R3000A_CP0 CP0;
-} R3000A;
-
-R3000A R3000A_Init(
-    void *UserData, 
-    R3000ARead ReadFn, R3000AWrite WriteFn,
-    R3000AAddrVerifyFn DataAddrVerifier, R3000AAddrVerifyFn InstructionAddrVerifier
-);
-void R3000A_StepClock(R3000A *This);
-
-
-
 /* =============================================================================================
  *
  *                                       IMPLEMENTATION 
  *
  *=============================================================================================*/
+
+#include "CP0.h"
+#include "R3000A.h"
+
+#include "CP0.c"
 
 /*
  * https://stuff.mit.edu/afs/sipb/contrib/doc/specs/ic/cpu/mips/r3051.pdf
@@ -109,7 +18,7 @@ void R3000A_StepClock(R3000A *This);
  *
  * https://student.cs.uwaterloo.ca/~cs350/common/r3000-manual.pdf
  * MACHINE INSTRUCTION REFERENCE APPENDIX A
- * */
+ */
 
 
 #define FETCH_STAGE 0
@@ -134,33 +43,45 @@ typedef struct R3000A_StageStatus
     u32 WritebackData;
 } R3000A_StageStatus;
 
+typedef struct R3000A_ExceptionInfo 
+{
+    u32 EPC;
+    u32 Instruction;
+    Bool8 BranchDelay;
+} R3000A_ExceptionInfo;
+
 
 
 R3000A R3000A_Init(
     void *UserData, 
-    R3000ARead ReadFn, R3000AWrite WriteFn,
-    R3000AAddrVerifyFn DataAddrVerifier, R3000AAddrVerifyFn InstructionAddrVerifier
+    R3000ARead ReadFn, 
+    R3000AWrite WriteFn,
+    R3000AAddrVerifyFn DataAddrVerifier, 
+    R3000AAddrVerifyFn InstructionAddrVerifier
 )
 {
-    u32 ResetVector = R3000A_RESET_VEC;
     R3000A Mips = {
-        .PC = ResetVector,
-        .PCSave = { 0 },
-        .Instruction = { 0 },
-        .R = { 0 },
+        .PC = R3000A_RESET_VEC,
 
         .UserData = UserData,
         .WriteFn = WriteFn,
         .ReadFn = ReadFn,
         .VerifyDataAddr = DataAddrVerifier,
         .VerifyInstructionAddr = InstructionAddrVerifier,
-
-        .CP0 = {
-            .PrID = 0x00000001,
-            .Status = 1 << 22, /* set BEV bit */
-        },
     };
+    Mips.CP0 = CP0_Init(0x00000001);
     return Mips;
+}
+
+void R3000A_Reset(R3000A *This)
+{
+    *This = R3000A_Init(
+        This->UserData, 
+        This->ReadFn, 
+        This->WriteFn, 
+        This->VerifyDataAddr, 
+        This->VerifyInstructionAddr
+    );
 }
 
 
@@ -184,46 +105,55 @@ static u32 R3000A_InstructionAt(const R3000A *This, int Stage)
 
 
 
-static void R3000A_SetException(R3000A *This, R3000A_Exception Exception, int Stage)
+static R3000A_ExceptionInfo R3000A_GetExceptionInfo(const R3000A *This, int Stage)
 {
     int LastStage = Stage - 1;
     if (LastStage < 0)
         LastStage = R3000A_PIPESTAGE_COUNT - 1;
 
-    /* set EPC */
-    if (This->InstructionIsBranch[LastStage])
+    R3000A_ExceptionInfo Info = {
+        .EPC = This->PCSave[Stage],
+        .Instruction = This->Instruction[Stage],
+        .BranchDelay = This->InstructionIsBranch[LastStage],
+    };
+    if (Info.BranchDelay)
     {
-        This->CP0.EPC = This->PCSave[LastStage];
-        This->CP0.Cause |= 1ul << 31; /* set BD bit */
+        Info.EPC = This->PCSave[LastStage];
+        Info.Instruction = This->Instruction[LastStage];
     }
-    else
-    {
-        This->CP0.EPC = This->PCSave[Stage];
-    }
-
-    /* write exception code to Cause register */
-    MASKED_LOAD(This->CP0.Cause, Exception << 1, 0x1F << 1);
-
-    /* pushes new kernel mode and interrupt flag
-     * bit 1 = 0 for kernel mode, 
-     * bit 0 = 0 for interrupt disable */
-    u32 NewStatusStack = (This->CP0.Status & 0xF) << 2 | 0x00;
-    MASKED_LOAD(This->CP0.Status, NewStatusStack, 0x3F);
+    return Info;
 }
 
 
 static void R3000A_RaiseInternalException(R3000A *This, R3000A_Exception Exception, int Stage)
 {
     This->ExceptionRaised = true;
-    R3000A_SetException(This, Exception, Stage);
+
+    R3000A_ExceptionInfo Info = R3000A_GetExceptionInfo(This, Stage);
+    CP0_SetException(
+        &This->CP0,
+        Info.EPC, 
+        Info.Instruction, 
+        Info.BranchDelay,
+        Exception,
+        0
+    );
 }
 
 static void R3000A_RaiseMemoryException(R3000A *This, R3000A_Exception Exception, u32 Addr)
 {
     int Stage = R3000A_CurrentPipeStage(This, MEMORY_STAGE);
     This->ExceptionRaised = true;
-    This->CP0.BadVAddr = Addr;
-    R3000A_SetException(This, Exception, Stage);
+
+    R3000A_ExceptionInfo Info = R3000A_GetExceptionInfo(This, Stage);
+    CP0_SetException(
+        &This->CP0, 
+        Info.EPC, 
+        Info.Instruction, 
+        Info.BranchDelay, 
+        Exception, 
+        Addr
+    );
 }
 
 /* sets PC to the appropriate exception routine, 
@@ -233,34 +163,12 @@ static void R3000A_HandleException(R3000A *This)
 {
     ASSERT(This->ExceptionRaised);
     ASSERT(This->ExceptionCyclesLeft == 0);
+
     This->ExceptionRaised = false;
-    /* General exception vector */
-    This->PC = R3000A_EXCEPTION_VEC;
+    This->PC = CP0_GetExceptionVector(&This->CP0);
 }
 
 
-static u32 R3000ACP0_Read(const R3000A *This, uint RegIndex)
-{
-    switch (RegIndex)
-    {
-    case 3: return This->CP0.BPC;
-    case 5: return This->CP0.BDA;
-    case 6: return This->CP0.JumpDest;
-    case 8: return This->CP0.BadVAddr;
-    case 9: return This->CP0.BDAM;
-    case 11: return This->CP0.BPCM;
-    case 12: return This->CP0.Status;
-    case 13: return This->CP0.Cause;
-    case 14: return This->CP0.EPC;
-    case 15: return 0x00000001; /* PrID, always 1 */
-    default: return This->CP0.R[RegIndex];
-    }
-}
-
-static void R3000ACP0_Write(R3000A *This, u32 RdIndex, u32 Data)
-{
-    This->CP0.R[RdIndex % STATIC_ARRAY_SIZE(This->CP0.R)] = Data;
-}
 
 
 
@@ -307,7 +215,7 @@ static Bool8 R3000A_DecodeSpecial(R3000A *This, u32 Instruction, Bool8 *Exceptio
             u32 Rs = This->R[REG(Instruction, RS)];
             u32 *Rd = &This->R[REG(Instruction, RD)];
 
-            Bool8 TargetAddrIsValid = This->VerifyInstructionAddr(This->UserData, Rs); /* TODO: check this? */
+            Bool8 TargetAddrIsValid = This->VerifyInstructionAddr(This->UserData, Rs);
             if ((Rs & 0x3) || !TargetAddrIsValid)
             {
                 R3000A_RaiseInternalException(
@@ -450,24 +358,29 @@ j:
 
     default: 
     {
+        Bool8 CoprocessorUnusable = false;
         u32 OpMode = OP_MODE(Instruction);
         switch (OP_GROUP(Instruction))
         {
         case 06: /* coprocessor load group */
         case 07: /* coprocessor store group */
         {
-            if (OpMode == 2) /* TODO: check if CP2 is usable */
+            if (OpMode == 2) /* GTE */
             {
                 /* instruction is ok */
+                CoprocessorUnusable = CP0_IsCoprocessorAvailable(&This->CP0, 2);
             }
-            else if (OpMode == 3) /* CP3 always triggers illegal instruction */
+            else if (OpMode == 3) /* CP3 always triggers illegal instruction exception instead of unusable exception */
             {
                 InstructionIsIllegal = true;
             }
             else /* other coprocessor triggers coprocessor unusable */
             {
-                R3000A_RaiseInternalException(This, EXCEPTION_CPU, CurrentStage);
+                CoprocessorUnusable = true;
             }
+
+            if (CoprocessorUnusable)
+                R3000A_RaiseInternalException(This, EXCEPTION_CPU, CurrentStage);
         } break;
         case 02: /* coprocessor misc group */
         {
@@ -480,8 +393,8 @@ j:
             }
             else if (OpMode != 2) /* CP2 (GTE) */
             {
-                /* TODO: check GTE */
                 InstructionIsIllegal = true;
+                TODO("Check legality of GTE instructions");
             }
         } break;
 
@@ -740,6 +653,7 @@ static R3000A_StageStatus R3000A_ExecuteSpecial(R3000A *This, u32 Instruction, u
 /* returns true if an exception has occured during this stage, false otherwise */
 static R3000A_StageStatus R3000A_Execute(R3000A *This)
 {
+    int CurrentStage = R3000A_CurrentPipeStage(This, EXECUTE_STAGE);
     u32 Instruction = R3000A_InstructionAt(This, EXECUTE_STAGE);
     uint RegIndex = REG(Instruction, RT);
     u32 *Rt = &This->R[RegIndex];
@@ -766,7 +680,7 @@ static R3000A_StageStatus R3000A_Execute(R3000A *This)
             R3000A_RaiseInternalException(
                 This, 
                 EXCEPTION_OVF, 
-                R3000A_CurrentPipeStage(This, EXECUTE_STAGE)
+                CurrentStage
             );
             Status.HasException = true;
             return Status;
@@ -807,58 +721,54 @@ static R3000A_StageStatus R3000A_Execute(R3000A *This)
 
     case 020: /* COP0 */
     {
-        /* RFE, the manual shows that the bits in the middle are zero, 
-         * but does it really need to be zero?
-         * does the opcode need to be 0x42000010 exactly? */
-        if ((REG(Instruction, RS) & 0x10) && FUNCT(Instruction) == 0x10) 
-        {
-            /* restore KUp, IEp and KUc, IEc */
-            MASKED_LOAD(This->CP0.Status, This->CP0.Status >> 2, 0xF);
-            TODO("RFE: checck priviliage level");
-            Rt = NULL;
-        }
-        else switch (REG(Instruction, RS))
+        switch (REG(Instruction, RS))
         {
         case 0x00:
-        case 0x01: /* MFC0 */
+        case 0x01: /* mfc0 */
         {
-            *Rt = R3000ACP0_Read(This, REG(Instruction, RT));
-            TODO("Check if coprocessor is usable for MFC0");
+            *Rt = CP0_Read(&This->CP0, REG(Instruction, RT));
         } break;
         case 0x04:
-        case 0x05: /* MTC0 */
+        case 0x05: /* mtc0 */
         {
-            R3000ACP0_Write(This, REG(Instruction, RD), *Rt);
-            TODO("Check if coprocessor is usable for MTC0");
+            CP0_Write(&This->CP0, REG(Instruction, RD), *Rt);
             Rt = NULL;
+        } break;
+        case 0x10: /* rfe only */
+        {
+            if (0x10 == FUNCT(Instruction))
+            {
+                /* restore KUp, IEp and KUc, IEc */
+                MASKED_LOAD(This->CP0.Status, This->CP0.Status >> 2, 0xF);
+                Rt = NULL;
+            }
         } break;
         default: goto DifferentInstruction;
         }
     } break;
-    case 022: /* COP2 */
+    case 022: /* COP2 misc */
     {
-        /* TODO: COP2 instructions */
+        TODO("COP2 instructions");
         switch (REG(Instruction, RS))
         {
-        case 0x00:
-        case 0x01:
+        case 0x00: 
+        case 0x01: /* mfc2 */
         {
         } break;
         case 0x02:
-        case 0x03:
+        case 0x03: /* mtc2 */
         {
         } break;
         case 0x04:
-        case 0x05:
+        case 0x05: /* cfc2 */
         {
         } break;
         case 0x06:
-        case 0x07:
+        case 0x07: /* ctc2 */
         {
         } break;
-        default: goto DifferentInstruction;
+        default: goto DifferentInstruction; 
         }
-        TODO("COP2 instructions");
         Rt = NULL;
     } break;
 
@@ -1701,6 +1611,4 @@ int main(int argc, char **argv)
     return 0;
 }
 #endif /* STANDALONE */
-
 #endif /* R3000A_C */
-
