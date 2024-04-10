@@ -620,6 +620,7 @@ static AsmToken AsmCreateRegisterToken(Assembler *Asm)
             REGISTER("sp", TOK_REG, 29),
 
             REGISTER("sr", TOK_REG, 12),
+            REGISTER("status", TOK_REG, 12),
         },
         ['t' - 'a'] = {
             REGISTER("t0", TOK_REG, 8),
@@ -2133,13 +2134,14 @@ static void AsmRTypeToCop(Assembler *Asm, AsmTokenType RegType, const char *RegN
 {
     /* instruction copreg, gpr */
     u32 Opcode = Asm->CurrentToken.As.Opcode;
-    AsmConsumeTokenOrError(Asm, RegType, "Expected %s register.", RegName);
-    uint Rd = Asm->CurrentToken.As.Reg;
-    ASM_CONSUME_COMMA(Asm, "coprocessor register.");
-    uint Rs = AsmConsumeGPRegister(Asm, "source");
 
-    Opcode |= Rd << RD;
-    Opcode |= Rs << RS;
+    AsmConsumeTokenOrError(Asm, RegType, "Expected %s register.", RegName);
+    uint CopReg = Asm->CurrentToken.As.Reg;
+    ASM_CONSUME_COMMA(Asm, "coprocessor register.");
+    uint GPR = AsmConsumeGPRegister(Asm, "source");
+
+    Opcode |= (CopReg & 0x1F) << RD;
+    Opcode |= (GPR & 0x1F) << RT;
     AsmEmit32(Asm, Opcode);
 }
 
@@ -2147,13 +2149,14 @@ static void AsmRTypeFromCop(Assembler *Asm, AsmTokenType RegType, const char *Re
 {
     /* instruction gpr, copreg */
     u32 Opcode = Asm->CurrentToken.As.Opcode;
-    uint Rd = AsmConsumeGPRegister(Asm, "destination");
+
+    uint GPR = AsmConsumeGPRegister(Asm, "destination");
     ASM_CONSUME_COMMA(Asm, "destination register.");
     AsmConsumeTokenOrError(Asm, RegType, "Expected %s register.", RegName);
-    uint Rs = Asm->CurrentToken.As.Reg;
+    uint CopReg = Asm->CurrentToken.As.Reg;
 
-    Opcode |= Rd << RD;
-    Opcode |= Rs << RS;
+    Opcode |= (CopReg & 0x1F) << RD;
+    Opcode |= (GPR & 0x1F) << RT;
     AsmEmit32(Asm, Opcode);
 }
 

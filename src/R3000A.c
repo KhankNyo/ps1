@@ -132,10 +132,10 @@ static void R3000A_RaiseInternalException(R3000A *This, R3000A_Exception Excepti
     R3000A_ExceptionInfo Info = R3000A_GetExceptionInfo(This, Stage);
     CP0_SetException(
         &This->CP0,
+        Exception,
         Info.EPC, 
         Info.Instruction, 
         Info.BranchDelay,
-        Exception,
         0
     );
 }
@@ -147,11 +147,11 @@ static void R3000A_RaiseMemoryException(R3000A *This, R3000A_Exception Exception
 
     R3000A_ExceptionInfo Info = R3000A_GetExceptionInfo(This, Stage);
     CP0_SetException(
-        &This->CP0, 
+        &This->CP0,
+        Exception, 
         Info.EPC, 
         Info.Instruction, 
         Info.BranchDelay, 
-        Exception, 
         Addr
     );
 }
@@ -165,7 +165,7 @@ static void R3000A_HandleException(R3000A *This)
     ASSERT(This->ExceptionCyclesLeft == 0);
 
     This->ExceptionRaised = false;
-    This->PC = CP0_GetExceptionVector(&This->CP0);
+    This->PC = CP0_GetExceptionVector(&This->CP0) - 4;
 }
 
 
@@ -726,7 +726,7 @@ static R3000A_StageStatus R3000A_Execute(R3000A *This)
         case 0x00:
         case 0x01: /* mfc0 */
         {
-            *Rt = CP0_Read(&This->CP0, REG(Instruction, RT));
+            *Rt = CP0_Read(&This->CP0, REG(Instruction, RD));
         } break;
         case 0x04:
         case 0x05: /* mtc0 */
@@ -1325,7 +1325,12 @@ static u32 TranslateAddr(u32 LogicalAddr)
     {
         return LogicalAddr;
     } break;
-    default: return LogicalAddr - R3000A_RESET_VEC;
+    default: 
+    {
+        if (IN_RANGE(0x80000000, LogicalAddr, 0xA0000000))
+            return LogicalAddr - 0x80000000;
+        return LogicalAddr - R3000A_RESET_VEC;
+    } break;
     }
 }
 

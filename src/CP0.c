@@ -101,6 +101,7 @@ void CP0_Write(R3000A_CP0 *This, u32 RdIndex, u32 Data)
     case 12: This->Status = Data; break;    
     case 13: MASKED_LOAD(This->Cause, Data, 0x3 << 8); break; /* write to bits 8..9 only */
     }
+
 }
 
 Bool8 CP0_IsCoprocessorAvailable(R3000A_CP0 *This, uint CoprocessorNumber)

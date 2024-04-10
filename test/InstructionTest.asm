@@ -6,7 +6,9 @@ SYS_CLRSCR      = 0x7100_0000
 SYS_EXIT        = 0x7200_0000
 
 RESET_VEC       = 0xBFC0_0000
-START           = RESET_VEC + 0x0180
+START           = 0xBFC0_0200
+BREAK_VEC       = 0x8000_0040
+EXCEPTION_VEC   = 0x8000_0080
 MEMORY_SIZE     = 4096
 
 
@@ -25,24 +27,77 @@ Reset2:
     nop
     jal Reset3                  ; NOTE: jump to delay slot, saving the addr of isntruction after 
 Reset3:
-    nop
-Reset_LinkAddr:
     lui $t0, Reset_LinkAddr >> 16
+Reset_LinkAddr:
     ori $t0, Reset_LinkAddr & 0xFFFF
     bne $t0, $ra, ResetTrap     ; assert $ra == Reset_LinkAddr
     nop
-    j START                     ; START: testing other instructions
+    j START                     ; Start: testing other instructions
     nop
 ResetTrap: 
     la $t0, TestPrerequisite_Failed_Msg
     li $t1, SYS_WRITESTR
-    sw $t0, 0($t1)
     beq $zero, $zero, ResetTrap
+    sw $t0, 0($t1)              ; the fail message will be printed repeatedly 
 .jumpNop 1
 .branchNop 1
 ResetEnd:
-.resv START - ResetEnd
+.resv (BREAK_VEC - 0x8000_0000) - (ResetEnd - RESET_VEC)
 
+
+
+
+; Break exception routine at 0x8000_0040, 2 instructions (8 bytes)
+; destroys: none
+.jumpNop 1
+.org BREAK_VEC
+    j EXCEPTION_VEC
+    ; jump delay slot handled by assembler 
+BreakEnd:
+.jumpNop 1
+.resv EXCEPTION_VEC - BreakEnd
+
+
+
+
+; Exception handling routine at 0x8000_0080, 18 instructions (72 bytes)
+; destroys k0, k1
+.jumpNop 0
+.branchNop 0
+.loadNop 1
+.org EXCEPTION_VEC
+    ; get the exception code 
+    mfc0 $k0, $cause
+    andi $k0, 0x1F << 2  
+
+    ; conveniently, the exception code starts at bit 3. Meaning that it is already multiplied by 4, 
+    ; so we can just use it as an offset into the exception counter location 
+    la $k1, TestExceptCounter_Base
+    addu $k1, $k0
+
+    ; increment the exception counter
+    lw $k0, 0($k1)                          ; delay slot handled by the assembler 
+    addiu $k0, 1
+    sw $k0, 0($k1)
+
+    ; now patch the opcode, check if it's in a branch delay slot
+    mfc0 $k0, $cause
+    bltz $k0, Exception_InBranchDelaySlot   ; BD is bit 31, which is the sign bit, Cause will be < 0 if BD is set
+        mfc0 $k0, $epc                      ; get the faulting instruction addr
+        j Exception_DonePatching
+            sw $zero, 0($k0)                ; patch the instruction with a nop
+Exception_InBranchDelaySlot:
+    sw $zero, 4($k0)                        ; patch the ins in the delay slot with a nop
+Exception_DonePatching:
+    nop                                     ; delayed return because of writeback stage
+    jr $k0
+    rfe ; restore kernel and interrupt pending flags
+.loadNop 1
+.jumpNop 1
+.branchNop 1
+ExceptionEnd:
+.resv (START - RESET_VEC) - (ExceptionEnd - 0x8000_0000)
+    
 
 
 
@@ -78,6 +133,13 @@ ResetEnd:
     la $a0, TestStatus_HiLo_Msg
     jal PrintStr
     jal TestHiLo
+    bnz $v0, Fail
+    la $a0, TestStatus_Ok_Msg
+    jal PrintStr
+
+    la $a0, TestStatus_Exception_Msg
+    jal PrintStr
+    jal TestException
     bnz $v0, Fail
     la $a0, TestStatus_Ok_Msg
     jal PrintStr
@@ -1816,9 +1878,64 @@ TestHiLo_Divu:
     bne $t0, $t1, TestFailed    ; assert remainder == rs
         ; delay slot 
 
-    move $t0, $zero
+    move $v0, $zero
     ret
 .branchNop 1
+
+
+.branchNop 0
+.jumpNop 0
+.loadNop 0
+TestException: 
+    move $t9, $ra
+    la $a0, TestExcept_Overflow_Msg
+    jal PrintStr
+        ; delay slot 
+    la $a2, TestException_Arith_Addi
+    la $a0, TestArith_Addi_Msg
+TestException_Arith_Addi:
+    li $t0, 0x7FFF_FFFF
+    li $t1, 0x7FFF_FFFF
+    move $t5, $zero
+    addi $t0, 1                     ; exception should trigger here 
+    addiu $t5, 1
+    la $a1, TestExcept_PreserveFailed_Msg
+    bne $t0, $t1, TestFailed
+        ; delay slot
+    la $t3, TestExceptCounter_Base + TestExceptCounter_Overflow
+    lw $t2, 0($t3)
+        move $ra, $t9               ; restore retaddr from the PrintStr call
+    li $t4, 1
+    la $a1, TestExcept_Wrong_Msg
+    bne $t2, $t4, TestFailed        ; assert arith exception counter updated
+        ; delay slot
+    la $t3, TestExcept_DoubleExec_Msg
+    bne $t5, $t4, TestFailed        ; assert instruction after exception not being executed
+        ; delay slot
+
+TestException_Arith_Add:
+    add $t0, $t1                    ; exception
+    la $a0, TestArith_Add_Msg
+    la $a1, TestException_Arith_Add
+    bne $t0, $t1, TestFailed
+        ; delay slot
+    lw $t2, 0($t3)
+    li $t4, 2
+    bne $t2, $t4, TestFailed        ; assert arith exception counter updated
+        nop
+
+TestException_LwUnaligned:
+TestException_LhUnaligned:
+TestException_SwUnaligned:
+TestException_ShUnaligned:
+
+    ret
+    move $v0, $zero
+.branchNop 1
+.jumpNop 1
+.loadNop 1
+
+
 
 
 DataSection:
@@ -1827,6 +1944,7 @@ TestStatus_Store_Msg:           .db "Store instructions: ", 0
 TestStatus_Branch_Msg:          .db "Branch instructions: ", 0
 TestStatus_Arith_Msg:           .db "Alu instructions: ", 0
 TestStatus_HiLo_Msg:            .db "Hi and Lo instructions: ", 0
+TestStatus_Exception_Msg:       .db "Testing Exceptions: \n", 0
 TestStatus_Ok_Msg:              .db "OK\n", 0
 TestFinished_Msg:               .db "All tests passed.\n", 0
 Test_Failed_Msg:                .db " failed.\n", 0
@@ -1924,8 +2042,36 @@ TestHiLo_DivuZeroFailed_Msg:    .db " by 0 must return -1 in Lo, Rs in Hi.\n"
 TestHiLo_Div0Negative_Msg:      .db " by 0 and a negative number must return 1 in Lo, Rs in Hi.\n"
 TestHiLo_Div80000000_Msg:       .db " between 0x80000000 and -1 must return 0x80000000 in Lo, 0 in Hi.\n"
 
-TestExcept_Mem_Counter:         .dw 0
-TestExcept_Arith_Counter:       .dw 0
+.align 4
+TestExceptCounter_Base:
+.resv 32*4
+TestExceptCounter_Interrupt = 0
+TestExceptCounter_AddrLoad = 4*4
+TestExceptCounter_AddrStore = 5*4
+TestExceptCounter_InsBusErr = 6*4
+TestExceptCounter_DataBusErr = 7*4
+TestExceptCounter_Syscall = 8*4
+TestExceptCounter_BreakPoint = 9*4
+TestExceptCounter_ResvIns = 10*4
+TestExceptCounter_CopUnusable = 11*4
+TestExceptCounter_Overflow = 12*4
+
+TestExcept_Interrupt_Msg:       .db "  Interrupt Exception: ", 0
+TestExcept_AddrLoad_Msg:        .db "  Addr Load Exception: ", 0
+TestExcept_AddrStore_Msg:       .db "  Addr Store Exception: ", 0
+TestExcept_InsBusErr_Msg:       .db "  IBE Exception: ", 0
+TestExcept_DataBusErr_Msg:      .db "  DBE Exception: ", 0
+TestExcept_Syscall_Msg:         .db "  Syscall Exception: ", 0
+TestExcept_BreakPoint_Msg:      .db "  Breakpoint Exception: ", 0
+TestExcept_ResvIns_Msg:         .db "  Reserved Ins Exception: ", 0
+TestExcept_CopUnusable_Msg:     .db "  Coprocessor Unusable Exception: ", 0
+TestExcept_Overflow_Msg:        .db "  Arith Overflow Exception: ", 0           ; tested
+
+TestExcept_PreserveFailed_Msg:  .db ": result should not be written to register.\n", 0
+TestExcept_Wrong_Msg:           .db ": excode field of CP0's Cause is not correct.\n", 0
+TestExcept_DoubleExec_Msg:      .db ": instruction after exception shouldn't be executed.\n", 0
+
+
 
 .align 4
 FreeMemorySection:
