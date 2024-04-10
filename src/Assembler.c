@@ -11,7 +11,7 @@ typedef void (*AsmErrorLoggingFn)(void *Context, const char *ErrorMessage, uint 
  * else should act like realloc */
 typedef void *(*AsmAllocatorFn)(void *Context, void *OldPtr, u32 SizeBytes);
 
-typedef struct ButeBuffer 
+typedef struct ByteBuffer 
 {
     u8 *Ptr;
     iSize Size;
@@ -49,6 +49,7 @@ typedef enum AsmTokenType
     TOK_IDENTIFIER,
     TOK_REG,
     TOK_GTE_REG,
+    TOK_CP0_REG,
 
     TOK_DOLLAR,
     TOK_PLUS, 
@@ -102,7 +103,10 @@ typedef enum AsmTokenType
     TOK_INS_R_TYPE_3,
     TOK_INS_R_TYPE_RSRT,
     TOK_INS_R_TYPE_RDRS,
-    TOK_INS_R_TYPE_RTRD,
+    TOK_INS_R_TYPE_TO_COP0,
+    TOK_INS_R_TYPE_FROM_COP0,
+    TOK_INS_R_TYPE_TO_COP2,
+    TOK_INS_R_TYPE_FROM_COP2,
     TOK_INS_R_TYPE_RD,
     TOK_INS_R_TYPE_RS,
     TOK_INS_R_TYPE_SHAMT,
@@ -422,7 +426,7 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
         .Type = TOK_INS_##Typ,\
         .Opcode = Opc\
     }
-    static const AsmKeyword Keywords['z' - 'a'][20] = {
+    static const AsmKeyword Keywords['z' - 'a' + 1][20] = {
         ['a' - 'a'] = {
             INS("add",      R_TYPE_3,       0x00000020),
             INS("addi",     I_TYPE_I16,     0x20000000),
@@ -476,18 +480,14 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
         },
         ['m' - 'a'] = {
             INS("move",     PSEUDO_MOVE,    0),
-            INS("mfc0",     R_TYPE_RTRD,    0x40000000),
-            INS("mfc1",     R_TYPE_RTRD,    0x44000000),
-            INS("mfc2",     R_TYPE_RTRD,    0x48000000),
-            INS("mfc3",     R_TYPE_RTRD,    0x4C000000),
+            INS("mfc0",     R_TYPE_FROM_COP0,0x40000000),
+            INS("mfc2",     R_TYPE_FROM_COP2,0x48000000),
 
             INS("mfhi",     R_TYPE_RD,      0x00000010),
             INS("mflo",     R_TYPE_RD,      0x00000012),
 
-            INS("mtc0",     R_TYPE_RTRD,    0x40800000),
-            INS("mtc1",     R_TYPE_RTRD,    0x44800000),
-            INS("mtc2",     R_TYPE_RTRD,    0x48800000),
-            INS("mtc3",     R_TYPE_RTRD,    0x4C800000),
+            INS("mtc0",     R_TYPE_TO_COP0,  0x40800000),
+            INS("mtc2",     R_TYPE_TO_COP2,  0x48800000),
 
             INS("mthi",     R_TYPE_RS,      0x00000011),
             INS("mtlo",     R_TYPE_RS,      0x00000013),
@@ -547,6 +547,8 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
     for (uint i = 0; i < STATIC_ARRAY_SIZE(Keywords[Key]); i++)
     {
         const AsmKeyword *Entry = PotentialKeywords + i;
+        if (Entry->Len == 0) 
+            break;
         if (Entry->Len == Len 
         && AsmStrEqual(Entry->Str, Iden, Len))
         {
@@ -558,10 +560,8 @@ static const AsmKeyword *AsmGetKeywordInfo(const char *Iden, iSize Len)
 
 static AsmToken AsmCreateRegisterToken(Assembler *Asm)
 {
-    uint RegisterNumber = 0;
-    AsmTokenType RegisterType = TOK_REG;
-    const char *Str = Asm->Begin + 1;
-    int Len = 0;
+    const char *Str = Asm->End;
+    uint Len = 0;
     char Ch = *Asm->End;
     while (!AsmIsAtEnd(Asm) && (AsmIsAlpha(Ch) || IN_RANGE('0', Ch, '9')))
     {
@@ -569,98 +569,135 @@ static AsmToken AsmCreateRegisterToken(Assembler *Asm)
         Len++;
     }
 
-    if (Len >= 1 && IN_RANGE('0', Str[0], '6')) /* register 0..64 */
+    typedef struct RegisterKeyword 
+    {
+        const char Str[24];
+        uint Len;
+        uint Value;
+        AsmTokenType Type;
+    } RegisterKeyword;
+#define REGISTER(str, t, v) {\
+        .Str = str, \
+        .Len = sizeof str - 1, \
+        .Value = v,\
+        .Type = t\
+    }
+    static const RegisterKeyword RegNameLut['z' - 'a' + 1][12] = {
+        ['a' - 'a'] = {
+            REGISTER("at", TOK_REG, 1),
+            REGISTER("a0", TOK_REG, 4),
+            REGISTER("a1", TOK_REG, 5),
+            REGISTER("a2", TOK_REG, 6),
+            REGISTER("a3", TOK_REG, 7),
+        },
+        ['b' - 'a'] = {
+            REGISTER("bpc",         TOK_CP0_REG, 3),
+            REGISTER("bda",         TOK_CP0_REG, 5),
+            REGISTER("badvaddr",    TOK_CP0_REG, 8),
+            REGISTER("bdam",        TOK_CP0_REG, 9),
+            REGISTER("bpcm",        TOK_CP0_REG, 11),
+        },
+        ['c' - 'a'] = {
+            REGISTER("cause",   TOK_CP0_REG, 13),
+        },
+        ['d' - 'a'] = {
+            REGISTER("dcic",    TOK_CP0_REG, 7),
+        },
+        ['e' - 'a'] = {
+            REGISTER("epc",     TOK_CP0_REG, 14),
+        },
+        ['s' - 'a'] = {
+            REGISTER("s0", TOK_REG, 16),
+            REGISTER("s1", TOK_REG, 17),
+            REGISTER("s2", TOK_REG, 18),
+            REGISTER("s3", TOK_REG, 19),
+            REGISTER("s4", TOK_REG, 20),
+            REGISTER("s5", TOK_REG, 21),
+            REGISTER("s6", TOK_REG, 22),
+            REGISTER("s7", TOK_REG, 23),
+            REGISTER("s8", TOK_REG, 30), /* alias for fp */
+
+            REGISTER("sp", TOK_REG, 29),
+
+            REGISTER("sr", TOK_REG, 12),
+        },
+        ['t' - 'a'] = {
+            REGISTER("t0", TOK_REG, 8),
+            REGISTER("t1", TOK_REG, 9),
+            REGISTER("t2", TOK_REG, 10),
+            REGISTER("t3", TOK_REG, 11),
+            REGISTER("t4", TOK_REG, 12),
+            REGISTER("t5", TOK_REG, 13),
+            REGISTER("t6", TOK_REG, 14),
+            REGISTER("t7", TOK_REG, 15),
+
+            REGISTER("t8", TOK_REG, 24),
+            REGISTER("t9", TOK_REG, 25),
+        },
+        ['k' - 'a'] = {
+            REGISTER("k0", TOK_REG, 26),
+            REGISTER("k1", TOK_REG, 27),
+        },
+        ['v' - 'a'] = {
+            REGISTER("v0", TOK_REG, 2),
+            REGISTER("v1", TOK_REG, 3),
+        },
+        ['g' - 'a'] = {
+            REGISTER("gp", TOK_REG, 28),
+        },
+        ['f' - 'a'] = {
+            REGISTER("fp", TOK_REG, 30),
+        },
+        ['r' - 'a'] = {
+            REGISTER("ra", TOK_REG, 31),
+        },
+        ['z' - 'a'] = {
+            REGISTER("zero", TOK_REG, 0),
+        },
+        ['j' - 'a'] = {
+            REGISTER("jumpdest", TOK_CP0_REG, 6),
+        },
+        ['p' - 'a'] = {
+            REGISTER("prid",    TOK_CP0_REG, 15),
+        },
+    };
+#undef REGISTER
+
+    if (IN_RANGE(1, Len, 2) && IN_RANGE('0', Str[0], '3')) /* register 0..32 */
     {
         /* example syntax: $12, $31 */
-        RegisterNumber = Str[0] - '0';
+        int RegisterNumber = Str[0] - '0';
         if (Len == 2)
         {
             RegisterNumber *= 10;
             RegisterNumber += Str[1] - '0';
         }
-
-        /* only the GTE has regs in 32..63 (control regs) */
-        if (IN_RANGE(32, RegisterNumber, 63))
+        if (RegisterNumber < 32)
         {
-            RegisterType = TOK_GTE_REG;
-        }
-        else if (RegisterNumber > 63)
-        {
-            goto UnknownRegister;
+            AsmToken Token = AsmCreateToken(Asm, TOK_REG);
+            Token.As.Reg = RegisterNumber;
+            return Token;
         }
     }
-    else /* verbose register number */
+    else if (Len >= 1 && IN_RANGE('a', Str[0], 'z'))
     {
-        switch (Str[0])
+        u8 Key = Str[0] - 'a';
+        const RegisterKeyword *PotentialRegisters = RegNameLut[Key];
+        for (uint i = 0; i < STATIC_ARRAY_SIZE(RegNameLut[Key]); i++)
         {
-        case 'z': /* zero */
-        {
-            if (Len == 4 && AsmStrEqual("ero", Str + 1, 3)) /* zero */
-                RegisterNumber = 0;
-            else goto UnknownRegister;
-        } break;
-        case 'a': /* at, a0..a1 */
-        {
-            if (Len == 2 && Str[1] == 't') /* at */
-                RegisterNumber = 1;
-            else if (Len == 2 && IN_RANGE('0', Str[1], '3')) /* a0..a3 */
-                RegisterNumber = 4 + Str[1] - '0';
-            else goto UnknownRegister;
-        } break;
-        case 'v': /* v0, v1 */
-        {
-            if (Len == 2 && IN_RANGE('0', Str[1], '1')) /* v0, v1 */
-                RegisterNumber = 2 + Str[1] - '0';
-            else goto UnknownRegister;
-        } break;
-        case 't': /* t0..t7, t8, t9 */
-        {
-            if (Len == 2 && IN_RANGE('0', Str[1], '7')) /* t0..t7 */
-                RegisterNumber = 8 + Str[1] - '0';
-            else if (Len == 2 && (Str[1] == '8' || Str[1] == '9')) /* t8, t9 */
-                RegisterNumber = 24 + Str[1] - '8';
-            else goto UnknownRegister;
-        } break;
-        case 's': /* s0..s7, s8 */
-        {
-            if (Len == 2 && IN_RANGE('0', Str[1], '7')) /* s0..s7 */
-                RegisterNumber = 16 + Str[1] - '0';
-            else if (Len == 2 && Str[1] == 'p') /* sp */
-                RegisterNumber = 29;
-            else if (Len == 2 && Str[1] == '8') /* s8 */
-                RegisterNumber = 30;
-            else goto UnknownRegister;
-        } break;
-        case 'k': /* k0, k1 */
-        {
-            if (Len == 2 && (Str[1] == '0' || Str[1] == '1')) /* k0, k1 */
-                RegisterNumber = 26 + Str[1] - '0';
-            else goto UnknownRegister;
-        } break;
-        case 'g':
-        {
-            if (Len == 2 && Str[1] == 'p') /* gp */
-                RegisterNumber = 28;
-            else goto UnknownRegister;
-        } break;
-        case 'r': /* ra */
-        {
-            if (Len == 2 && Str[1] == 'a')
-                RegisterNumber = 31;
-            else goto UnknownRegister;
-        } break;
-
-        default: 
-UnknownRegister:
-        {
-            return AsmErrorToken(Asm, "Unknown register.");
-        } break;
+            const RegisterKeyword *Entry = &PotentialRegisters[i];
+            if (Entry->Len == 0)
+                break;
+            if (Len == Entry->Len 
+            && AsmStrEqual(Str, Entry->Str, Len))
+            {
+                AsmToken Token = AsmCreateToken(Asm, Entry->Type);
+                Token.As.Reg = Entry->Value;
+                return Token;
+            }
         }
     }
-
-    AsmToken Token = AsmCreateToken(Asm, RegisterType);
-    Token.As.Reg = RegisterNumber;
-    return Token;
+    return AsmErrorToken(Asm, "Unknown register.");
 }
 
 static void AsmConsumeWord(Assembler *Asm)
@@ -1983,6 +2020,11 @@ static void AsmDefineLongDirective(Assembler *Asm)
 static void AsmResvDirective(Assembler *Asm)
 {
     AsmExpression Expr = AsmConsumeStrictExpr(Asm);
+    if ((i64)Expr.Value < 0)
+    {
+        AsmErrorAtExpr(Asm, &Expr, "Cannot reserve negative space (%"PRIi64" bytes requested).", Expr.Value);
+        return;
+    }
 
     u32 OldSize = Asm->BufferSize;
     if (!AsmResizeBuffer(Asm, Asm->BufferSize + Expr.Value))
@@ -2087,6 +2129,34 @@ static void AsmPseudoBra(Assembler *Asm)
         AsmEmit32(Asm, ASM_NOP);
 }
 
+static void AsmRTypeToCop(Assembler *Asm, AsmTokenType RegType, const char *RegName)
+{
+    /* instruction copreg, gpr */
+    u32 Opcode = Asm->CurrentToken.As.Opcode;
+    AsmConsumeTokenOrError(Asm, RegType, "Expected %s register.", RegName);
+    uint Rd = Asm->CurrentToken.As.Reg;
+    ASM_CONSUME_COMMA(Asm, "coprocessor register.");
+    uint Rs = AsmConsumeGPRegister(Asm, "source");
+
+    Opcode |= Rd << RD;
+    Opcode |= Rs << RS;
+    AsmEmit32(Asm, Opcode);
+}
+
+static void AsmRTypeFromCop(Assembler *Asm, AsmTokenType RegType, const char *RegName)
+{
+    /* instruction gpr, copreg */
+    u32 Opcode = Asm->CurrentToken.As.Opcode;
+    uint Rd = AsmConsumeGPRegister(Asm, "destination");
+    ASM_CONSUME_COMMA(Asm, "destination register.");
+    AsmConsumeTokenOrError(Asm, RegType, "Expected %s register.", RegName);
+    uint Rs = Asm->CurrentToken.As.Reg;
+
+    Opcode |= Rd << RD;
+    Opcode |= Rs << RS;
+    AsmEmit32(Asm, Opcode);
+}
+
 #undef ASM_CONSUME_COMMA
 
 
@@ -2105,7 +2175,10 @@ static void AsmConsumeStmt(Assembler *Asm)
     case TOK_INS_R_TYPE_RD:     AsmRType1Operand(Asm, "destination", RD, false); break;
     case TOK_INS_R_TYPE_RS:     AsmRType1Operand(Asm, "source", RS, Asm->CurrentToken.As.Opcode == ASM_JR); break;
     case TOK_INS_R_TYPE_RDRS:   AsmRType2Operands(Asm, "destination", "source", RD, RS, true); break;
-    case TOK_INS_R_TYPE_RTRD:   AsmRType2Operands(Asm, "general", "coprocessor", RT, RD, false); break;
+    case TOK_INS_R_TYPE_FROM_COP0:   AsmRTypeFromCop(Asm, TOK_CP0_REG, "coprocessor 0"); break;
+    case TOK_INS_R_TYPE_TO_COP0:     AsmRTypeToCop(Asm, TOK_CP0_REG, "coprocessor 0"); break;
+    case TOK_INS_R_TYPE_FROM_COP2:   AsmRTypeFromCop(Asm, TOK_GTE_REG, "gte"); break;
+    case TOK_INS_R_TYPE_TO_COP2:     AsmRTypeToCop(Asm, TOK_GTE_REG, "gte"); break;
     case TOK_INS_R_TYPE_RSRT:   AsmRType2Operands(Asm, "a", "a second", RS, RT, false); break;
     case TOK_INS_R_TYPE_SHAMT:  AsmRTypeShift(Asm); break;
     case TOK_INS_R_TYPE_SHREG:  AsmRTypeShiftVariable(Asm); break;

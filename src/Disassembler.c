@@ -7,7 +7,7 @@
 #define DISASM_BEAUTIFUL_REGNAME (u32)(1 << 0)
 #define DISASM_IMM16_AS_HEX (u32)(1 << 1)
 /* generally, a buffer of 64 bytes or more will not result in truncation */
-void R3051_Disasm(
+void R3000A_Disasm(
     u32 Instruction, 
     u32 CurrentPC, 
     u32 Flags, 
@@ -26,7 +26,7 @@ void R3051_Disasm(
 
 
 
-static const char *sR3051_BeautifulRegisterName[32] = {
+static const char *sR3000A_BeautifulRegisterName[32] = {
     "zero", 
     "at", 
     "v0", "v1", 
@@ -38,7 +38,7 @@ static const char *sR3051_BeautifulRegisterName[32] = {
     "gp", "sp", "fp", /* uhhh TODO: this could be s8 */
     "ra",
 };
-static const char *sR3051_RegisterName[32] = {
+static const char *sR3000A_RegisterName[32] = {
     "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
     "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23",
@@ -46,7 +46,7 @@ static const char *sR3051_RegisterName[32] = {
 };
 
 
-static void R3051_DisasmSpecial(u32 Instruction, const char **RegName, char *OutBuffer, iSize OutBufferSize)
+static void R3000A_DisasmSpecial(u32 Instruction, const char **RegName, char *OutBuffer, iSize OutBufferSize)
 {
     uint Group = FUNCT_GROUP(Instruction);
     uint Mode = FUNCT_MODE(Instruction);
@@ -156,7 +156,7 @@ UnknownOpcode:
 
 
 
-void R3051_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iSize OutBufferSize)
+void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iSize OutBufferSize)
 {
     /*
      * https://stuff.mit.edu/afs/sipb/contrib/doc/specs/ic/cpu/mips/r3051.pdf
@@ -165,8 +165,8 @@ void R3051_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
      * */
 
     const char **RegName = Flags & DISASM_BEAUTIFUL_REGNAME? 
-        sR3051_BeautifulRegisterName 
-        : sR3051_RegisterName;
+        sR3000A_BeautifulRegisterName 
+        : sR3000A_RegisterName;
     uint OpcodeGroup = OP_GROUP(Instruction);
     uint OpcodeMode = OP_MODE(Instruction);
     CurrentPC &= ~0x0003;
@@ -178,7 +178,7 @@ void R3051_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
         {
         case 0: /* special */
         {
-            R3051_DisasmSpecial(Instruction, RegName, OutBuffer, OutBufferSize);
+            R3000A_DisasmSpecial(Instruction, RegName, OutBuffer, OutBufferSize);
         } break;
         case 1: /* bcond */
         {
@@ -316,6 +316,14 @@ void R3051_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
                 const char *Rd = CP0Register[REG(Instruction, RD)];
                 snprintf(OutBuffer, OutBufferSize, "mtc0 %s, cp0_%s", Rt, Rd);
             } break;
+            case 0x10: /* coprocessor specific op */
+            {
+                if (Instruction == 0x42000010) /* rfe */
+                {
+                    snprintf(OutBuffer, OutBufferSize, "rfe");
+                }
+                else goto UnknownOpcode;
+            } break;
             default: goto UnknownOpcode;
             }
         }
@@ -418,7 +426,7 @@ int main(int argc, char **argv)
     for (iSize i = 0; i < InstructionCount; i++)
     {
         char Line[64];
-        R3051_Disasm(
+        R3000A_Disasm(
             Program[i], 
             i*4, 
             Flags, 
