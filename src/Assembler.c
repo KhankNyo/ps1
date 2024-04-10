@@ -1714,13 +1714,14 @@ static void AsmRType3Operands(Assembler *Asm)
     ASM_CONSUME_COMMA(Asm, "destination register.");
 
     /* RS */
-    uint Rs = AsmConsumeGPRegister(Asm, "source");
+    uint Rt = AsmConsumeGPRegister(Asm, "source");
 
     /* RT */
-    uint Rt = Rd;
+    uint Rs = Rd;
     if (AsmConsumeIfNextTokenIs(Asm, TOK_COMMA))
     {
         AsmConsumeTokenOrError(Asm, TOK_REG, "Expected register.");
+        Rs = Rt;
         Rt = Asm->CurrentToken.As.Reg;
     }
 

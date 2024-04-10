@@ -807,7 +807,6 @@ static R3000A_StageStatus R3000A_Memory(R3000A *This)
     /* verify memory addr */
     if (!This->VerifyDataAddr(This->UserData, Addr))
     {
-        Status.HasException = true;
         if ((OP_GROUP(Instruction) & 0x1)) /* store instruction */
             goto StoreAddrError;
         else goto LoadAddrError;
@@ -926,9 +925,11 @@ static R3000A_StageStatus R3000A_Memory(R3000A *This)
     return Status;
 
 LoadAddrError:
+    Status.HasException = true;
     R3000A_RaiseMemoryException(This, EXCEPTION_ADEL, Addr);
     return Status;
 StoreAddrError:
+    Status.HasException = true;
     R3000A_RaiseMemoryException(This, EXCEPTION_ADES, Addr);
     return Status;
 }

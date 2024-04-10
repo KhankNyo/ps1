@@ -2,7 +2,6 @@
 
 SYS_WRITESTR    = 0x7000_0000
 SYS_WRITEHEX    = 0x7001_0000
-SYS_CLRSCR      = 0x7100_0000
 SYS_EXIT        = 0x7200_0000
 
 RESET_VEC       = 0xBFC0_0000
@@ -12,13 +11,13 @@ EXCEPTION_VEC   = 0x8000_0080
 MEMORY_SIZE     = 4096
 
 
-.org RESET_VEC
 ; prerequisite: 
 ;   bne, beq 
 ;   j,   jal, 
 ;   lui, ori
 .jumpNop 0
 .branchNop 0
+.org RESET_VEC
     j Reset1                    ; NOTE: jump to delay slot
 Reset1:
     nop
@@ -60,19 +59,26 @@ BreakEnd:
 
 
 
-; Exception handling routine at 0x8000_0080, 18 instructions (72 bytes)
+; Exception handling routine at 0x8000_0080, 32 instructions (128 bytes)
 ; destroys k0, k1
 .jumpNop 0
 .branchNop 0
 .loadNop 1
 .org EXCEPTION_VEC
+    ; see if exception is enabled
+    la $k1, TestExcept_Enable
+    lw $k1, 0($k1)
+        mfc0 $k0, $cause                    ; load exception code while waiting for memory load to finish
+    bez $k1, Exception_Trap                 ; infinite loop trap if exception has not been enabled
+        ; delay slot
+
     ; get the exception code 
-    mfc0 $k0, $cause
     andi $k0, 0x1F << 2  
 
-    ; conveniently, the exception code starts at bit 3. Meaning that it is already multiplied by 4, 
+    ; conveniently, the exception code starts at bit 2. Meaning that it is already multiplied by 4, 
     ; so we can just use it as an offset into the exception counter location 
-    la $k1, TestExceptCounter_Base
+    lui $k1, TestExceptCounter_Base >> 16
+    ori $k1, TestExceptCounter_Base & 0xFFFF
     addu $k1, $k0
 
     ; increment the exception counter
@@ -89,9 +95,22 @@ BreakEnd:
 Exception_InBranchDelaySlot:
     sw $zero, 4($k0)                        ; patch the ins in the delay slot with a nop
 Exception_DonePatching:
-    nop                                     ; delayed return because of writeback stage
+    nop                                     ; waiting for writeback to finish before returning
     jr $k0
-    rfe ; restore kernel and interrupt pending flags
+        rfe                                 ; restore kernel and interrupt pending flags (untested)
+Exception_Trap:
+    la $k0, PrintStr
+    la $k1, PrintHex
+    ; print unexpected exception msg
+    lui $a0, Exception_Unexpected_Msg >> 16
+    jr $k0
+        ori $a0, Exception_Unexpected_Msg & 0xFFFF
+    ; prints epc 
+    jr $k1
+        mfc0 $a0, $epc
+Exception_TrapInf:
+    bra Exception_TrapInf
+        nop
 .loadNop 1
 .jumpNop 1
 .branchNop 1
@@ -1887,10 +1906,19 @@ TestHiLo_Divu:
 .jumpNop 0
 .loadNop 0
 TestException: 
-    move $t9, $ra
+    move $t9, $ra                   ; save return addr
+
+    ; enable exception testing 
+    li $t0, 1
+    la $t1, TestExcept_Enable
+    sw $t0, 0($t1)
+
+    ; exception: arith overflow 
     la $a0, TestExcept_Overflow_Msg
     jal PrintStr
         ; delay slot 
+
+    ; test exception: addi
     la $a2, TestException_Arith_Addi
     la $a0, TestArith_Addi_Msg
 TestException_Arith_Addi:
@@ -1901,33 +1929,175 @@ TestException_Arith_Addi:
     addiu $t5, 1
     la $a1, TestExcept_PreserveFailed_Msg
     bne $t0, $t1, TestFailed
-        ; delay slot
+        move $ra, $t9               ; restore retaddr from the PrintStr call (in delay slot)
     la $t3, TestExceptCounter_Base + TestExceptCounter_Overflow
     lw $t2, 0($t3)
-        move $ra, $t9               ; restore retaddr from the PrintStr call
     li $t4, 1
     la $a1, TestExcept_Wrong_Msg
     bne $t2, $t4, TestFailed        ; assert arith exception counter updated
         ; delay slot
-    la $t3, TestExcept_DoubleExec_Msg
-    bne $t5, $t4, TestFailed        ; assert instruction after exception not being executed
-        ; delay slot
+    la $a1, TestExcept_DoubleExec_Msg
+    bne $t5, $t4, TestFailed        ; assert instruction after exception not being executed (addi)
+        sw $zero, 0($t3)            ; restore arith exception counter
 
+    ; test exception: add
 TestException_Arith_Add:
-    add $t0, $t1                    ; exception
+        add $t0, $t1                ; exception: NOTE also in branch delay slot (branch cond = false)
     la $a0, TestArith_Add_Msg
-    la $a1, TestException_Arith_Add
-    bne $t0, $t1, TestFailed
+    la $a1, TestExcept_PreserveFailed_Msg
+    la $a2, TestException_Arith_Add
+    bne $t0, $t1, TestFailed        ; assert result not updated
         ; delay slot
-    lw $t2, 0($t3)
-    li $t4, 2
+    lw $t2, 0($t3)                  ; load arith exception counter
+    li $t4, 1
     bne $t2, $t4, TestFailed        ; assert arith exception counter updated
-        nop
+        sw $zero, 0($t3)
 
+    ; test exception: sub (and delay slot)
+TestException_Arith_Sub:
+    la $a0, TestArith_Sub_Msg
+    la $a1, TestExcept_BranchDelay_Msg
+    la $a2, TestException_Arith_Sub
+
+    li $t0, 1
+    la $t1, 0x8000_0000
+    move $t2, $t1
+    bra TestException_Arith_BranchLocation
+        sub $t1, $t0                ; exception
+        bra TestFailed              ; assert delay slot exception
+            nop
+TestException_Arith_BranchLocation:
+    lui $a1, TestExcept_PreserveFailed_Msg >> 16
+    bne $t1, $t2, TestFailed        ; assert $t1 being preserved
+        ori $a1, TestExcept_PreserveFailed_Msg & 0xFFFF
+    j TestException_Arith_JumpLocation
+        sub $t1, $t0                ; exception 
+        bra TestFailed              ; assert branch delay slot exception
+            ; delay slot
+TestException_Arith_JumpLocation:
+    ; NOTE: not in a branch delay slot, even though the ins before it is a branch
+    ; https://devblogs.microsoft.com/oldnewthing/20180416-00/?p=98515
+    sub $t1, $t0                    ; exception
+    lw $t0, 0($t3)                  ; load exception counter
+    li $t1, 3
+    la $a1, TestExcept_Wrong_Msg
+    bne $t0, $t1, TestFailed        ; assert 3 arith overflow exceptions
+        sw $zero, 0($t3)            ; restore arith exception counter
+    
+
+    ; print ok msg 
+    lui $a0, TestStatus_Ok_Msg >> 16
+    jal PrintStr
+        ori $a0, TestStatus_Ok_Msg & 0xFFFF
+
+    ; print addr load test msg
+    lui $a0, TestExcept_AddrLoad_Msg >> 16
+    jal PrintStr
+        ori $a0, TestExcept_AddrLoad_Msg & 0xFFFF
+
+    ; test exception: lw
+    la $a0, TestLoad_Lw_Msg
+    la $a2, TestException_LwUnaligned
 TestException_LwUnaligned:
+    la $t0, FreeMemorySection                                   ; $t0: load addr
+    la $t1, TestExceptCounter_Base + TestExceptCounter_AddrLoad ; $t1: exception counter
+    la $t7, TestException_Lw_Ins        ; repatch addr
+    lw $t8, 0($t7)                      ; load the instruction to be repatched
+
+    sw $zero, 0($t0)                    ; zero the location
+    sw $zero, 4($t0)
+TestException_LwUnaligned_Again:
+        li $t2, 0x420
+        move $t3, $t2
+        move $t4, $zero
+TestException_Lw_Ins:
+        lw $t2, 1($t0)                  ; exception here
+            addiu $t4, 1                ; should only be executed once
+        lw $t5, 0($t1)                  ; load counter
+        li $t6, 1
+        la $a1, TestExcept_Wrong_Msg
+        bne $t6, $t5, TestFailed        ; assert counter updated
+            move $ra, $t9               ; restore addr from PrintStr call (in delay slot)
+        la $a1, TestExcept_PreserveFailed_Msg
+        bne $t3, $t2, TestFailed        ; assert value not being loaded
+            li $t5, 1
+        la $a1, TestExcept_DoubleExec_Msg
+        bne $t4, $t5, TestFailed        ; assert next instruction not being executed
+            ; delay slot
+        andi $t2, $t0, 3                ; if load addr % 4 == 0, exit 
+        addiu $t0, 1                    ; else inc load addr 
+        sw $t8, 0($t7)                  ; repatch the instruction (patched out by the exception handler)
+    bnz $t2, TestException_LwUnaligned_Again
+        sw $zero, 0($t1)                ; reset load exception counter (branch delay slot)
+
+    ; test exception: lh
+    la $a0, TestLoad_Lh_Msg
+    la $a2, TestException_LhUnaligned
 TestException_LhUnaligned:
+    la $t0, FreeMemorySection                                   ; $t0: load addr
+    ; la $t1, TestExceptCounter_Base + TestExceptCounter_AddrLoad ; $t1: exception counter, same as lw 
+
+    sw $zero, 0($t0)                ; zero the location
+    li $t2, 0x420
+    move $t3, $t2
+    move $t4, $zero
+    lh $t2, 1($t0)                  ; exception here
+        addiu $t4, 1                ; should only be executed once
+    lw $t5, 0($t1)                  ; load exception counter
+    li $t6, 1
+    la $a1, TestExcept_Wrong_Msg
+    bne $t6, $t5, TestFailed        ; assert counter updated by exception routine 
+        move $ra, $t9               ; restore addr from PrintStr call (in delay slot)
+    la $a1, TestExcept_PreserveFailed_Msg
+    bne $t3, $t2, TestFailed        ; assert value not being loaded
+        li $t5, 1
+    la $a1, TestExcept_DoubleExec_Msg
+    bne $t4, $t5, TestFailed        ; assert next instruction not being executed
+        sw $zero, 0($t1)            ; reset load exception counter
+
+    ; test exception: lhu 
+    la $a1, TestLoad_Lhu_Msg
+    la $a2, TestException_LhuUnaligned
+TestException_LhuUnaligned:
+    ; la $t0, FreeMemorySection                                   ; $t0: load addr, same as lh
+    ; la $t1, TestExceptCounter_Base + TestExceptCounter_AddrLoad ; $t1: exception counter, same as lh
+
+    sw $zero, 0($t0)                ; zero the location
+    li $t2, 0x420
+    move $t3, $t2
+    move $t4, $zero
+    lhu $t2, 1($t0)                 ; exception here
+        addiu $t4, 1                ; should only be executed once
+    lw $t5, 0($t1)                  ; load exception counter
+    li $t6, 1
+    la $a1, TestExcept_Wrong_Msg
+    bne $t6, $t5, TestFailed        ; assert counter updated by exception routine 
+        move $ra, $t9               ; restore addr from PrintStr call (in delay slot)
+    la $a1, TestExcept_PreserveFailed_Msg
+    bne $t3, $t2, TestFailed        ; assert value not being loaded
+        li $t5, 1
+    la $a1, TestExcept_DoubleExec_Msg
+    bne $t4, $t5, TestFailed        ; assert next instruction not being executed
+        sw $zero, 0($t0)            ; reset load exception counter
+
+    ; print Ok msg
+    lui $a0, TestStatus_Ok_Msg >> 16
+    jal PrintStr
+        ori $a0, TestStatus_Ok_Msg & 0xFFFF
+
+    ; print test store exception
+    lui $a0, TestExcept_AddrStore_Msg >> 16
+    jal PrintStr
+        ori $a0, TestExcept_AddrStore_Msg & 0xFFFF
 TestException_SwUnaligned:
+    la $a1, TestStore_Sw_Msg
+    la $a2, TestException_SwUnaligned
+
+    move $ra, $t9                   ; restore return addr from PrintStr
+
 TestException_ShUnaligned:
+    la $a1, TestStore_Sh_Msg
+    la $a2, TestException_ShUnaligned
 
     ret
     move $v0, $zero
@@ -1997,18 +2167,18 @@ TestBranch_BgtzDelaySlot_Msg:   .db "bgtz delay slot.\n", 0
 TestBranch_BltzalDelaySlot_Msg: .db "bltzal delay slot.\n", 0
 TestBranch_BgezalDelaySlot_Msg: .db "bgezal delay slot.\n", 0
 
-TestLoad_Lb_Msg:                .db "lb:", 0
-TestLoad_Lbu_Msg:               .db "lbu:", 0
-TestLoad_Lh_Msg:                .db "lh:", 0
-TestLoad_Lhu_Msg:               .db "lhu:", 0
-TestLoad_Lw_Msg:                .db "lw:", 0
-TestLoad_Lwl_Msg:               .db "lwl:", 0
-TestLoad_Lwr_Msg:               .db "lwr:", 0
+TestLoad_Lb_Msg:                .db "lb", 0
+TestLoad_Lbu_Msg:               .db "lbu", 0
+TestLoad_Lh_Msg:                .db "lh", 0
+TestLoad_Lhu_Msg:               .db "lhu", 0
+TestLoad_Lw_Msg:                .db "lw", 0
+TestLoad_Lwl_Msg:               .db "lwl", 0
+TestLoad_Lwr_Msg:               .db "lwr", 0
 TestLoad_Combo_Msg:             .db "lwl and lwr", 0
-TestLoad_DirFailed_Msg:         .db " old content didn't persist or delay slot failed.\n", 0
-TestLoad_DelaySlotRead_Msg:     .db " read in delay slot failed.\n", 0
-TestLoad_DelaySlotWrite_Msg:    .db " write in delay slot failed (via 'or' instruction).\n", 0
-TestLoad_NoDelaySlot_Msg:       .db " delay slot should not exist.\n", 0
+TestLoad_DirFailed_Msg:         .db ": old content didn't persist or delay slot failed.\n", 0
+TestLoad_DelaySlotRead_Msg:     .db ": read in delay slot failed.\n", 0
+TestLoad_DelaySlotWrite_Msg:    .db ": write in delay slot failed (via 'or' instruction).\n", 0
+TestLoad_NoDelaySlot_Msg:       .db ": delay slot should not exist.\n", 0
 
 .align 4
 TestLoad_WordDir:               .dw 0xdeadbeef, 0xbaadf00d
@@ -2042,7 +2212,10 @@ TestHiLo_DivuZeroFailed_Msg:    .db " by 0 must return -1 in Lo, Rs in Hi.\n"
 TestHiLo_Div0Negative_Msg:      .db " by 0 and a negative number must return 1 in Lo, Rs in Hi.\n"
 TestHiLo_Div80000000_Msg:       .db " between 0x80000000 and -1 must return 0x80000000 in Lo, 0 in Hi.\n"
 
+
+Exception_Unexpected_Msg:       .db "Unexpected exception, EPC = ", 0
 .align 4
+TestExcept_Enable:              .dw 0
 TestExceptCounter_Base:
 .resv 32*4
 TestExceptCounter_Interrupt = 0
@@ -2070,6 +2243,7 @@ TestExcept_Overflow_Msg:        .db "  Arith Overflow Exception: ", 0           
 TestExcept_PreserveFailed_Msg:  .db ": result should not be written to register.\n", 0
 TestExcept_Wrong_Msg:           .db ": excode field of CP0's Cause is not correct.\n", 0
 TestExcept_DoubleExec_Msg:      .db ": instruction after exception shouldn't be executed.\n", 0
+TestExcept_BranchDelay_Msg:     .db ": EPC must point at branch instruction for exception in delay slot.\n", 0
 
 
 
