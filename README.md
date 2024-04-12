@@ -65,7 +65,7 @@ I_am_not_a_comment:
   - `$0, $zero, $8, $t0`
 - Variables are declared by writing its name followed by an equal sign. Example syntax:
   - `MyVariable = 1`
-- Labels are declared by Writing its name followed by a colon. Example syntax:
+- Labels are declared by writing its name followed by a colon. Example syntax:
 ```
 MyLabel:
   bra MyLabel
