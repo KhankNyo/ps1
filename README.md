@@ -25,4 +25,24 @@ setbp deadB33F
 - ```cont```: continue running until a breakpoint is encountered
 ```
 cont
-``` 
+```
+
+# Assembler:
+- The assembler supports most basic Mips R3000 instructions (missing ones are LWCz and SWCz)
+### Supported pseudo instructions:
+- `la $reg, u32`: load an unsigned 32 bit number to $reg (gives an error if the number is out of range)
+- `li $reg, i32`: load a signed 32 bit number to $reg (gives an error if the number is out of range)
+- `move $rd, $rs`: load content of register $rs into register $rd
+- `bra Label`: branch always
+- `bez $reg, Label`: branch if $reg == 0
+- `bnz $reg, Label`: branch if $reg != 0
+### Supported directives:
+- `.db byte0, byte1, ...`: places a byte or bytes at the current location
+- `.dh half0, half1, ...`: places a halfword or halfwords (16 bit value) at the current location
+- `.dw word0, word1, ...`: places a word or words (32 bit values) at the current location
+- `.dl long0, long1, ...`: places a longword or longwords (64 bit values) at the current location
+- `.org address`: set the virtual PC to the given address (NOTE: does not move to a physical location)
+- `.resv size`: reserve 'size' bytes (does move to a new location)
+- `.loadNop value`: if value != 0: nop will be inserted after every load instruction (lw, lh, lb, lhu, lbu, lwl, lwr)
+- `.branchNop value`: if value != 0: nop wil be inserted after every branch instruction (bltz, blez, bgtz, bgez, bgezal, bltzal, bne, beq)
+- `.jumpNop value`: if value != 0: nop will be inserted after every jump instruction (j, jal, jr, jalr)
