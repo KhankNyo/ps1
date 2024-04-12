@@ -47,12 +47,17 @@ cont
 - `.branchNop value`: if value != 0: nop wil be inserted after every branch instruction (bltz, blez, bgtz, bgez, bgezal, bltzal, bne, beq)
 - `.jumpNop value`: if value != 0: nop will be inserted after every jump instruction (j, jal, jr, jalr)
 ### Strings:
-- Strings are not null terminated by default, the programmer must manually add a null terminator. Example:
+- Strings are NOT null terminated by default, the programmer must manually add a null terminator. Example:
 ```
 .db "my string", 0
 ```
 - Supported escape characters: `\n, \t, \r, \"`.
 ### General syntax:
+- A comment starts with `;`. Anything after `;` will be a comment until the next line. Example syntax:
+```
+  addiu $1, $2  ; I am a comment
+I_am_not_a_comment:
+``` 
 - The programmer can specify 3 or 2 operands for instructions that expect 3 operands. Example syntax:
   - `add $1, $1, $3 ` is equivalent to `add $1, $3`
 - Registers must be prefixed with '$'. The assembler supports both fancy register name and register with number only. Example syntax:
