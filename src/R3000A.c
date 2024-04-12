@@ -9,7 +9,6 @@
 #include "CP0.h"
 #include "R3000A.h"
 
-#include "CP0.c"
 
 /*
  * https://stuff.mit.edu/afs/sipb/contrib/doc/specs/ic/cpu/mips/r3051.pdf
@@ -919,7 +918,6 @@ static R3000A_StageStatus R3000A_Memory(R3000A *This)
     default: return Status;
     }
 
-    ASSERT(Rt);
     Status.WritebackData = DataRead;
     Status.RegIndex = RegIndex;
     return Status;
@@ -1080,21 +1078,198 @@ void R3000A_StepClock(R3000A *This)
 #include <stdlib.h>
 #include <string.h>
 
+#include "raylib.h"
+
+#include "CP0.c"
 #include "Disassembler.c"
 
+
+typedef enum TestSyscall 
+{
+    TESTSYS_WRITESTR    = 0x70000000,
+    TESTSYS_WRITEHEX    = 0x70010000,
+    TESTSYS_EXIT        = 0x72000000,
+} TestSyscall;
+
+typedef struct MessageQueue 
+{
+    char Buf[32][256];
+    int Count;
+} MessageQueue;
+
+typedef struct TestOS 
+{
+    u8 *MemPtr;
+    int MemSizeBytes;
+    MessageQueue Log;
+    MessageQueue Terminal;
+} TestOS;
+
+
+#if 1
+
+static u32 TranslateAddr(u32 LogicalAddr)
+{
+    switch (LogicalAddr)
+    {
+    case TESTSYS_WRITESTR:
+    case TESTSYS_WRITEHEX:
+    case TESTSYS_EXIT:
+    {
+        return LogicalAddr;
+    } break;
+    default: 
+    {
+        if (IN_RANGE(0x80000000, LogicalAddr, 0xA0000000))
+            return LogicalAddr - 0x80000000;
+        return LogicalAddr - R3000A_RESET_VEC;
+    } break;
+    }
+}
+
+static Bool8 AccessOutOfRange(u32 Addr, u32 Target, u32 DataSize)
+{
+    return (u32)(Addr + DataSize) <= Target || Addr >= Target;
+}
+
+static void QueueMessage(MessageQueue *MsgQ, const char *Str, ...)
+{
+    va_list Args;
+    va_start(Args, Str);
+    snprintf(MsgQ->Buf[MsgQ->Count], sizeof MsgQ->Buf[0], Str, Args);
+    MsgQ->Count = (MsgQ->Count + 1) % STATIC_ARRAY_SIZE(MsgQ->Buf);
+    va_end(Args);
+}
+
+
+static u32 DbgReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
+{
+    TestOS *OS = UserData;
+    u32 PhysAddr = TranslateAddr(Addr);
+    if (PhysAddr < (u32)OS->MemSizeBytes 
+    && (u32)(PhysAddr + Size) < (u32)OS->MemSizeBytes)
+    {
+        u32 Data = 0;
+        for (int i = 0; i < Size; i++)
+        {
+            Data |= (u32)OS->MemPtr[PhysAddr + i] << i*8;
+        }
+        return Data;
+    }
+
+    QueueMessage(&OS->Log, "Out of bound read at 0x%08x (size = %d).", Addr, Size);
+    return 0;
+}
+
+static void DbgWriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size)
+{
+    TestOS *OS = UserData;
+    u32 PhysAddr = TranslateAddr(Addr);
+    if (PhysAddr < (u32)OS->MemSizeBytes 
+    && (u32)(PhysAddr + Size) < (u32)OS->MemSizeBytes)
+    {
+        for (int i = 0; i < Size; i++)
+        {
+            OS->MemPtr[PhysAddr + i] = Data;
+            Data >>= 8;
+        }
+        return;
+    }
+    else if (TESTSYS_EXIT == Addr)
+    {
+        QueueMessage(&OS->Log, "Program exited.\n");
+        return;
+    }
+    else if (TESTSYS_WRITEHEX == Addr)
+    {
+        QueueMessage(&OS->Terminal, "0x%08x", Data);
+        return;
+    }
+    else if (TESTSYS_WRITESTR == Addr)
+    {
+        Addr = Data;
+        PhysAddr = TranslateAddr(Data);
+        if (PhysAddr < (u32)OS->MemSizeBytes && (u32)(PhysAddr + Size) < (u32)OS->MemSizeBytes)
+        {
+            int StrLen = 0;
+            for (int i = PhysAddr; i < OS->MemSizeBytes && OS->MemPtr[i]; i++)
+            {
+                StrLen++;
+            }
+            QueueMessage(&OS->Terminal, "%*.s", StrLen, OS->MemPtr[PhysAddr]);
+            return;
+        }
+    }
+    QueueMessage(&OS->Log, "Out of bound write to 0x%08x (0x%80x, size = %d)\n", Addr, Data, Size);
+}
+
+static Bool8 DbgVerifyAddrFn(void *UserData, u32 Addr)
+{
+    (void)UserData, (void)Addr;
+    return true;
+}
+
+
+static void Handle_Input(R3000A *Mips)
+{
+}
+
+static void DisasmAt(u32 Addr, uint InstructionCount, u8 *MemPtr, int MemSizeBytes, char *OutDiasmBuffer, int outBufferSize)
+{
+}
+
+int main(void)
+{
+    int Width = 1080;
+    int Height = 720;
+    Color BgColor = {.r = 0x80, .g = 0x80, .b = 0x80};
+    InitWindow(Width, Height, "R3000");
+    SetTargetFPS(60);
+
+    TestOS OS = {
+        0
+    };
+    R3000A Mips = R3000A_Init(&OS, DbgReadFn, DbgWriteFn, DbgVerifyAddrFn, DbgVerifyAddrFn);
+
+    char DisasmBuffer[4096];
+    Bool8 DisasmBufferNeedsRefresh = true;
+    while (!WindowShouldClose())
+    {
+        if (IsFileDropped())
+        {
+            if (OS.MemPtr)
+                UnloadFileData(OS.MemPtr);
+
+            FilePathList List = LoadDroppedFiles();
+            OS.MemPtr = LoadFileData(List.paths[0], &OS.MemSizeBytes);
+            UnloadDroppedFiles(List);
+
+            DisasmBufferNeedsRefresh = true;
+        }
+        Handle_Input(&Mips);
+
+        if (DisasmBufferNeedsRefresh)
+        {
+            DisasmAt(Mips.PC, 10, OS.MemPtr, OS.MemSizeBytes, DisasmBuffer, sizeof DisasmBuffer);
+        }
+
+        BeginDrawing();
+            ClearBackground(BgColor);
+        EndDrawing();
+    }
+
+    if (OS.MemPtr)
+        UnloadFileData(OS.MemPtr);
+    CloseWindow();
+    return 0;
+}
+
+#else
 
 typedef enum ScreenFlag 
 {
     SCREEN_CLEAR_ON_Y_WRAP = 1,
 } ScreenFlag;
-typedef enum TestSyscall 
-{
-    TESTSYS_WRITESTR    = 0x70000000,
-    TESTSYS_WRITEHEX    = 0x70010000,
-    TESTSYS_CLRSCR      = 0x71000000,
-    TESTSYS_EXIT        = 0x72000000,
-} TestSyscall;
-
 typedef struct Vec2i 
 {
     int x, y;
@@ -1616,5 +1791,6 @@ int main(int argc, char **argv)
     free(Buf.Ptr);
     return 0;
 }
+#endif /* GUI */
 #endif /* STANDALONE */
 #endif /* R3000A_C */

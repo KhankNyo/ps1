@@ -49,10 +49,10 @@ void CP0_SetException(
     u32 Addr
 );
 Bool8 CP0_IsCoprocessorAvailable(R3000A_CP0 *This, uint CoprocessorNumber);
+u32 CP0_GetExceptionVector(const R3000A_CP0 *This);
 
 u32 CP0_Read(const R3000A_CP0 *This, uint RegIndex);
 void CP0_Write(R3000A_CP0 *This, u32 RdIndex, u32 Data);
-
 
 #endif /* CP0_H */
 
