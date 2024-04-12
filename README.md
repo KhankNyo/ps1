@@ -37,7 +37,7 @@ cont
 - `bez $reg, Label`: branch if $reg == 0
 - `bnz $reg, Label`: branch if $reg != 0
 ### Supported directives:
-- `.db byte0, byte1, ...`: places a byte or bytes at the current location
+- `.db byte0, byte1, ...`: places a byte, bytes, or a string at the current location
 - `.dh half0, half1, ...`: places a halfword or halfwords (16 bit value) at the current location
 - `.dw word0, word1, ...`: places a word or words (32 bit values) at the current location
 - `.dl long0, long1, ...`: places a longword or longwords (64 bit values) at the current location
@@ -46,6 +46,12 @@ cont
 - `.loadNop value`: if value != 0: nop will be inserted after every load instruction (lw, lh, lb, lhu, lbu, lwl, lwr)
 - `.branchNop value`: if value != 0: nop wil be inserted after every branch instruction (bltz, blez, bgtz, bgez, bgezal, bltzal, bne, beq)
 - `.jumpNop value`: if value != 0: nop will be inserted after every jump instruction (j, jal, jr, jalr)
+### Strings:
+- Strings are not null terminated by default, the programmer must manually add a null terminator. Example:
+```
+.db "my string", 0
+```
+- Supported escape characters: `\n, \t, \r, \"`.
 ### General syntax:
 - The programmer can specify 3 or 2 operands for instructions that expect 3 operands. Example syntax:
   - `add $1, $1, $3 ` is equivalent to `add $1, $3`
@@ -61,9 +67,9 @@ MyLabel:
 - Note that instructions can use forward declared label or variable, but forward declared variables or label cannot be used in directives and other variable declaration. Example:
 - - Legal:
 ```
-  bra next
-  la $t0, next
-next:
+  bra Next
+  la $t0, Next
+Next:
 ```
 - - Illegal: 
 ```
