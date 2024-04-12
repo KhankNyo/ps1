@@ -22,13 +22,13 @@
 ```
 setbp deadB33F
 ```
-- ```cont```: continue running until a breakpoint is encountered
+- ```cont```: continue running until a breakpoint is encountered. Example syntax:
 ```
 cont
 ```
 
 # Assembler:
-- The assembler supports most basic Mips R3000 instructions (missing ones are LWCz and SWCz)
+- The assembler supports most basic Mips R3000 instructions (missing ones are LWCz and SWCz, FPU, and virtual memory instructions, since the PS1 does not have an FPU and virtual memory)
 ### Supported pseudo instructions:
 - `la $reg, u32`: load an unsigned 32 bit number to $reg (gives an error if the number is out of range)
 - `li $reg, i32`: load a signed 32 bit number to $reg (gives an error if the number is out of range)
@@ -46,3 +46,28 @@ cont
 - `.loadNop value`: if value != 0: nop will be inserted after every load instruction (lw, lh, lb, lhu, lbu, lwl, lwr)
 - `.branchNop value`: if value != 0: nop wil be inserted after every branch instruction (bltz, blez, bgtz, bgez, bgezal, bltzal, bne, beq)
 - `.jumpNop value`: if value != 0: nop will be inserted after every jump instruction (j, jal, jr, jalr)
+### General syntax:
+- The programmer can specify 3 or 2 operands for instructions that expect 3 operands. Example syntax:
+  - `add $1, $1, $3 ` is equivalent to `add $1, $3`
+- Registers must be prefixed with '$'. The assembler supports both fancy register name and register with number only. Example syntax:
+  - `$0, $zero, $8, $t0`
+- Variables are declared by writing its name followed by an equal sign. Example syntax:
+  - `MyVariable = 1`
+- Labels are declared by Writing its name followed by a colon. Example syntax:
+```
+MyLabel:
+  bra MyLabel
+```
+- Note that instructions can use forward declared label or variable, but forward declared variables or label cannot be used in directives and other variable declaration. Example:
+- - Legal:
+```
+  bra next
+  la $t0, next
+next:
+```
+- - Illegal: 
+```
+  MyFirstValue = MyValue
+  .org MyValue
+MyValue = 100
+```
