@@ -10,7 +10,7 @@ static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
 {
 }
 
-static void Ps1_WriteFn(void *UserData, u32 Addr, u32 Data, R3000_DataSize Size)
+static void Ps1_WriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size)
 {
 }
 
