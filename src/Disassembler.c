@@ -6,8 +6,9 @@
 
 #define DISASM_BEAUTIFUL_REGNAME (u32)(1 << 0)
 #define DISASM_IMM16_AS_HEX (u32)(1 << 1)
+/* returns the string length written (excluding null terminator) */
 /* generally, a buffer of 64 bytes or more will not result in truncation */
-void R3000A_Disasm(
+int R3000A_Disasm(
     u32 Instruction, 
     u32 CurrentPC, 
     u32 Flags, 
@@ -46,7 +47,7 @@ static const char *sR3000A_RegisterName[32] = {
 };
 
 
-static void R3000A_DisasmSpecial(u32 Instruction, const char **RegName, char *OutBuffer, iSize OutBufferSize)
+static int R3000A_DisasmSpecial(u32 Instruction, const char **RegName, char *OutBuffer, iSize OutBufferSize)
 {
     uint Group = FUNCT_GROUP(Instruction);
     uint Mode = FUNCT_MODE(Instruction);
@@ -67,17 +68,17 @@ static void R3000A_DisasmSpecial(u32 Instruction, const char **RegName, char *Ou
 
         if (Instruction == 0)
         {
-            snprintf(OutBuffer, OutBufferSize, "nop");
+            return snprintf(OutBuffer, OutBufferSize, "nop");
         }
         else if (Mode < 4)
         {
-            snprintf(OutBuffer, OutBufferSize, "%s %s, %s, %d", 
+            return snprintf(OutBuffer, OutBufferSize, "%s %s, %s, %d", 
                 MnemonicTable[Mode], Rd, Rt, (Instruction >> 6) & 0x1F
             );
         }
         else
         {
-            snprintf(OutBuffer, OutBufferSize, "%s %s, %s, %s", 
+            return snprintf(OutBuffer, OutBufferSize, "%s %s, %s, %s", 
                 MnemonicTable[Mode], Rd, Rt, Rs /* NOTE: order in assembly: rd, rt, rs */
             );
         }
@@ -86,10 +87,10 @@ static void R3000A_DisasmSpecial(u32 Instruction, const char **RegName, char *Ou
     {
         switch (Mode)
         {
-        case 0: snprintf(OutBuffer, OutBufferSize, "jr %s", Rs); break;
-        case 1: snprintf(OutBuffer, OutBufferSize, "jalr %s, %s", Rs, Rd); break;
-        case 4: snprintf(OutBuffer, OutBufferSize, "syscall %5x", (Instruction >> 6) & 0xFFFFF); break;
-        case 5: snprintf(OutBuffer, OutBufferSize, "break %5x", (Instruction >> 6) & 0xFFFFF); break;
+        case 0: return snprintf(OutBuffer, OutBufferSize, "jr %s", Rs); break;
+        case 1: return snprintf(OutBuffer, OutBufferSize, "jalr %s, %s", Rs, Rd); break;
+        case 4: return snprintf(OutBuffer, OutBufferSize, "syscall %5x", (Instruction >> 6) & 0xFFFFF); break;
+        case 5: return snprintf(OutBuffer, OutBufferSize, "break %5x", (Instruction >> 6) & 0xFFFFF); break;
         default: goto UnknownOpcode;
         }
     } break;
@@ -103,7 +104,7 @@ static void R3000A_DisasmSpecial(u32 Instruction, const char **RegName, char *Ou
 
         if (Mode > 3) 
             goto UnknownOpcode;
-        snprintf(OutBuffer, OutBufferSize, "%s %s", 
+        return snprintf(OutBuffer, OutBufferSize, "%s %s", 
             MnemonicTable[Mode], Reg
         );
     } break;
@@ -115,7 +116,7 @@ static void R3000A_DisasmSpecial(u32 Instruction, const char **RegName, char *Ou
 
         if (Mode > 3)
             goto UnknownOpcode;
-        snprintf(OutBuffer, OutBufferSize, "%s %s, %s", 
+        return snprintf(OutBuffer, OutBufferSize, "%s %s, %s", 
             MnemonicTable[Mode], Rs, Rt
         );
     } break;
@@ -125,7 +126,7 @@ static void R3000A_DisasmSpecial(u32 Instruction, const char **RegName, char *Ou
             "add", "addu", "sub", "subu", 
             "and", "or", "xor", "nor"
         };
-        snprintf(OutBuffer, OutBufferSize, "%s %s, %s, %s", 
+        return snprintf(OutBuffer, OutBufferSize, "%s %s, %s, %s", 
             MnemonicTable[Mode], Rd, Rs, Rt
         );
     } break;
@@ -133,13 +134,13 @@ static void R3000A_DisasmSpecial(u32 Instruction, const char **RegName, char *Ou
     {
         if (Mode == 2)
         {
-            snprintf(OutBuffer, OutBufferSize, "slt %s, %s, %s", 
+            return snprintf(OutBuffer, OutBufferSize, "slt %s, %s, %s", 
                 Rd, Rs, Rt
             );
         }
         else if (Mode == 3)
         {
-            snprintf(OutBuffer, OutBufferSize, "sltu %s, %s, %s", 
+            return snprintf(OutBuffer, OutBufferSize, "sltu %s, %s, %s", 
                 Rd, Rs, Rt
             );
         }
@@ -149,14 +150,14 @@ static void R3000A_DisasmSpecial(u32 Instruction, const char **RegName, char *Ou
 UnknownOpcode:
     default:
     {
-        snprintf(OutBuffer, OutBufferSize, "???");
+        return snprintf(OutBuffer, OutBufferSize, "???");
     } break;
     }
 }
 
 
 
-void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iSize OutBufferSize)
+int R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iSize OutBufferSize)
 {
     /*
      * https://stuff.mit.edu/afs/sipb/contrib/doc/specs/ic/cpu/mips/r3051.pdf
@@ -178,7 +179,7 @@ void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, i
         {
         case 0: /* special */
         {
-            R3000A_DisasmSpecial(Instruction, RegName, OutBuffer, OutBufferSize);
+            return R3000A_DisasmSpecial(Instruction, RegName, OutBuffer, OutBufferSize);
         } break;
         case 1: /* bcond */
         {
@@ -197,7 +198,7 @@ void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, i
             default: goto UnknownOpcode;
             }
 
-            snprintf(OutBuffer, OutBufferSize, "%s %s, 0x%08x", 
+            return snprintf(OutBuffer, OutBufferSize, "%s %s, 0x%08x", 
                 Mnemonic, Rs, (u32)(DelaySlotAddr + BranchOffset)
             );
         } break;
@@ -208,7 +209,7 @@ void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, i
             u32 TargetAddr = (Instruction & TargetMask) << 2;
             u32 Target = (DelaySlotAddr & 0xF0000000) | TargetAddr;
 
-            snprintf(OutBuffer, OutBufferSize, "j 0x%08x", Target);
+            return snprintf(OutBuffer, OutBufferSize, "j 0x%08x", Target);
         } break;
         case 3: /* jal */
         {
@@ -217,7 +218,7 @@ void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, i
             u32 TargetAddr = (Instruction & TargetMask) << 2;
             u32 Target = (DelaySlotAddr & 0xF0000000) | TargetAddr;
 
-            snprintf(OutBuffer, OutBufferSize, "jal 0x%08x", Target);
+            return snprintf(OutBuffer, OutBufferSize, "jal 0x%08x", Target);
         } break;
         default: /* branch, mode from 4 to 7 */
         {
@@ -231,13 +232,13 @@ void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, i
 
             if (OpcodeMode < 6) /* reg-reg comparison */
             {
-                snprintf(OutBuffer, OutBufferSize, "%s %s, %s, 0x%08x", 
+                return snprintf(OutBuffer, OutBufferSize, "%s %s, %s, 0x%08x", 
                     MnemonicTable[OpcodeMode], Rs, Rt, (u32)(DelaySlotAddr + BranchOffset)
                 );
             }
             else /* reg-zero, NOTE: the comparison type is different, can't use reg-reg comparison */
             {
-                snprintf(OutBuffer, OutBufferSize, "%s %s, 0x%08x", 
+                return snprintf(OutBuffer, OutBufferSize, "%s %s, 0x%08x", 
                     MnemonicTable[OpcodeMode], Rs, (u32)(DelaySlotAddr + BranchOffset)
                 );
             }
@@ -256,7 +257,7 @@ void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, i
 
         if (OpcodeMode == 7) /* lui doesn't have rs */
         {
-            snprintf(OutBuffer, OutBufferSize, "lui %s, 0x%04x", Rt, Immediate & 0xFFFF);
+            return snprintf(OutBuffer, OutBufferSize, "lui %s, 0x%04x", Rt, Immediate & 0xFFFF);
         }
         else
         {
@@ -270,7 +271,7 @@ void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, i
                     FormatString = "%s %s, %s 0x%04x";
                     Immediate &= 0xFFFF;
                 }
-                snprintf(OutBuffer, OutBufferSize, FormatString, 
+                return snprintf(OutBuffer, OutBufferSize, FormatString, 
                     Mnemonic, Rt, Rs, (u32)Immediate
                 );
             }
@@ -280,7 +281,7 @@ void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, i
                 {
                     Immediate &= 0xFFFF;
                 }
-                snprintf(OutBuffer, OutBufferSize, "%s %s, %s, %d", 
+                return snprintf(OutBuffer, OutBufferSize, "%s %s, %s, %d", 
                     Mnemonic, Rt, Rs, (i32)Immediate
                 );
             }
@@ -307,20 +308,20 @@ void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, i
             {
                 const char *Rt = RegName[REG(Instruction, RT)];
                 const char *Rd = CP0Register[REG(Instruction, RD)];
-                snprintf(OutBuffer, OutBufferSize, "mfc0 %s, cp0_%s", Rt, Rd);
+                return snprintf(OutBuffer, OutBufferSize, "mfc0 %s, cp0_%s", Rt, Rd);
             } break;
             case 0x04:
             case 0x05: /* mtc0 */
             {
                 const char *Rt = RegName[REG(Instruction, RT)];
                 const char *Rd = CP0Register[REG(Instruction, RD)];
-                snprintf(OutBuffer, OutBufferSize, "mtc0 %s, cp0_%s", Rt, Rd);
+                return snprintf(OutBuffer, OutBufferSize, "mtc0 %s, cp0_%s", Rt, Rd);
             } break;
             case 0x10: /* coprocessor specific op */
             {
                 if (Instruction == 0x42000010) /* rfe */
                 {
-                    snprintf(OutBuffer, OutBufferSize, "rfe");
+                    return snprintf(OutBuffer, OutBufferSize, "rfe");
                 }
                 else goto UnknownOpcode;
             } break;
@@ -345,7 +346,7 @@ void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, i
         if (OpcodeMode == 7)
             goto UnknownOpcode;
 
-        snprintf(OutBuffer, OutBufferSize, "%s %s, %d(%s)", 
+        return snprintf(OutBuffer, OutBufferSize, "%s %s, %d(%s)", 
             MnemonicTable[OpcodeMode], Rt, Offset, Base
         );
     } break;
@@ -361,7 +362,7 @@ void R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, i
         if (OpcodeMode == 7 || OpcodeMode == 4 || OpcodeMode == 5)
             goto UnknownOpcode;
 
-        snprintf(OutBuffer, OutBufferSize, "%s %s, %d(%s)", 
+        return snprintf(OutBuffer, OutBufferSize, "%s %s, %d(%s)", 
             MnemonicTable[OpcodeMode], Rt, Offset, Base
         );
     } break;
@@ -373,7 +374,7 @@ UnknownOpcode:
     case 7: /* store (coprocessor) */
     default:
     {
-        snprintf(OutBuffer, OutBufferSize, "???");
+        return snprintf(OutBuffer, OutBufferSize, "???");
     } break;
     }
 }

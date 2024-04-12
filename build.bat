@@ -14,7 +14,7 @@ set RAYLIB_INC=-I"%RAYLIB_SRC%" -I"%RAYLIB_SRC%\external\glfw\include"
 set "RAYLIB_DEFINES=-D_DEFAULT_SOURCE -DPLATFORM_DESKTOP -DGRAPHICS_API_OPENGL_33"
 
 set RAYLIB_MSVC_COMP=/std:c11 /Od /Zi /utf-8 /validate-charset /EHsc
-set RAYLIB_MSVC_LINK=/link /LTCG kernel32.lib user32.lib shell32.lib winmm.lib gdi32.lib opengl32.lib
+set RAYLIB_MSVC_LINK=/link kernel32.lib user32.lib shell32.lib winmm.lib gdi32.lib opengl32.lib
 set RAYLIB_MSVC_INC=/I"%RAYLIB_SRC%" /I"%RAYLIB_SRC%\external\glfw\include"
 set "RAYLIB_MSVC_DEFINES=/D_DEFAULT_SOURCE /DPLATFORM_DESKTOP /DGRAPHICS_API_OPENGL_33"
 

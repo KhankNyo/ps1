@@ -1108,6 +1108,26 @@ typedef struct TestOS
 
 #if 1
 
+typedef struct DisassemblyWindow 
+{
+    u32 BaseAddrOnScreen;
+    int PCYPos;
+    int x, y, Width, Height;
+    int LineCount;
+    int LineHeight;
+
+    char Mnemonic[2048];
+    float MnemonicXOffset;
+    char Addresses[1024];
+    float AddressXOffset;
+    char InsHexCode[1024];
+    float HexCodeXOffset;
+
+    Font Fnt;
+    float FontSize, TextSpacing;
+    Color BgColor, TextColor, PCHighlightColor;
+} DisassemblyWindow;
+
 static u32 TranslateAddr(u32 LogicalAddr)
 {
     switch (LogicalAddr)
@@ -1127,9 +1147,9 @@ static u32 TranslateAddr(u32 LogicalAddr)
     }
 }
 
-static Bool8 AccessOutOfRange(u32 Addr, u32 Target, u32 DataSize)
+static Bool8 AccessOutOfRange(u32 Addr, u32 TotalSize, u32 DataSize)
 {
-    return (u32)(Addr + DataSize) <= Target || Addr >= Target;
+    return (Addr > TotalSize) || (Addr + DataSize > TotalSize);
 }
 
 static void QueueMessage(MessageQueue *MsgQ, const char *Str, ...)
@@ -1146,8 +1166,7 @@ static u32 DbgReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
 {
     TestOS *OS = UserData;
     u32 PhysAddr = TranslateAddr(Addr);
-    if (PhysAddr < (u32)OS->MemSizeBytes 
-    && (u32)(PhysAddr + Size) < (u32)OS->MemSizeBytes)
+    if (!AccessOutOfRange(PhysAddr, OS->MemSizeBytes, Size))
     {
         u32 Data = 0;
         for (int i = 0; i < Size; i++)
@@ -1165,8 +1184,7 @@ static void DbgWriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size)
 {
     TestOS *OS = UserData;
     u32 PhysAddr = TranslateAddr(Addr);
-    if (PhysAddr < (u32)OS->MemSizeBytes 
-    && (u32)(PhysAddr + Size) < (u32)OS->MemSizeBytes)
+    if (!AccessOutOfRange(PhysAddr, OS->MemSizeBytes, Size))
     {
         for (int i = 0; i < Size; i++)
         {
@@ -1175,21 +1193,21 @@ static void DbgWriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size)
         }
         return;
     }
-    else if (TESTSYS_EXIT == Addr)
+    if (TESTSYS_EXIT == Addr)
     {
         QueueMessage(&OS->Log, "Program exited.\n");
         return;
     }
-    else if (TESTSYS_WRITEHEX == Addr)
+    if (TESTSYS_WRITEHEX == Addr)
     {
         QueueMessage(&OS->Terminal, "0x%08x", Data);
         return;
     }
-    else if (TESTSYS_WRITESTR == Addr)
+    if (TESTSYS_WRITESTR == Addr)
     {
         Addr = Data;
         PhysAddr = TranslateAddr(Data);
-        if (PhysAddr < (u32)OS->MemSizeBytes && (u32)(PhysAddr + Size) < (u32)OS->MemSizeBytes)
+        if (!AccessOutOfRange(PhysAddr, OS->MemSizeBytes, Size))
         {
             int StrLen = 0;
             for (int i = PhysAddr; i < OS->MemSizeBytes && OS->MemPtr[i]; i++)
@@ -1212,27 +1230,216 @@ static Bool8 DbgVerifyAddrFn(void *UserData, u32 Addr)
 
 static void Handle_Input(R3000A *Mips)
 {
+    static float KeyDownElapsed = 0;
+    if (IsKeyDown(KEY_SPACE))
+    {
+        KeyDownElapsed += GetFrameTime();
+    }
+    else
+    {
+        KeyDownElapsed = 0;
+    }
+
+    if (KEY_SPACE == GetKeyPressed() || KeyDownElapsed > .5)
+    {
+        R3000A_StepClock(Mips);
+    }
 }
 
-static void DisasmAt(u32 Addr, uint InstructionCount, u8 *MemPtr, int MemSizeBytes, char *OutDiasmBuffer, int outBufferSize)
+static void MemCpy(void *Dst, const void *Src, size_t SizeBytes)
 {
+    u8 *DstPtr = Dst;
+    const u8 *SrcPtr = Src;
+    while (SizeBytes-- > 0)
+        *DstPtr++ = *SrcPtr++;
 }
+
+static void UpdateDisassemblyStrings(DisassemblyWindow *DisasmWindow, u32 PC, const u8 *Mem, int MemSizeBytes)
+{
+    u32 PhysBaseAddr = TranslateAddr(DisasmWindow->BaseAddrOnScreen);
+
+    int DisasmSizeLeft = sizeof DisasmWindow->Mnemonic, 
+        AddrSizeLeft = sizeof DisasmWindow->Addresses,
+        InsHexCodeSizeLeft = sizeof DisasmWindow->InsHexCode;
+    char *DisasmBuffer = DisasmWindow->Mnemonic,
+         *AddrBuffer = DisasmWindow->Addresses,
+         *InsHexCodeBuffer = DisasmWindow->InsHexCode;
+    for (int i = 0; i < DisasmWindow->LineCount; i++)
+    {
+        u32 Instruction = 0;
+        int MnemonicLen = 0;
+        int AddrLen = 0;
+        int InsHexCodeLen = 0;
+
+        u32 CurrentPhysAddr = PhysBaseAddr + i*sizeof(Instruction);
+        u32 CurrentVirtAddr = DisasmWindow->BaseAddrOnScreen + i*sizeof(Instruction);
+        if (!AccessOutOfRange(CurrentPhysAddr, MemSizeBytes, sizeof(Instruction)))
+        {
+            MemCpy(&Instruction, Mem + CurrentPhysAddr, sizeof(Instruction));
+
+            /* update disassembly window */
+            if (DisasmSizeLeft > 0)
+            {
+                MnemonicLen = R3000A_Disasm(
+                    Instruction, 
+                    CurrentVirtAddr,
+                    0, 
+                    DisasmBuffer, 
+                    DisasmSizeLeft
+                );
+
+                if (DisasmSizeLeft > 1)
+                {
+                    DisasmBuffer[MnemonicLen + 0] = '\n';
+                    DisasmBuffer[MnemonicLen + 1] = '\0';
+                    MnemonicLen += 1;
+                }
+            }
+        }
+        else
+        {
+            if (DisasmSizeLeft > 0)
+            {
+                MnemonicLen = sizeof "???\n" - 1;
+                MemCpy(DisasmBuffer, "???\n", MnemonicLen + 1);
+            }
+        }
+
+        if (AddrSizeLeft > 0)
+        {
+            AddrLen = snprintf(
+                AddrBuffer, AddrSizeLeft, 
+                "%08x:\n", 
+                PC + i*(int)sizeof(Instruction)
+            );
+        }
+        if (InsHexCodeSizeLeft > 0)
+        {
+            InsHexCodeLen = snprintf(
+                InsHexCodeBuffer, InsHexCodeSizeLeft, 
+                "%08x\n", Instruction
+            );
+        }
+
+        DisasmBuffer += MnemonicLen;
+        DisasmSizeLeft -= MnemonicLen;
+        InsHexCodeBuffer += InsHexCodeLen;
+        InsHexCodeSizeLeft -= InsHexCodeLen;
+        AddrBuffer += AddrLen;
+        AddrSizeLeft -= AddrLen;
+    }
+}
+
+static void UpdateDisassemblyWindow(DisassemblyWindow *DisasmWindow, u32 PC, const u8 *Mem, int MemSizeBytes, Bool8 AlwaysUpdateString)
+{
+    u32 BaseAddr = DisasmWindow->BaseAddrOnScreen;
+    /* PC is out of screen */
+    if (!IN_RANGE(BaseAddr, PC, BaseAddr + (DisasmWindow->LineCount - 1)*sizeof(u32)))
+    {
+        /* this current PC will be the base addr */
+        DisasmWindow->BaseAddrOnScreen = PC;
+        UpdateDisassemblyStrings(DisasmWindow, PC, Mem, MemSizeBytes);
+    }
+    else if (AlwaysUpdateString)
+    {
+        UpdateDisassemblyStrings(DisasmWindow, PC, Mem, MemSizeBytes);
+    }
+
+    DisasmWindow->PCYPos = (PC - BaseAddr) / sizeof(u32) * (int)DisasmWindow->LineHeight;
+}
+
+static void DrawDisassemblyWindow(const DisassemblyWindow *DisasmWindow, Bool8 HighlightPC)
+{
+    /* draw the window itself */
+    DrawRectangle(DisasmWindow->x, DisasmWindow->y, DisasmWindow->Width, DisasmWindow->Height, DisasmWindow->BgColor);
+
+    Vector2 Pos = {
+        .x = DisasmWindow->x, 
+        .y = DisasmWindow->y,
+    };
+
+    /* highlight the line that the pc points to */
+    if (HighlightPC && IN_RANGE(0, DisasmWindow->PCYPos, DisasmWindow->Height))
+    {
+        DrawRectangle(DisasmWindow->x, DisasmWindow->PCYPos, DisasmWindow->Width, DisasmWindow->FontSize, DisasmWindow->PCHighlightColor);
+    }
+
+    /* draw addresses */
+    Vector2 AddrPos = Pos;
+    AddrPos.x += DisasmWindow->AddressXOffset;
+    DrawTextEx(
+        DisasmWindow->Fnt, 
+        DisasmWindow->Addresses, 
+        AddrPos,
+        DisasmWindow->FontSize, 
+        DisasmWindow->TextSpacing, 
+        DisasmWindow->TextColor
+    );
+
+    /* draw hex codes */
+    Vector2 HexCodePos = Pos;
+    HexCodePos.x += DisasmWindow->HexCodeXOffset;
+    DrawTextEx(
+        DisasmWindow->Fnt,
+        DisasmWindow->InsHexCode, 
+        HexCodePos, 
+        DisasmWindow->FontSize, 
+        DisasmWindow->TextSpacing, 
+        DisasmWindow->TextColor
+    );
+
+    /* draw instruction mnemonics */
+    Vector2 MnemonicPos = Pos;
+    MnemonicPos.x += DisasmWindow->MnemonicXOffset;
+    DrawTextEx(
+        DisasmWindow->Fnt,
+        DisasmWindow->Mnemonic, 
+        MnemonicPos,
+        DisasmWindow->FontSize, 
+        DisasmWindow->TextSpacing, 
+        DisasmWindow->TextColor
+    );
+}
+
+
 
 int main(void)
 {
+#define ARGB(a_, r_, g_, b_) (Color) {.a = a_, .r = r_, .g = g_, .b = b_}
     int Width = 1080;
     int Height = 720;
-    Color BgColor = {.r = 0x80, .g = 0x80, .b = 0x80};
+    Color BgColor = ARGB(0, 0x80, 0x80, 0x80);
+
     InitWindow(Width, Height, "R3000");
     SetTargetFPS(60);
+
+    Font DefaultFont = LoadFont("resources/CascadiaMono.ttf");
+    DisassemblyWindow DisasmWindow = {
+        .Fnt = DefaultFont,
+        .TextSpacing = 1,
+        .FontSize = 16, 
+        .LineHeight = 15,
+        .TextColor = BLACK,
+        .BgColor = ARGB(0xFF, 0x50, 0x50, 0x50),
+        .PCHighlightColor = ARGB(0xFF, 0xA0, 0xA0, 0),
+
+        .LineCount = 40, 
+        .AddressXOffset = 0,
+        .HexCodeXOffset = 100,
+        .MnemonicXOffset = 200,
+
+        .x = 0, 
+        .y = 0, 
+        .Width = Width/2,
+        .Height = Height,
+    };
 
     TestOS OS = {
         0
     };
     R3000A Mips = R3000A_Init(&OS, DbgReadFn, DbgWriteFn, DbgVerifyAddrFn, DbgVerifyAddrFn);
 
-    char DisasmBuffer[4096];
-    Bool8 DisasmBufferNeedsRefresh = true;
+    Bool8 ForceUpdateDisassembly = false;
     while (!WindowShouldClose())
     {
         if (IsFileDropped())
@@ -1243,25 +1450,29 @@ int main(void)
             FilePathList List = LoadDroppedFiles();
             OS.MemPtr = LoadFileData(List.paths[0], &OS.MemSizeBytes);
             UnloadDroppedFiles(List);
-
-            DisasmBufferNeedsRefresh = true;
+            ForceUpdateDisassembly = true;
         }
         Handle_Input(&Mips);
-
-        if (DisasmBufferNeedsRefresh)
-        {
-            DisasmAt(Mips.PC, 10, OS.MemPtr, OS.MemSizeBytes, DisasmBuffer, sizeof DisasmBuffer);
-        }
+        UpdateDisassemblyWindow(&DisasmWindow, Mips.PC, OS.MemPtr, OS.MemSizeBytes, ForceUpdateDisassembly);
+        ForceUpdateDisassembly = false;
 
         BeginDrawing();
             ClearBackground(BgColor);
+            DrawDisassemblyWindow(&DisasmWindow, true);
+            Vector2 PCPos = {
+                .x = DisasmWindow.Width + DisasmWindow.x,
+                .y = 0,
+            };
+            DrawTextEx(DefaultFont, TextFormat("%08x", Mips.PC), PCPos, DisasmWindow.FontSize, DisasmWindow.TextSpacing, BLACK);
         EndDrawing();
     }
 
     if (OS.MemPtr)
         UnloadFileData(OS.MemPtr);
+    UnloadFont(DefaultFont);
     CloseWindow();
     return 0;
+#undef ARGB
 }
 
 #else
