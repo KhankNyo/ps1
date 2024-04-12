@@ -36,6 +36,7 @@ cont
 - `bra Label`: branch always
 - `bez $reg, Label`: branch if $reg == 0
 - `bnz $reg, Label`: branch if $reg != 0
+- `ret`: return from subroutine (jr $ra)
 - `nop`: no operation (literally does nothing but take up 4 bytes)
 ### Supported directives:
 - `.db byte0, byte1, ...`: places a byte, bytes, or a string at the current location
