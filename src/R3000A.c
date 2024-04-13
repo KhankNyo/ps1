@@ -1128,6 +1128,12 @@ typedef struct DisassemblyWindow
     Color BgColor, TextColor, PCHighlightColor;
 } DisassemblyWindow;
 
+typedef struct InputBuffer 
+{
+    Bool8 KeySpaceWasDown;
+    float KeySpaceDownTime;
+} InputBuffer;
+
 static u32 TranslateAddr(u32 LogicalAddr)
 {
     switch (LogicalAddr)
@@ -1228,21 +1234,22 @@ static Bool8 DbgVerifyAddrFn(void *UserData, u32 Addr)
 }
 
 
-static void Handle_Input(R3000A *Mips)
+static void HandleInput(InputBuffer *Input, R3000A *Mips)
 {
-    static float KeyDownElapsed = 0;
-    if (IsKeyDown(KEY_SPACE))
+    if ((IsKeyUp(KEY_SPACE) && Input->KeySpaceWasDown == true) 
+    || Input->KeySpaceDownTime > .5)
     {
-        KeyDownElapsed += GetFrameTime();
+        R3000A_StepClock(Mips);
+    }
+
+    Input->KeySpaceWasDown = IsKeyDown(KEY_SPACE);
+    if (Input->KeySpaceWasDown)
+    {
+        Input->KeySpaceDownTime += GetFrameTime();
     }
     else
     {
-        KeyDownElapsed = 0;
-    }
-
-    if (KEY_SPACE == GetKeyPressed() || KeyDownElapsed > .5)
-    {
-        R3000A_StepClock(Mips);
+        Input->KeySpaceDownTime = 0;
     }
 }
 
@@ -1338,6 +1345,7 @@ static void UpdateDisassemblyWindow(DisassemblyWindow *DisasmWindow, u32 PC, con
     {
         /* this current PC will be the base addr */
         DisasmWindow->BaseAddrOnScreen = PC;
+        BaseAddr = PC;
         UpdateDisassemblyStrings(DisasmWindow, PC, Mem, MemSizeBytes);
     }
     else if (AlwaysUpdateString)
@@ -1359,7 +1367,7 @@ static void DrawDisassemblyWindow(const DisassemblyWindow *DisasmWindow, Bool8 H
     };
 
     /* highlight the line that the pc points to */
-    if (HighlightPC && IN_RANGE(0, DisasmWindow->PCYPos, DisasmWindow->Height))
+    if (HighlightPC && IN_RANGE(0, DisasmWindow->PCYPos, DisasmWindow->Height - DisasmWindow->LineHeight))
     {
         DrawRectangle(DisasmWindow->x, DisasmWindow->PCYPos, DisasmWindow->Width, DisasmWindow->FontSize, DisasmWindow->PCHighlightColor);
     }
@@ -1439,7 +1447,10 @@ int main(void)
     };
     R3000A Mips = R3000A_Init(&OS, DbgReadFn, DbgWriteFn, DbgVerifyAddrFn, DbgVerifyAddrFn);
 
+    InputBuffer Input = { 0 };
+
     Bool8 ForceUpdateDisassembly = false;
+    u64 i = 0;
     while (!WindowShouldClose())
     {
         if (IsFileDropped())
@@ -1452,9 +1463,10 @@ int main(void)
             UnloadDroppedFiles(List);
             ForceUpdateDisassembly = true;
         }
-        Handle_Input(&Mips);
+        HandleInput(&Input, &Mips);
         UpdateDisassemblyWindow(&DisasmWindow, Mips.PC, OS.MemPtr, OS.MemSizeBytes, ForceUpdateDisassembly);
         ForceUpdateDisassembly = false;
+        printf("looping: %llu; time: %f\n", i++, Input.KeySpaceDownTime);
 
         BeginDrawing();
             ClearBackground(BgColor);
