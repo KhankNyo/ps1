@@ -1143,6 +1143,7 @@ typedef struct CPUStateWindow
     Color BgColor;
 } CPUStateWindow;
 
+
 typedef struct InputBuffer 
 {
     Bool8 KeySpaceWasDown;
@@ -1506,10 +1507,12 @@ static void DrawCPUState(const CPUStateWindow *Window)
     uint BaseY = Window->y;
     uint OffsetX = LeftSpace;
     uint OffsetY = 0;
+    uint x = BaseX;
+    uint y = BaseY;
     for (uint i = 0; i < STATIC_ARRAY_SIZE(CPU->R); i++)
     {
-        uint x = OffsetX + BaseX;
-        uint y = OffsetY + BaseY;
+        x = OffsetX + BaseX;
+        y = OffsetY + BaseY;
         if ((i + 1) % RegisterPerLine == 0)
         {
             OffsetX = LeftSpace;
@@ -1541,6 +1544,9 @@ static void DrawCPUState(const CPUStateWindow *Window)
             STRBOX_ALIGN_CENTER
         );
     }
+
+    x = OffsetX + BaseX;
+    y = OffsetY + BaseY;
 }
 
 
@@ -1619,6 +1625,7 @@ int main(void)
             Height = GetScreenHeight();
             ResizeDisasmWindow(&DisasmWindow, 0, 0, Width/2, Height);
             ResizeCPUStateWindow(&CPUState, Width/2, 0, Width/2, Height);
+            ForceUpdateDisassembly = true;
         }
         HandleInput(&Input, &Mips);
         UpdateDisassemblyWindow(&DisasmWindow, Mips.PC, OS.MemPtr, OS.MemSizeBytes, ForceUpdateDisassembly);
