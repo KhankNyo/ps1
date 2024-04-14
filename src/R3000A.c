@@ -1075,14 +1075,14 @@ void R3000A_StepClock(R3000A *This)
 #ifdef STANDALONE
 #undef STANDALONE
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <inttypes.h>
 
 #include "raylib.h"
 
 #include "CP0.c"
 #include "Disassembler.c"
 
+#define ARGB(a_, r_, g_, b_) (Color) {.a = a_, .r = r_, .g = g_, .b = b_}
 
 typedef enum TestSyscall 
 {
@@ -1108,31 +1108,45 @@ typedef struct TestOS
 
 #if 1
 
+typedef struct TextAttribute
+{
+    float Size, Spacing;
+    Font *Fnt;
+    Color Colour;
+} TextAttribute;
+
 typedef struct DisassemblyWindow 
 {
     u32 BaseAddrOnScreen;
     int PCYPos;
     int x, y, Width, Height;
     int LineCount;
-    int LineHeight;
 
     char Mnemonic[2048];
     char Addresses[1024];
     char InsHexCode[1024];
-    float BreakpointLineWidth; 
-    float AddressXOffset;       /* relative from x + BreakpointLineWidth */
+    float AddressXOffset;       /* relative from x + Text.Size */
     float HexCodeXOffset;       /* relative form x + AddressXOffset */
     float MnemonicXOffset;      /* relative from x + HexCodeXOffset */
 
-    Font Fnt;
-    float FontSize, TextSpacing;
-    Color BgColor, TextColor, 
-          PCHighlightColor, BreakpointLineColor;
+    TextAttribute Text;
+    Color BgColor;
+    Color PCHighlightColor;
+    Color BreakpointLineColor;
 } DisassemblyWindow;
+
+typedef struct CPUStateWindow 
+{
+    R3000A *CPU;
+    int x, y, Width, Height;
+    TextAttribute Text;
+    Color BgColor;
+} CPUStateWindow;
 
 typedef struct InputBuffer 
 {
     Bool8 KeySpaceWasDown;
+    Bool8 Run;
     float KeySpaceDownTime;
 } InputBuffer;
 
@@ -1240,11 +1254,8 @@ static Bool8 DbgVerifyAddrFn(void *UserData, u32 Addr)
 
 static void HandleInput(InputBuffer *Input, R3000A *Mips)
 {
-    if ((IsKeyUp(KEY_SPACE) && Input->KeySpaceWasDown == true) 
-    || Input->KeySpaceDownTime > .5)
-    {
-        R3000A_StepClock(Mips);
-    }
+    Bool8 ShouldStepClock = 
+        Input->Run || ((IsKeyUp(KEY_SPACE) && Input->KeySpaceWasDown == true) || Input->KeySpaceDownTime > .5);
 
     Input->KeySpaceWasDown = IsKeyDown(KEY_SPACE);
     if (Input->KeySpaceWasDown)
@@ -1255,6 +1266,14 @@ static void HandleInput(InputBuffer *Input, R3000A *Mips)
     {
         Input->KeySpaceDownTime = 0;
     }
+    if (GetKeyPressed() == KEY_ENTER)
+    {
+        Input->Run = !Input->Run;
+    }
+
+
+    if (ShouldStepClock)
+        R3000A_StepClock(Mips);
 }
 
 static void MemCpy(void *Dst, const void *Src, size_t SizeBytes)
@@ -1341,7 +1360,13 @@ static void UpdateDisassemblyStrings(DisassemblyWindow *DisasmWindow, u32 PC, co
     }
 }
 
-static void UpdateDisassemblyWindow(DisassemblyWindow *DisasmWindow, u32 PC, const u8 *Mem, int MemSizeBytes, Bool8 AlwaysUpdateString)
+static void UpdateDisassemblyWindow(
+    DisassemblyWindow *DisasmWindow, 
+    u32 PC, 
+    const u8 *Mem, 
+    int MemSizeBytes, 
+    Bool8 AlwaysUpdateString
+)
 {
     u32 BaseAddr = DisasmWindow->BaseAddrOnScreen;
     /* PC is out of screen */
@@ -1357,88 +1382,198 @@ static void UpdateDisassemblyWindow(DisassemblyWindow *DisasmWindow, u32 PC, con
         UpdateDisassemblyStrings(DisasmWindow, PC, Mem, MemSizeBytes);
     }
 
-    DisasmWindow->PCYPos = (PC - BaseAddr) / sizeof(u32) * (int)DisasmWindow->LineHeight;
+    DisasmWindow->PCYPos = (PC - BaseAddr) / sizeof(u32) * (int)DisasmWindow->Text.Size;
+}
+
+static void ResizeDisasmWindow(DisassemblyWindow *DisasmWindow, int x, int y, int w, int h)
+{
+    DisasmWindow->x = x;
+    DisasmWindow->y = y;
+    DisasmWindow->Width = w;
+    DisasmWindow->Height = h;
+    DisasmWindow->LineCount = h / DisasmWindow->Text.Size;
+}
+
+static void ResizeCPUStateWindow(CPUStateWindow *Window, int x, int y, int w, int h)
+{
+    Window->x = x;
+    Window->y = y;
+    Window->Width = w;
+    Window->Height = h;
+}
+
+
+static void DrawStr(TextAttribute TextAttr, int x, int y, const char *Str)
+{
+    Vector2 Pos = {.x = x, .y = y};
+    DrawTextEx(*TextAttr.Fnt, Str, Pos, TextAttr.Size, TextAttr.Spacing, TextAttr.Colour);
+}
+
+typedef enum StrBoxAlignType 
+{
+    STRBOX_ALIGN_CENTER = 0, 
+    STRBOX_ALIGN_LEFT, 
+    STRBOX_ALIGN_RIGHT,
+} StrBoxAlignType;
+static void DrawStrBox(
+    int x, int y, int w, int h, 
+    Color BoxColor, 
+    TextAttribute TextAttr, 
+    const char *Str, 
+    StrBoxAlignType StrAlign)
+{
+    int Align = 0;
+    switch (StrAlign)
+    {
+    case STRBOX_ALIGN_LEFT: 
+    {
+        Align = 0;
+    } break;
+    case STRBOX_ALIGN_RIGHT:
+    {
+        int TextLenPixel = MeasureText(Str, TextAttr.Size);
+        Align = w - TextLenPixel;
+    } break;
+    case STRBOX_ALIGN_CENTER:
+    {
+        int TextLenPixel = MeasureText(Str, TextAttr.Size);
+        Align = (w - TextLenPixel)/2;
+    } break;
+    }
+    DrawRectangle(x, y, w, h, BoxColor);
+    DrawStr(TextAttr, x + Align, y, Str);
 }
 
 static void DrawDisassemblyWindow(const DisassemblyWindow *DisasmWindow, Bool8 HighlightPC)
 {
+    ASSERT(NULL != DisasmWindow->Text.Fnt);
+    SetTextLineSpacing(DisasmWindow->Text.Size);
+
     /* draw the window itself */
-    DrawRectangle(DisasmWindow->x, DisasmWindow->y, DisasmWindow->Width, DisasmWindow->Height, DisasmWindow->BgColor);
+    DrawRectangle(
+        DisasmWindow->x, DisasmWindow->y, DisasmWindow->Width, DisasmWindow->Height, DisasmWindow->BgColor
+    );
 
     /* draw breakpoint line */
-    DrawRectangle(DisasmWindow->x, DisasmWindow->y, DisasmWindow->BreakpointLineWidth, DisasmWindow->Height, DisasmWindow->BreakpointLineColor);
+    DrawRectangle(
+        DisasmWindow->x, DisasmWindow->y, DisasmWindow->Text.Size, DisasmWindow->Height, DisasmWindow->BreakpointLineColor
+    );
 
 
     /* highlight the line that the pc points to */
-    if (HighlightPC && IN_RANGE(0, DisasmWindow->PCYPos, DisasmWindow->Height - DisasmWindow->LineHeight))
+    if (HighlightPC && IN_RANGE(0, DisasmWindow->PCYPos, DisasmWindow->Height - DisasmWindow->Text.Size))
     {
-        DrawRectangle(DisasmWindow->x, DisasmWindow->PCYPos, DisasmWindow->Width, DisasmWindow->FontSize, DisasmWindow->PCHighlightColor);
+        DrawRectangle(
+            DisasmWindow->x, DisasmWindow->PCYPos, DisasmWindow->Width, DisasmWindow->Text.Size, DisasmWindow->PCHighlightColor
+        );
     }
 
-    Vector2 Pos = {
-        .x = DisasmWindow->x + DisasmWindow->BreakpointLineWidth, 
-        .y = DisasmWindow->y,
-    };
+
+    int x = DisasmWindow->x + DisasmWindow->Text.Size;
+    int y = DisasmWindow->y;
     /* draw addresses */
-    Pos.x += DisasmWindow->AddressXOffset;
-    DrawTextEx(
-        DisasmWindow->Fnt, 
-        DisasmWindow->Addresses, 
-        Pos,
-        DisasmWindow->FontSize, 
-        DisasmWindow->TextSpacing, 
-        DisasmWindow->TextColor
-    );
+    x += DisasmWindow->AddressXOffset;
+    DrawStr(DisasmWindow->Text, x, y, DisasmWindow->Addresses);
 
     /* draw hex codes */
-    Pos.x += DisasmWindow->HexCodeXOffset;
-    DrawTextEx(
-        DisasmWindow->Fnt,
-        DisasmWindow->InsHexCode, 
-        Pos,
-        DisasmWindow->FontSize, 
-        DisasmWindow->TextSpacing, 
-        DisasmWindow->TextColor
-    );
+    x += DisasmWindow->HexCodeXOffset;
+    DrawStr(DisasmWindow->Text, x, y, DisasmWindow->InsHexCode);
 
     /* draw instruction mnemonics */
-    Pos.x += DisasmWindow->MnemonicXOffset;
-    DrawTextEx(
-        DisasmWindow->Fnt,
-        DisasmWindow->Mnemonic, 
-        Pos,
-        DisasmWindow->FontSize, 
-        DisasmWindow->TextSpacing, 
-        DisasmWindow->TextColor
-    );
+    x += DisasmWindow->MnemonicXOffset;
+    DrawStr(DisasmWindow->Text, x, y, DisasmWindow->Mnemonic);
 }
 
+
+static void DrawCPUState(const CPUStateWindow *Window)
+{
+    const R3000A *CPU = Window->CPU;
+    ASSERT(NULL != Window->Text.Fnt);
+    ASSERT(NULL != CPU);
+
+    SetTextLineSpacing(Window->Text.Size);
+
+    /* draw registers */
+    Bool8 DisplayHex = true;
+    uint LeftSpace = 0.1 * Window->Width;
+    uint RightSpace = 0.1 * Window->Width;
+    uint RegisterPerLine = 4;
+    uint SpaceBetweenRegisterBox = 10;
+    uint RegisterBoxWidth = (-LeftSpace + Window->Width - RightSpace) / RegisterPerLine - SpaceBetweenRegisterBox;
+    uint RegisterBoxHeight = 2*(Window->Text.Size + 0.1 * Window->Text.Size);
+
+    uint BaseX = Window->x;
+    uint BaseY = Window->y;
+    uint OffsetX = LeftSpace;
+    uint OffsetY = 0;
+    for (uint i = 0; i < STATIC_ARRAY_SIZE(CPU->R); i++)
+    {
+        uint x = OffsetX + BaseX;
+        uint y = OffsetY + BaseY;
+        if ((i + 1) % RegisterPerLine == 0)
+        {
+            OffsetX = LeftSpace;
+            OffsetY += RegisterBoxHeight + SpaceBetweenRegisterBox;
+        }
+        else
+        {
+            OffsetX += RegisterBoxWidth + SpaceBetweenRegisterBox;
+        }
+
+        /* draw register name */
+        DrawStrBox(
+            x, y, RegisterBoxWidth, RegisterBoxHeight/2, 
+            ARGB(0x80, 0, 0, 0), 
+            Window->Text, 
+            TextFormat("R%d", i),
+            STRBOX_ALIGN_CENTER
+        );
+
+        /* draw register content */
+        const char *FmtStr = DisplayHex? 
+            "%08"PRIx32 
+            : "%"PRIi32;
+        DrawStrBox(
+            x, y + RegisterBoxHeight/2, RegisterBoxWidth, RegisterBoxHeight/2,
+            ARGB(0xC0, 0, 0, 0), 
+            Window->Text,
+            TextFormat(FmtStr, CPU->R[i]),
+            STRBOX_ALIGN_CENTER
+        );
+    }
+}
 
 
 int main(void)
 {
-#define ARGB(a_, r_, g_, b_) (Color) {.a = a_, .r = r_, .g = g_, .b = b_}
     int Width = 1080;
     int Height = 720;
     Color BgColor = ARGB(0, 0x80, 0x80, 0x80);
+    TestOS OS = {
+        0
+    };
+    R3000A Mips = R3000A_Init(&OS, DbgReadFn, DbgWriteFn, DbgVerifyAddrFn, DbgVerifyAddrFn);
+
 
     InitWindow(Width, Height, "R3000");
+    SetWindowState(FLAG_WINDOW_RESIZABLE);
     SetTargetFPS(60);
 
     Font DefaultFont = LoadFont("resources/CascadiaMono.ttf");
     DisassemblyWindow DisasmWindow = {
-        .Fnt = DefaultFont,
-        .TextSpacing = 1,
-        .FontSize = 16, 
-        .LineHeight = 15,
-        .TextColor = BLACK,
+        .Text = {
+            .Fnt = &DefaultFont,
+            .Spacing = 1,
+            .Size = 16, 
+            .Colour = RAYWHITE,
+        },
+
         .BgColor = ARGB(0xFF, 0x50, 0x50, 0x50),
-        .PCHighlightColor = ARGB(0xFF, 0xA0, 0xA0, 0),
+        .PCHighlightColor = ARGB(0x80, 0xA0, 0xA0, 0),
         .BreakpointLineColor = GRAY,
 
-        .LineCount = 40, 
-        .BreakpointLineWidth = 10,
-        .AddressXOffset = 0,
+        .LineCount = Height / 16, 
+        .AddressXOffset = 10,
         .HexCodeXOffset = 100,
         .MnemonicXOffset = 100,
 
@@ -1448,10 +1583,20 @@ int main(void)
         .Height = Height,
     };
 
-    TestOS OS = {
-        0
+    CPUStateWindow CPUState = {
+        .Text = {
+            .Fnt = &DefaultFont,
+            .Spacing = 1,
+            .Size = 16,
+            .Colour = WHITE,
+        },
+        .CPU = &Mips,
+
+        .x = DisasmWindow.Width,
+        .y = 0,
+        .Width = Width - DisasmWindow.Width,
+        .Height = Height,
     };
-    R3000A Mips = R3000A_Init(&OS, DbgReadFn, DbgWriteFn, DbgVerifyAddrFn, DbgVerifyAddrFn);
 
     InputBuffer Input = { 0 };
 
@@ -1468,6 +1613,13 @@ int main(void)
             UnloadDroppedFiles(List);
             ForceUpdateDisassembly = true;
         }
+        if (IsWindowResized())
+        {
+            Width = GetScreenWidth();
+            Height = GetScreenHeight();
+            ResizeDisasmWindow(&DisasmWindow, 0, 0, Width/2, Height);
+            ResizeCPUStateWindow(&CPUState, Width/2, 0, Width/2, Height);
+        }
         HandleInput(&Input, &Mips);
         UpdateDisassemblyWindow(&DisasmWindow, Mips.PC, OS.MemPtr, OS.MemSizeBytes, ForceUpdateDisassembly);
         ForceUpdateDisassembly = false;
@@ -1475,11 +1627,7 @@ int main(void)
         BeginDrawing();
             ClearBackground(BgColor);
             DrawDisassemblyWindow(&DisasmWindow, true);
-            Vector2 PCPos = {
-                .x = DisasmWindow.Width + DisasmWindow.x,
-                .y = 0,
-            };
-            DrawTextEx(DefaultFont, TextFormat("%08x", Mips.PC), PCPos, DisasmWindow.FontSize, DisasmWindow.TextSpacing, BLACK);
+            DrawCPUState(&CPUState);
         EndDrawing();
     }
 
@@ -1488,7 +1636,6 @@ int main(void)
     UnloadFont(DefaultFont);
     CloseWindow();
     return 0;
-#undef ARGB
 }
 
 #else
