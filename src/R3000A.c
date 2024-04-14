@@ -1117,15 +1117,17 @@ typedef struct DisassemblyWindow
     int LineHeight;
 
     char Mnemonic[2048];
-    float MnemonicXOffset;
     char Addresses[1024];
-    float AddressXOffset;
     char InsHexCode[1024];
-    float HexCodeXOffset;
+    float BreakpointLineWidth; 
+    float AddressXOffset;       /* relative from x + BreakpointLineWidth */
+    float HexCodeXOffset;       /* relative form x + AddressXOffset */
+    float MnemonicXOffset;      /* relative from x + HexCodeXOffset */
 
     Font Fnt;
     float FontSize, TextSpacing;
-    Color BgColor, TextColor, PCHighlightColor;
+    Color BgColor, TextColor, 
+          PCHighlightColor, BreakpointLineColor;
 } DisassemblyWindow;
 
 typedef struct InputBuffer 
@@ -1163,8 +1165,9 @@ static void QueueMessage(MessageQueue *MsgQ, const char *Str, ...)
     va_list Args;
     va_start(Args, Str);
     snprintf(MsgQ->Buf[MsgQ->Count], sizeof MsgQ->Buf[0], Str, Args);
-    MsgQ->Count = (MsgQ->Count + 1) % STATIC_ARRAY_SIZE(MsgQ->Buf);
     va_end(Args);
+
+    MsgQ->Count = (MsgQ->Count + 1) % STATIC_ARRAY_SIZE(MsgQ->Buf);
 }
 
 
@@ -1220,7 +1223,8 @@ static void DbgWriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size)
             {
                 StrLen++;
             }
-            QueueMessage(&OS->Terminal, "%*.s", StrLen, OS->MemPtr[PhysAddr]);
+            const char *String = (const char *)&OS->MemPtr[PhysAddr];
+            QueueMessage(&OS->Terminal, "%.*s", StrLen, String);
             return;
         }
     }
@@ -1361,10 +1365,9 @@ static void DrawDisassemblyWindow(const DisassemblyWindow *DisasmWindow, Bool8 H
     /* draw the window itself */
     DrawRectangle(DisasmWindow->x, DisasmWindow->y, DisasmWindow->Width, DisasmWindow->Height, DisasmWindow->BgColor);
 
-    Vector2 Pos = {
-        .x = DisasmWindow->x, 
-        .y = DisasmWindow->y,
-    };
+    /* draw breakpoint line */
+    DrawRectangle(DisasmWindow->x, DisasmWindow->y, DisasmWindow->BreakpointLineWidth, DisasmWindow->Height, DisasmWindow->BreakpointLineColor);
+
 
     /* highlight the line that the pc points to */
     if (HighlightPC && IN_RANGE(0, DisasmWindow->PCYPos, DisasmWindow->Height - DisasmWindow->LineHeight))
@@ -1372,37 +1375,38 @@ static void DrawDisassemblyWindow(const DisassemblyWindow *DisasmWindow, Bool8 H
         DrawRectangle(DisasmWindow->x, DisasmWindow->PCYPos, DisasmWindow->Width, DisasmWindow->FontSize, DisasmWindow->PCHighlightColor);
     }
 
+    Vector2 Pos = {
+        .x = DisasmWindow->x + DisasmWindow->BreakpointLineWidth, 
+        .y = DisasmWindow->y,
+    };
     /* draw addresses */
-    Vector2 AddrPos = Pos;
-    AddrPos.x += DisasmWindow->AddressXOffset;
+    Pos.x += DisasmWindow->AddressXOffset;
     DrawTextEx(
         DisasmWindow->Fnt, 
         DisasmWindow->Addresses, 
-        AddrPos,
+        Pos,
         DisasmWindow->FontSize, 
         DisasmWindow->TextSpacing, 
         DisasmWindow->TextColor
     );
 
     /* draw hex codes */
-    Vector2 HexCodePos = Pos;
-    HexCodePos.x += DisasmWindow->HexCodeXOffset;
+    Pos.x += DisasmWindow->HexCodeXOffset;
     DrawTextEx(
         DisasmWindow->Fnt,
         DisasmWindow->InsHexCode, 
-        HexCodePos, 
+        Pos,
         DisasmWindow->FontSize, 
         DisasmWindow->TextSpacing, 
         DisasmWindow->TextColor
     );
 
     /* draw instruction mnemonics */
-    Vector2 MnemonicPos = Pos;
-    MnemonicPos.x += DisasmWindow->MnemonicXOffset;
+    Pos.x += DisasmWindow->MnemonicXOffset;
     DrawTextEx(
         DisasmWindow->Fnt,
         DisasmWindow->Mnemonic, 
-        MnemonicPos,
+        Pos,
         DisasmWindow->FontSize, 
         DisasmWindow->TextSpacing, 
         DisasmWindow->TextColor
@@ -1430,11 +1434,13 @@ int main(void)
         .TextColor = BLACK,
         .BgColor = ARGB(0xFF, 0x50, 0x50, 0x50),
         .PCHighlightColor = ARGB(0xFF, 0xA0, 0xA0, 0),
+        .BreakpointLineColor = GRAY,
 
         .LineCount = 40, 
+        .BreakpointLineWidth = 10,
         .AddressXOffset = 0,
         .HexCodeXOffset = 100,
-        .MnemonicXOffset = 200,
+        .MnemonicXOffset = 100,
 
         .x = 0, 
         .y = 0, 
@@ -1450,7 +1456,6 @@ int main(void)
     InputBuffer Input = { 0 };
 
     Bool8 ForceUpdateDisassembly = false;
-    u64 i = 0;
     while (!WindowShouldClose())
     {
         if (IsFileDropped())
@@ -1466,7 +1471,6 @@ int main(void)
         HandleInput(&Input, &Mips);
         UpdateDisassemblyWindow(&DisasmWindow, Mips.PC, OS.MemPtr, OS.MemSizeBytes, ForceUpdateDisassembly);
         ForceUpdateDisassembly = false;
-        printf("looping: %llu; time: %f\n", i++, Input.KeySpaceDownTime);
 
         BeginDrawing();
             ClearBackground(BgColor);
