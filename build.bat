@@ -3,7 +3,7 @@
 REM ------------------------------------------------------------------------------------------------
 REM                                    Raylib compliation configs
 REM ------------------------------------------------------------------------------------------------
-set RAYLIB_SRC="%CD%\extern\raylib\src"
+set RAYLIB_SRC="%CD%\extern\raylib_multi50\src"
 
 REM MSVC specific stuff 
 set RAYLIB_MSVC_COMP=/std:c11 /Od /Zi /utf-8 /validate-charset /EHsc
@@ -69,7 +69,7 @@ if "clean"=="%1" (
         )
         pushd %BIN_DIR%
             cl /c %MSVC_COMP% %MSVC_INC% /DSTANDALONE "%SRC_DIR%\R3000A.c"
-            cl %MSVC_COMP% /FeR3000A.exe "%EXTERN_DIR%\bin\*.obj" R3000A.obj %RAYLIB_MSVC_LINK%
+            cl %MSVC_COMP% /FeR3000A.exe R3000A.obj %RAYLIB_MSVC_LINK%
 
             cl %MSVC_COMP% %MSVC_INC% %UNITY_BUILD_FILE% /Fe%APPNAME%
             cl %MSVC_COMP% %MSVC_INC% /DSTANDALONE "%SRC_DIR%\Disassembler.c" /FeDisassembler.exe
@@ -86,7 +86,7 @@ if "clean"=="%1" (
             popd
         )
         %CC% %CC_COMP% %CC_INC% -DSTANDALONE -c "%SRC_DIR%\R3000A.c" -o "%BIN_DIR%\R3000A.o"
-        %CC% "%EXTERN_DIR%\bin\*.o" "%BIN_DIR%\R3000A.o" -o "%BIN_DIR%\R3000A.exe" %RAYLIB_CC_LINK%
+        %CC% "%BIN_DIR%\R3000A.o" -o "%BIN_DIR%\R3000A.exe" %RAYLIB_CC_LINK%
 
         %CC% %CC_COMP% %CC_INC% %UNITY_BUILD_FILE% -o "%BIN_DIR%\%APPNAME%"
         %CC% %CC_COMP% %CC_INC% -DSTANDALONE "%SRC_DIR%\Disassembler.c" -o "%BIN_DIR%\Disassembler.exe"
