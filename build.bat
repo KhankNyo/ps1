@@ -34,10 +34,10 @@ set UNITY_BUILD_FILE="%SRC_DIR%\Build.c"
 set APPNAME=PS1Emu.exe
 
 set MSVC_COMP=/DDEBUG /Zi /Od
-set MSVC_INC=/I"%SRC_DIR%\Include" /I"%RAYLIB_SRC%"
+set MSVC_INC=/I"%SRC_DIR%\Include" /I"%RAYLIB_SRC%" /I"%EXTERN_DIR%\glew"
 set CC=gcc
 set CC_COMP=-O1 -DDEBUG -Wall -Wextra -Wpedantic -Wno-missing-braces
-set CC_INC=-I"%SRC_DIR%\Include" -I"%RAYLIB_SRC%"
+set CC_INC=-I"%SRC_DIR%\Include" -I"%RAYLIB_SRC%" -I"%EXTERN_DIR%\glew"
 
 
 REM ------------------------------------------------------------------------------------------------
@@ -60,35 +60,43 @@ if "clean"=="%1" (
     if "cl"=="%1" (
         if "%VisualStudioVersion%"=="" call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 
-        REM build external libraries (only raylib for now)
-        if not exist %EXTERN_DIR%\bin\ (
-            mkdir %EXTERN_DIR%\bin
-            pushd %EXTERN_DIR%\bin
-                cl /c %RAYLIB_MSVC_DEFINES% %RAYLIB_MSVC_COMP% %RAYLIB_MSVC_INC% %RAYLIB_C_FILES% 
+        REM compile external libraries (only glew for now)
+        if not exist "%EXTERN_DIR%\bin\" (
+            mkdir "%EXTERN_DIR%\bin"
+            pushd "%EXTERN_DIR%\bin"
+                cl /c %MSVC_COMP% /DGLEW_STATIC %MSVC_INC% ^
+                    "%EXTERN_DIR%\glew\glew.c"
             popd
         )
         pushd %BIN_DIR%
-            cl /c %MSVC_COMP% %MSVC_INC% /DSTANDALONE "%SRC_DIR%\R3000A.c"
-            cl %MSVC_COMP% /FeR3000A.exe R3000A.obj %RAYLIB_MSVC_LINK%
+
+            cl /c %MSVC_COMP% /DGLEW_STATIC %MSVC_INC% "%SRC_DIR%\Win32_GuiR3000A.c"
+            cl %MSVC_COMP% /DGLEW_STATIC %MSVC_INC% ^
+                /FeGuiR3000A.exe "%BIN_DIR%\Win32_GuiR3000A.obj" "%EXTERN_DIR%\bin\glew.obj" ^
+                /link gdi32.lib opengl32.lib user32.lib kernel32.lib shell32.lib
 
             cl %MSVC_COMP% %MSVC_INC% %UNITY_BUILD_FILE% /Fe%APPNAME%
+            cl %MSVC_COMP% %MSVC_INC% /DSTANDALONE "%SRC_DIR%\R3000A.c" /FeR3000A.exe
             cl %MSVC_COMP% %MSVC_INC% /DSTANDALONE "%SRC_DIR%\Disassembler.c" /FeDisassembler.exe
             cl %MSVC_COMP% %MSVC_INC% /DSTANDALONE "%SRC_DIR%\Assembler.c" /FeAssembler.exe
         popd 
 
-    ) else (
-        REM compile with other compilers
+    ) else ( REM compile with other compilers
 
-        if not exist %EXTERN_DIR%\bin\ (
-            mkdir %EXTERN_DIR%\bin
-            pushd %EXTERN_DIR%\bin
-                %CC% %RAYLIB_CC_DEFINES% %RAYLIB_CC_COMP% %RAYLIB_CC_INC% -c %RAYLIB_C_FILES%
+        REM compile external library (only glew for now)
+        if not exist "%EXTERN_DIR%\bin" (
+            mkdir "%EXTERN_DIR%\bin"
+            pushd "%EXTERN_DIR%\bin"
+                %CC% %CC_INC% -O2 -DGLEW_STATIC -Wno-attributes^
+                    -c "%EXTERN_DIR%\glew\glew.c" "%EXTERN_DIR%\bin\glew.o"
             popd
         )
-        %CC% %CC_COMP% %CC_INC% -DSTANDALONE -c "%SRC_DIR%\R3000A.c" -o "%BIN_DIR%\R3000A.o"
-        %CC% "%BIN_DIR%\R3000A.o" -o "%BIN_DIR%\R3000A.exe" %RAYLIB_CC_LINK%
+        %CC% %CC_COMP% %CC_INC% -DGLEW_STATIC ^
+            "%SRC_DIR%\Win32_GuiR3000A.c" "%EXTERN_DIR%\bin\glew.o" -o "%BIN_DIR%\GuiR3000A.exe" ^
+            -lgdi32 -lopengl32 -lshell32
 
         %CC% %CC_COMP% %CC_INC% %UNITY_BUILD_FILE% -o "%BIN_DIR%\%APPNAME%"
+        %CC% %CC_COMP% %CC_INC% -DSTANDALONE "%SRC_DIR%\R3000A.c" -o "%BIN_DIR%\R3000A.exe"
         %CC% %CC_COMP% %CC_INC% -DSTANDALONE "%SRC_DIR%\Disassembler.c" -o "%BIN_DIR%\Disassembler.exe"
         %CC% %CC_COMP% %CC_INC% -DSTANDALONE "%SRC_DIR%\Assembler.c" -o "%BIN_DIR%\Assembler.exe"
     )
