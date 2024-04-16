@@ -386,6 +386,7 @@ UnknownOpcode:
 
 
 #ifdef STANDALONE
+#undef STANDALONE
 
 #include <stdio.h>
 #include <stdlib.h>

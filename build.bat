@@ -61,8 +61,8 @@ if "clean"=="%1" (
         if "%VisualStudioVersion%"=="" call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 
         REM compile external libraries (only glew for now)
-        if not exist "%EXTERN_DIR%\bin\" (
-            mkdir "%EXTERN_DIR%\bin"
+        if not exist "%EXTERN_DIR%\bin\glew.obj" (
+            if not exist "%EXTERN_DIR%\bin" mkdir "%EXTERN_DIR%\bin"
             pushd "%EXTERN_DIR%\bin"
                 cl /c %MSVC_COMP% /DGLEW_STATIC %MSVC_INC% ^
                     "%EXTERN_DIR%\glew\glew.c"
@@ -84,8 +84,8 @@ if "clean"=="%1" (
     ) else ( REM compile with other compilers
 
         REM compile external library (only glew for now)
-        if not exist "%EXTERN_DIR%\bin" (
-            mkdir "%EXTERN_DIR%\bin"
+        if not exist "%EXTERN_DIR%\bin\glew.o" (
+            if not exist "%EXTERN_DIR%\bin" mkdir "%EXTERN_DIR%\bin"
             pushd "%EXTERN_DIR%\bin"
                 %CC% %CC_INC% -O2 -DGLEW_STATIC -Wno-attributes^
                     -c "%EXTERN_DIR%\glew\glew.c" "%EXTERN_DIR%\bin\glew.o"

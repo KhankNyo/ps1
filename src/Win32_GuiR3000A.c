@@ -1,12 +1,12 @@
 
-#include "GL/glew.h"
-#include "gl/wglew.h"
-#include <gl/GL.h>
-
 #include <windows.h>
 #include <shellapi.h>
+#include <wingdi.h>
+#include <winuser.h>
 
+#include "Common.h"
 #include "R3000A.h"
+#include "Disassembler.c"
 #include "R3000A.c"
 #include "CP0.c"
 
@@ -16,6 +16,22 @@ typedef unsigned char u8;
 typedef u8 Bool8;
 #define MAINTHREAD_CREATE_WINDOW (WM_USER + 0)
 #define MAINTHREAD_CLOSE_WINDOW (WM_USER + 1)
+#define F_RGB(r, g, b) (Win32_Colorf32){.R = r, .G = g, .B = b}
+
+#define IS_MENU_COMMAND(cmd) IN_RANGE(MAINMENU_OPEN_FILE, cmd, MAINMENU_MEMORY_WINDOW)
+typedef enum Win32_MainMenuCommand 
+{
+    MAINMENU_OPEN_FILE = 1,
+    MAINMENU_DISASM_WINDOW,
+    MAINMENU_CPUSTATE_WINDOW,
+    MAINMENU_MEMORY_WINDOW,
+} Win32_MainMenuCommand;
+
+typedef struct Win32_Colorf32
+{
+    float R, G, B;
+} Win32_Colorf32;
+
 
 typedef struct Win32_CreateWindowArgs 
 {
@@ -28,13 +44,31 @@ typedef struct Win32_CreateWindowArgs
     HMENU Menu;
 } Win32_CreateWindowArgs;
 
-typedef struct Win32_InputBuffer 
+typedef struct Win32_ClientRegion
+{
+    HDC TmpBackDC, TmpFrontDC;
+    HBITMAP TmpBitmap;
+    int x, y, w, h;
+} Win32_ClientRegion;
+
+typedef struct Win32_Window 
+{
+    int w, h;
+    HWND Handle;
+    HDC TmpDC;
+} Win32_Window;
+
+typedef struct Win32_MainWindowState 
 {
     Bool8 KeyIsDown[0x100];
     Bool8 KeyWasDown[0x100];
     unsigned char LastKey;
     char DroppedFileName[1024];
-} Win32_InputBuffer;
+
+    Win32_Window MainWindow, 
+                 DisasmWindow;
+    HMENU MainMenu;
+} Win32_MainWindowState;
 
 typedef struct Win32_DisassemblyWindow
 {
@@ -45,6 +79,13 @@ typedef struct Win32_DroppedFile
 {
     char FileName[1024];
 } Win32_DroppedFile;
+
+typedef struct DisassemblyData 
+{
+    char Addr[2048];
+    char HexCode[2048];
+    char Mnemonic[4096];
+} DisassemblyData;
 
 static DWORD Win32_MainThreadID;
 static float Win32_PerfCounterRes;
@@ -71,6 +112,121 @@ static float Win32_GetTimeMillisec(void)
     QueryPerformanceCounter(&Li);
     return Win32_PerfCounterRes * Li.QuadPart;
 }
+
+
+
+static Win32_Window Win32_CreateWindowOrDie(
+    HWND ManagerWindow, 
+    HWND Parent, 
+    const char *Title,
+    int x, int y, int w, int h,
+    const char *ClassName, 
+    WNDPROC WndProc,
+    DWORD dwExStyle, 
+    DWORD dwStyle,
+    HMENU Menu
+)
+{
+    WNDCLASSEXA WindowClass = {
+        .cbSize = sizeof WindowClass,
+        .style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
+        .lpfnWndProc = WndProc,
+        .hIcon = LoadIconA(NULL, IDI_APPLICATION),
+        .hbrBackground = GetStockObject(WHITE_BRUSH),
+        .hCursor = LoadCursorA(NULL, IDC_ARROW),
+        .lpszClassName = ClassName,
+        .hInstance = GetModuleHandleA(NULL),
+    };
+    RegisterClassExA(&WindowClass);
+
+    Win32_CreateWindowArgs Args = {
+        .x = x, 
+        .y = y, 
+        .w = w, 
+        .h = h, 
+        .Menu = Menu, 
+        .dwExStyle = dwExStyle, 
+        .dwStyle = dwStyle, 
+        .lpClassName = ClassName, 
+        .lpWindowName = Title, 
+        .ParentWindow = Parent, 
+    };
+    HWND Handle = (HWND)SendMessageA(ManagerWindow, MAINTHREAD_CREATE_WINDOW, (WPARAM)&Args, 0);
+    if (NULL == Handle)
+    {
+        Win32_Fatal("Unable to create a window");
+    }
+    Win32_Window Window = {
+        .Handle = Handle,
+        .w = w,
+        .h = h,
+    };
+    return Window;
+}
+
+static Win32_ClientRegion Win32_BeginPaint(Win32_Window *Window)
+{
+    RECT Rect;
+    GetClientRect(Window->Handle, &Rect);
+    Win32_ClientRegion ClientRegion = { 
+        .x = Rect.left, 
+        .y = Rect.bottom,
+        .w = Rect.right - Rect.left,
+        .h = Rect.bottom - Rect.top,
+    };
+
+    ClientRegion.TmpFrontDC = GetDC(Window->Handle);
+    if (NULL == ClientRegion.TmpFrontDC)
+    {
+        Win32_Fatal("Unable to retrieve device context of a window.");
+    }
+
+    ClientRegion.TmpBackDC = CreateCompatibleDC(ClientRegion.TmpFrontDC);
+    if (NULL == ClientRegion.TmpBackDC)
+        goto NoBackBuffer;
+
+    ClientRegion.TmpBitmap = CreateCompatibleBitmap(ClientRegion.TmpFrontDC, ClientRegion.w, ClientRegion.h);
+    if (NULL == ClientRegion.TmpBitmap)
+        goto NoBackBuffer;
+
+    SelectObject(ClientRegion.TmpBackDC, ClientRegion.TmpBitmap);
+    return ClientRegion;
+
+NoBackBuffer:
+    Win32_Fatal("Unable to retrieve a backbuffer.");
+    return (Win32_ClientRegion){ 0 };
+}
+
+static void Win32_EndPaint(Win32_ClientRegion *Region)
+{
+    BitBlt(
+        Region->TmpFrontDC, 
+        0, 0, Region->w, Region->h,
+        Region->TmpBackDC, 
+        0, 0, 
+        SRCCOPY
+    );
+    DeleteDC(Region->TmpBackDC);
+    DeleteDC(Region->TmpFrontDC);
+    DeleteObject(Region->TmpBitmap);
+}
+
+static void *Win32_AllocateMemory(iSize SizeBytes)
+{
+    void *Ptr = VirtualAlloc(NULL, SizeBytes, MEM_COMMIT, PAGE_READWRITE);
+    if (NULL == Ptr)
+    {
+        Win32_Fatal("Out of memory.");
+    }
+    return Ptr;
+}
+
+static void Win32_DeallocateMemory(void *Ptr)
+{
+    VirtualFree(Ptr, 0, 0);
+}
+
+
 
 static LRESULT CALLBACK Win32_ManagerWndProc(HWND Window, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
@@ -126,9 +282,15 @@ static LRESULT CALLBACK Win32_MainWndProc(HWND Window, UINT Msg, WPARAM wParam, 
         PostThreadMessageA(Win32_MainThreadID, WM_CLOSE, (WPARAM)Window, 0);
     } break;
 
-    case WM_PAINT:
     case WM_ERASEBKGND:
     {
+        Result = TRUE;
+    } break;
+    case WM_COMMAND:
+    {
+        Win32_MainMenuCommand MenuCommand = LOWORD(wParam);
+        if (IS_MENU_COMMAND(MenuCommand))
+            PostThreadMessageA(Win32_MainThreadID, WM_COMMAND, MenuCommand, (LPARAM)Window);
     } break;
 
     case WM_KEYUP:
@@ -142,7 +304,7 @@ static LRESULT CALLBACK Win32_MainWndProc(HWND Window, UINT Msg, WPARAM wParam, 
         PostThreadMessageA(Win32_MainThreadID, WM_DROPFILES, wParam, 0);
 
         HDROP Dropped = (HDROP)wParam;
-        UINT FileCount = DragQueryFileA(Dropped, -1, NULL, 0);
+        UINT FileCount = DragQueryFileA(Dropped, -1, NULL, 0); /* get file count */
         if (FileCount != 1)
         {
             Win32_MsgBox("Warning", "Multiple files recieved from drop, will only use 1.", MB_ICONWARNING);
@@ -158,10 +320,11 @@ static LRESULT CALLBACK Win32_MainWndProc(HWND Window, UINT Msg, WPARAM wParam, 
 }
 
 
-static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_InputBuffer *Input)
+
+static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *State)
 {
     MSG Msg;
-    Input->KeyWasDown[Input->LastKey] = Input->KeyIsDown[Input->LastKey];
+    State->KeyWasDown[State->LastKey] = State->KeyIsDown[State->LastKey];
     while (PeekMessageA(&Msg, 0, 0, 0, PM_REMOVE))
     {
         switch (Msg.message)
@@ -169,180 +332,167 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_InputBuffer *Input)
         case WM_CLOSE:
         case WM_QUIT:
         {
-            /* because the message we're recieving is from the message window, 
-             * we can't just send the same message back (if we do, that'll be an infinite loop), 
-             * so we send our custom messages instead */
-            SendMessageA(ManagerWindow, MAINTHREAD_CLOSE_WINDOW, Msg.wParam, 0);
-            return false;
+            HWND Window = (HWND)Msg.wParam;
+            if (Window != State->MainWindow.Handle) /* close child window, just hide it, don't actually close */
+            {
+                ShowWindow(Window, SW_HIDE);
+            }
+            else /* close main window */
+            {
+                /* because the message we're recieving is from the message window, 
+                 * we can't just send the same message back (if we do, that'll be an infinite loop), 
+                 * so we send our custom messages instead */
+                SendMessageA(ManagerWindow, MAINTHREAD_CLOSE_WINDOW, (WPARAM)Window, 0);
+                return false;
+            }
+        } break;
+        case WM_COMMAND:
+        {
+            Win32_MainMenuCommand Cmd = LOWORD(Msg.wParam);
+            printf("cmd: %d\n", Cmd);
+            switch (Cmd)
+            {
+            case MAINMENU_OPEN_FILE:
+            {
+            } break;
+            case MAINMENU_DISASM_WINDOW: 
+            {
+                ShowWindow(State->DisasmWindow.Handle, SW_SHOW); 
+            } break;
+            case MAINMENU_MEMORY_WINDOW:
+            {
+            } break;
+            case MAINMENU_CPUSTATE_WINDOW:
+            {
+            } break;
+            }
         } break;
         case WM_KEYUP:
         case WM_KEYDOWN:
         {
             unsigned char Key = Msg.wParam & 0xFF;
-            Input->KeyIsDown[Key] = Msg.message == WM_KEYDOWN;
-            Input->LastKey = Key;
+            State->KeyIsDown[Key] = Msg.message == WM_KEYDOWN;
+            State->LastKey = Key;
         } break;
         case WM_DROPFILES:
         {
             HDROP Dropped = (HDROP)Msg.wParam;
-            DragQueryFileA(Dropped, 0, Input->DroppedFileName, sizeof Input->DroppedFileName);
+            DragQueryFileA(Dropped, 0, State->DroppedFileName, sizeof State->DroppedFileName);
+            /* TODO: open the file */
         } break;
         }
     }
     return true;
 }
 
-static HGLRC Win32_CreateRenderContext(HDC DeviceContext)
+
+
+static DisassemblyData DisassembleMemory(const void *Mem, iSize SizeBytes, iSize InstructionCount, u32 VirtualPC, u32 DisasmFlags)
 {
-    PIXELFORMATDESCRIPTOR Pfd = {
-        .nSize = sizeof Pfd,
-        .nVersion = 1,
-        .dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER, 
-        .iPixelType = PFD_TYPE_RGBA, 
-        .cColorBits = 32,
-        .cAlphaBits = 8, 
-        .iLayerType = PFD_MAIN_PLANE,
-        .cDepthBits = 24,
-        .cStencilBits = 8,
-    };
-    int FormatIndex = ChoosePixelFormat(DeviceContext, &Pfd);
-    if (!FormatIndex)
+#define APPEND(ChrPtr, ChrLeft, Chr) do {\
+    if (ChrLeft > 1) {\
+        ChrPtr[0] = Chr;\
+        ChrPtr[1] = '\0';\
+        ChrLeft -= 2;\
+    } else {\
+        ChrPtr[0] = '\0';\
+    }\
+    } while (0)
+    const u8 *BytePtr = Mem;
+    DisassemblyData Disasm;
+    char *CurrIns = Disasm.Mnemonic;
+    char *CurrAddr = Disasm.Addr;
+    char *CurrHex = Disasm.HexCode;
+    int InsLenLeft = sizeof Disasm.Mnemonic;
+    int AddrLenLeft = sizeof Disasm.Addr;
+    int HexLenLeft = sizeof Disasm.HexCode;
+    for (iSize i = 0; i < InstructionCount; i++)
     {
-        Win32_Fatal("ChoosePixelFormat failed.");
-    }
-    if (!SetPixelFormat(DeviceContext, FormatIndex, &Pfd))
-    {
-        Win32_Fatal("SetPixelFormat failed.");
-    }
-
-    /* now init renderer */
-    HGLRC RenderContext = wglCreateContext(DeviceContext);
-    if (NULL == RenderContext)
-    {
-        Win32_Fatal("wglCreateContext failed.");
-    }
-    wglMakeCurrent(DeviceContext, RenderContext);
-
-    glewExperimental = GL_TRUE;
-    GLenum Err = glewInit();
-    if (Err != GLEW_OK)
-    {
-        const char *ErrMsg = (const char *)glewGetErrorString(Err);
-        Win32_Fatal(ErrMsg);
+        u32 Instruction = 0;
+        InsLenLeft -= R3000A_Disasm(Instruction, VirtualPC, DisasmFlags, CurrIns, InsLenLeft);
+        APPEND(CurrIns, InsLenLeft, '\n');
     }
 
-    /* now attempt to create a newer context */
-    static const GLint Attribs[] = {
-        WGL_CONTEXT_MAJOR_VERSION_ARB, 3, 
-        WGL_CONTEXT_MINOR_VERSION_ARB, 3, 
-        WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB,
-        0
-    };
-    HGLRC BetterRenderContext = wglCreateContextAttribsARB(DeviceContext, 0, Attribs);
-    if (NULL == BetterRenderContext || !wglMakeCurrent(DeviceContext, BetterRenderContext))
-    {
-        Win32_MsgBox("OpenGL context", "Version 3.3 unavailable, falling back to compatibility mode.", MB_OK); 
-        if (NULL != BetterRenderContext)
-            wglDeleteContext(BetterRenderContext);
-    }
-    else
-    {
-        wglDeleteContext(RenderContext);
-        return BetterRenderContext;
-    }
-    return RenderContext;
+#undef APPEND
+    return Disasm;
 }
+
 
 static DWORD Win32_Main(LPVOID UserData)
 {
     HWND ManagerWindow = UserData;
 
-    const char *MainWndClsName = "MainWndCls";
-    WNDCLASSEXA WindowClass = {
-        .cbSize = sizeof WindowClass,
-        .style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
-        .lpfnWndProc = Win32_MainWndProc,
-        .hIcon = LoadIconA(NULL, IDI_APPLICATION),
-        .hCursor = LoadCursorA(NULL, IDC_ARROW),
-        .hbrBackground = GetStockObject(WHITE_BRUSH),
-        .lpszClassName = MainWndClsName,
-        .hInstance = GetModuleHandleA(NULL),
-    };
-    RegisterClassExA(&WindowClass);
-
-    Win32_CreateWindowArgs Args = {
-        .x = CW_USEDEFAULT, 
-        .y = CW_USEDEFAULT, 
-        .w = 1080,
-        .h = 720,
-        .lpWindowName = "Main window",
-        .lpClassName = MainWndClsName, 
-        .dwExStyle = WS_EX_OVERLAPPEDWINDOW,
-        .dwStyle = WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-    };
-    /* by sending a custom create message to the manager window, 
-     * we're telling it to handle the messages of this window for us in Win32_MainWndProc, 
-     * and send anything that we care back to us (the main thread) */
-    HWND Window = (HWND)SendMessageA(ManagerWindow, MAINTHREAD_CREATE_WINDOW, (WPARAM)&Args, 0);
-    if (NULL == Window)
-    {
-        Win32_Fatal("Unable to create window.");
-    }
-    HDC DeviceContext = GetDC(Window);
-    HGLRC RenderContext = Win32_CreateRenderContext(DeviceContext);
+    Win32_MainWindowState State = { 0 };
+    State.MainMenu = CreateMenu();
+    AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_DISASM_WINDOW, "&Disassembly");
+    AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_MEMORY_WINDOW, "&Memory");
+    AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_CPUSTATE_WINDOW, "&CPU State");
+    AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_OPEN_FILE, "&Open File");
+    State.MainWindow = Win32_CreateWindowOrDie(
+        ManagerWindow, 
+        NULL,
+        "R3000A Debug Emu",
+        100, 100, 1080, 720, 
+        "MainWndCls", 
+        Win32_MainWndProc,
+        WS_EX_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN, 
+        State.MainMenu
+    );
+    State.DisasmWindow = Win32_CreateWindowOrDie(
+        ManagerWindow, 
+        State.MainWindow.Handle,
+        "Disassembly",
+        50, 50, 512, 360, 
+        "DisasmWndCls",
+        Win32_MainWndProc, 
+        WS_EX_OVERLAPPEDWINDOW, 
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CHILD,  
+        NULL
+    );
 
     LOGFONTA FontAttr = {
-        .lfWidth = 16, 
-        .lfHeight = 16,
+        .lfWidth = 10, 
+        .lfHeight = 20,
+        .lfWeight = FW_BOLD,
+        .lfCharSet = ANSI_CHARSET, 
+        .lfOutPrecision = OUT_DEFAULT_PRECIS, 
+        .lfClipPrecision = CLIP_DEFAULT_PRECIS,
+        .lfQuality = DEFAULT_QUALITY,
+        .lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE,
         .lfFaceName = "Cascadia Mono",
     };
     HFONT FontHandle = CreateFontIndirectA(&FontAttr);
 
     float ElapsedTime = 0;
     float StartTime = Win32_GetTimeMillisec();
-    Win32_InputBuffer Input = { 0 };
-    while (Win32_MainPollInputs(ManagerWindow, &Input))
+    while (Win32_MainPollInputs(ManagerWindow, &State))
     {
-        if (ElapsedTime > 1000.0 / 60.0)
+        Sleep(5);
+
+
+
+        if (ElapsedTime > 1000.0 / 100.0)
         {
-            RECT Rect;
-            GetClientRect(Window, &Rect);
-            glViewport(0, 0, Rect.right - Rect.left, Rect.bottom - Rect.top);
+            Win32_ClientRegion Region = Win32_BeginPaint(&State.MainWindow);
+            {
+                SelectObject(Region.TmpBackDC, FontHandle);
+                RECT Rect;
+                GetClientRect(State.MainWindow.Handle, &Rect);
+                FillRect(Region.TmpBackDC, &Rect, WHITE_BRUSH);
+                DrawTextA(Region.TmpBackDC, "Hello, world", -1, &Rect, DT_CENTER);
+            }
+            Win32_EndPaint(&Region);
 
-            glClearColor(.7, .7, .7, 1.0);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            glMatrixMode(GL_PROJECTION);
-            glPushMatrix();
-            glLoadIdentity();
-            glMatrixMode(GL_MODELVIEW);
-            glPushMatrix();
-            glLoadIdentity();
-
-            glBegin( GL_QUADS );
-                glColor3f(1, 0, 0);
-                glTexCoord2f(0,0);
-                glVertex2f(-1.0f, -1.0f);
-
-                glColor3f(0, 1, 0);
-                glTexCoord2f(1,0);
-                glVertex2f(1.0f, -1.0f);
-
-                glColor3f(0, 0, 1);
-                glTexCoord2f(1,1);
-                glVertex2f(1.0f, 1.0f);
-
-                glColor3f(0, 1, 0);
-                glTexCoord2f(0,1);
-                glVertex2f(-1.0f, 1.0f);
-            glEnd();
-
-            glPopMatrix();
-            glMatrixMode(GL_PROJECTION);
-            glPopMatrix();
-            glMatrixMode(GL_MODELVIEW);
-
-            SwapBuffers(DeviceContext);
+            Region = Win32_BeginPaint(&State.DisasmWindow);
+            {
+                SelectObject(Region.TmpBackDC, FontHandle);
+                RECT Rect;
+                GetClientRect(State.DisasmWindow.Handle, &Rect);
+                FillRect(Region.TmpBackDC, &Rect, WHITE_BRUSH);
+            }
+            Win32_EndPaint(&Region);
             ElapsedTime = 0;
         }
         else
