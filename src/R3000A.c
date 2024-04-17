@@ -1088,21 +1088,6 @@ typedef enum TestSyscall
     TESTSYS_EXIT        = 0x72000000,
 } TestSyscall;
 
-typedef struct MessageQueue 
-{
-    char Buf[32][256];
-    int Count;
-} MessageQueue;
-
-typedef struct TestOS 
-{
-    u8 *MemPtr;
-    int MemSizeBytes;
-    MessageQueue Log;
-    MessageQueue Terminal;
-} TestOS;
-
-
 typedef enum ScreenFlag 
 {
     SCREEN_CLEAR_ON_Y_WRAP = 1,

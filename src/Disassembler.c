@@ -330,7 +330,8 @@ int R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
         }
         else if (OpcodeMode == 2) /* CP2 */
         {
-            TODO("Disassemble CP2");
+            //TODO("Disassemble CP2");
+            return 0;
         }
         else goto UnknownOpcode;
     } break;

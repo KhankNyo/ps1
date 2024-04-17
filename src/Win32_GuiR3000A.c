@@ -16,7 +16,31 @@ typedef unsigned char u8;
 typedef u8 Bool8;
 #define MAINTHREAD_CREATE_WINDOW (WM_USER + 0)
 #define MAINTHREAD_CLOSE_WINDOW (WM_USER + 1)
-#define F_RGB(r, g, b) (Win32_Colorf32){.R = r, .G = g, .B = b}
+
+
+typedef enum TestSyscall 
+{
+    TESTSYS_WRITESTR    = 0x70000000,
+    TESTSYS_WRITEHEX    = 0x70010000,
+    TESTSYS_EXIT        = 0x72000000,
+} TestSyscall;
+
+typedef struct DisassemblyRegions 
+{
+    RECT Addr, 
+         Hex, 
+         Mnemonic;
+} DisassemblyRegions;
+
+typedef struct DisassemblyData 
+{
+    char Addr[2048];
+    char HexCode[2048];
+    char Mnemonic[4096];
+} DisassemblyData;
+
+
+
 
 #define IS_MENU_COMMAND(cmd) IN_RANGE(MAINMENU_OPEN_FILE, cmd, MAINMENU_MEMORY_WINDOW)
 typedef enum Win32_MainMenuCommand 
@@ -26,11 +50,6 @@ typedef enum Win32_MainMenuCommand
     MAINMENU_CPUSTATE_WINDOW,
     MAINMENU_MEMORY_WINDOW,
 } Win32_MainMenuCommand;
-
-typedef struct Win32_Colorf32
-{
-    float R, G, B;
-} Win32_Colorf32;
 
 
 typedef struct Win32_CreateWindowArgs 
@@ -49,6 +68,7 @@ typedef struct Win32_ClientRegion
     HDC TmpBackDC, TmpFrontDC;
     HBITMAP TmpBitmap;
     int x, y, w, h;
+    RECT Rect;
 } Win32_ClientRegion;
 
 typedef struct Win32_Window 
@@ -57,6 +77,13 @@ typedef struct Win32_Window
     HWND Handle;
     HDC TmpDC;
 } Win32_Window;
+
+typedef struct Win32_BufferData 
+{
+    u8 *Ptr;
+    iSize SizeBytes;
+} Win32_BufferData;
+typedef struct Win32_BufferData Win32_Stack;
 
 typedef struct Win32_MainWindowState 
 {
@@ -68,6 +95,13 @@ typedef struct Win32_MainWindowState
     Win32_Window MainWindow, 
                  DisasmWindow;
     HMENU MainMenu;
+
+    u32 DisasmFlags;
+    u32 DisasmInstructionPerPage;
+    u64 DisasmAddr, 
+        DisasmResetAddr, 
+        DisasmMinAddr;
+    Win32_BufferData OSMem;
 } Win32_MainWindowState;
 
 typedef struct Win32_DisassemblyWindow
@@ -75,35 +109,35 @@ typedef struct Win32_DisassemblyWindow
     Win32_CreateWindowArgs Attribute;
 } Win32_DisassemblyWindow;
 
-typedef struct Win32_DroppedFile 
-{
-    char FileName[1024];
-} Win32_DroppedFile;
-
-typedef struct DisassemblyData 
-{
-    char Addr[2048];
-    char HexCode[2048];
-    char Mnemonic[4096];
-} DisassemblyData;
 
 static DWORD Win32_MainThreadID;
 static float Win32_PerfCounterRes;
+static SYSTEM_INFO Win32_SysInfo;
+static char Win32_TmpFileName[0x10000];
 
 
-#define Win32_MsgBox(title, msg, flags) MessageBoxA(NULL, msg, title, flags)
+#define Win32_MsgBox(title, flags, ...) do {\
+    char TmpBuffer[1024];\
+    snprintf(TmpBuffer, sizeof TmpBuffer, __VA_ARGS__);\
+    MessageBoxA(NULL, TmpBuffer, title, flags);\
+} while (0)
+
 
 static void Win32_Fatal(const char *Msg)
 {
-    Win32_MsgBox("Fatal Error", Msg, MB_ICONERROR);
+    Win32_MsgBox("Fatal Error", MB_ICONERROR, "%s", Msg);
     ExitProcess(1);
 }
 
-static void Win32_InitPerfCounter(void)
+static void Win32_InitSystem(void)
 {
+    /* init perf counter */
     LARGE_INTEGER Li;
     QueryPerformanceFrequency(&Li);
     Win32_PerfCounterRes = 1000.0 / Li.QuadPart;
+
+    /* init sysinfo */
+    GetSystemInfo(&Win32_SysInfo);
 }
 
 static float Win32_GetTimeMillisec(void)
@@ -173,6 +207,7 @@ static Win32_ClientRegion Win32_BeginPaint(Win32_Window *Window)
         .y = Rect.bottom,
         .w = Rect.right - Rect.left,
         .h = Rect.bottom - Rect.top,
+        .Rect = Rect,
     };
 
     ClientRegion.TmpFrontDC = GetDC(Window->Handle);
@@ -307,7 +342,7 @@ static LRESULT CALLBACK Win32_MainWndProc(HWND Window, UINT Msg, WPARAM wParam, 
         UINT FileCount = DragQueryFileA(Dropped, -1, NULL, 0); /* get file count */
         if (FileCount != 1)
         {
-            Win32_MsgBox("Warning", "Multiple files recieved from drop, will only use 1.", MB_ICONWARNING);
+            Win32_MsgBox("Warning", MB_ICONWARNING, "%u files recieved, but only 1 will be used.", FileCount);
         }
     } break;
 
@@ -319,6 +354,128 @@ static LRESULT CALLBACK Win32_MainWndProc(HWND Window, UINT Msg, WPARAM wParam, 
     return Result;
 }
 
+static LRESULT CALLBACK Win32_DisasmWndProc(HWND Window, UINT Msg, WPARAM wParam, LPARAM lParam)
+{
+    LRESULT Result = 0;
+    switch (Msg)
+    {
+    case WM_MOUSEWHEEL:
+    case WM_VSCROLL:
+    {
+        PostThreadMessageA(Win32_MainThreadID, Msg, wParam, lParam);
+    } break;
+    default: 
+    {
+        Result = Win32_MainWndProc(Window, Msg, wParam, lParam);
+    } break;
+    }
+    return Result;
+}
+
+
+static OPENFILENAMEA Win32_CreateFileSelectionPrompt(HWND Window, char *FileNameBuffer, iSize SizeBytes, DWORD PromptFlags)
+{
+    /* get the current file name to show in the dialogue */
+    OPENFILENAMEA DialogueConfig = {
+        .lStructSize = sizeof(DialogueConfig),
+        .hwndOwner = Window,
+        .hInstance = 0, /* ignored if OFN_OPENTEMPLATEHANDLE is not set */
+        .lpstrFilter = "Text documents (*.txt)\0*.txt\0All files (*)\0*\0",
+        /* no custom filter */
+        /* no custom filter size */
+        /* this is how you get hacked */
+        .nFilterIndex = 2, /* the second pair of strings in lpstrFilter separated by the null terminator???? */
+        .lpstrFile = FileNameBuffer,
+
+        .nMaxFile = SizeBytes,
+        /* no file title, optional */
+        /* no size of the above, optional */
+        /* initial directory is current directory */
+        /* default title ('Save as' or 'Open') */
+        .Flags = PromptFlags,
+        .nFileOffset = 0,
+        .nFileExtension = 0, /* ??? */
+        /* no default extension */
+        /* no extra flags */
+    };
+    return DialogueConfig;
+}
+
+static void Win32_ReadFileSyncIntoOSMem(
+    Win32_MainWindowState *State, 
+    const char *FileName, 
+    DWORD dwCreationDisposition)
+{
+    /* open file, despite name */
+    HANDLE FileHandle = CreateFile(
+        FileName, 
+        GENERIC_READ, 
+        0, 
+        NULL, 
+        dwCreationDisposition, 
+        FILE_ATTRIBUTE_NORMAL, 
+        NULL
+    );
+    if (INVALID_HANDLE_VALUE == FileHandle)
+        goto CreateFileFailed;
+
+    LARGE_INTEGER ArchaicFileSize;
+    if (!GetFileSizeEx(FileHandle, &ArchaicFileSize))
+        goto GetFileSizeFailed;
+
+    iSize FileSize = ArchaicFileSize.QuadPart;
+    if (FileSize <= State->OSMem.SizeBytes)
+    {
+        /* reuse old buffer */
+        DWORD ReadSize;
+        if (!ReadFile(FileHandle, State->OSMem.Ptr, FileSize, &ReadSize, NULL) || ReadSize != FileSize)
+            goto ReadFileFailed;
+    }
+    else
+    {
+        /* allocate a new one */
+        /* round the file size to multiple of the memory page size */
+        iSize PageSize = Win32_SysInfo.dwAllocationGranularity;
+        iSize BufferSize = ((FileSize + PageSize) / PageSize) * PageSize;
+        void *Buffer = Win32_AllocateMemory(BufferSize);
+
+        DWORD ReadSize;
+        if (!ReadFile(FileHandle, Buffer, FileSize, &ReadSize, NULL) || ReadSize != FileSize)
+            goto ReadFileFailed;
+
+        Win32_DeallocateMemory(State->OSMem.Ptr);
+        State->OSMem.Ptr = Buffer;
+        State->OSMem.SizeBytes = BufferSize;
+    }
+    State->DisasmAddr = State->DisasmResetAddr;
+    CloseHandle(FileHandle);
+    return;
+
+
+ReadFileFailed:
+GetFileSizeFailed:
+    CloseHandle(FileHandle);
+CreateFileFailed:
+    Win32_MsgBox("Error", MB_ICONERROR, 
+        "Unable to open '%s'", FileName
+    );
+}
+
+static void Win32_DisasmSetScroll(Win32_Window *Window, u64 Pos, u64 Low, u64 High)
+{
+    if (High == Low)
+    {
+        High = Low + 256;
+    }
+    SCROLLINFO ScrollInfo = {
+        .cbSize = sizeof ScrollInfo, 
+        .fMask = SIF_RANGE | SIF_POS,
+        .nPos = Pos/4,
+        .nMax = High/4,
+        .nMin = Low/4,
+    };
+    SetScrollInfo(Window->Handle, SB_VERT, &ScrollInfo, TRUE);
+}
 
 
 static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *State)
@@ -349,11 +506,20 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
         case WM_COMMAND:
         {
             Win32_MainMenuCommand Cmd = LOWORD(Msg.wParam);
-            printf("cmd: %d\n", Cmd);
             switch (Cmd)
             {
             case MAINMENU_OPEN_FILE:
             {
+                OPENFILENAMEA Prompt = Win32_CreateFileSelectionPrompt(
+                    State->MainWindow.Handle, 
+                    Win32_TmpFileName, 
+                    sizeof Win32_TmpFileName,
+                    0
+                );
+                if (GetOpenFileNameA(&Prompt))
+                {
+                    Win32_ReadFileSyncIntoOSMem(State, Prompt.lpstrFile, OPEN_EXISTING);
+                }
             } break;
             case MAINMENU_DISASM_WINDOW: 
             {
@@ -367,6 +533,24 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
             } break;
             }
         } break;
+        case WM_DROPFILES:
+        {
+            /* get the first dropped file's name */
+            HDROP Dropped = (HDROP)Msg.wParam;
+            UINT FileNameLength = DragQueryFileA(Dropped, 0, NULL, 0);
+            if (FileNameLength < sizeof Win32_TmpFileName)
+            {
+                DragQueryFileA(Dropped, 0, Win32_TmpFileName, sizeof Win32_TmpFileName);
+            }
+            else
+            {
+                Win32_MsgBox("Error", MB_ICONERROR, 
+                    "File name too big (must be less than %zu).", sizeof Win32_TmpFileName
+                );
+            }
+
+            Win32_ReadFileSyncIntoOSMem(State, Win32_TmpFileName, OPEN_EXISTING);
+        } break;
         case WM_KEYUP:
         case WM_KEYDOWN:
         {
@@ -374,11 +558,43 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
             State->KeyIsDown[Key] = Msg.message == WM_KEYDOWN;
             State->LastKey = Key;
         } break;
-        case WM_DROPFILES:
+        case WM_MOUSEWHEEL:
         {
-            HDROP Dropped = (HDROP)Msg.wParam;
-            DragQueryFileA(Dropped, 0, State->DroppedFileName, sizeof State->DroppedFileName);
-            /* TODO: open the file */
+            float MouseDelta = GET_WHEEL_DELTA_WPARAM(Msg.wParam);
+            i32 ScrollDelta = -MouseDelta*(1.0 / WHEEL_DELTA);
+            State->DisasmAddr += ScrollDelta*4;
+            SetScrollPos(State->DisasmWindow.Handle, SB_VERT, State->DisasmAddr/4, TRUE);
+        } break;
+        case WM_VSCROLL:
+        {
+            if (SB_ENDSCROLL == Msg.wParam)
+                break;
+
+            SCROLLINFO ScrollInfo = {
+                .cbSize = sizeof ScrollInfo,
+                .fMask = SIF_POS | SIF_RANGE | SIF_TRACKPOS,
+            };
+            GetScrollInfo(State->DisasmWindow.Handle, SB_VERT, &ScrollInfo);
+
+            u32 Pos = ScrollInfo.nPos;
+            switch (LOWORD(Msg.wParam))
+            {
+            case SB_BOTTOM:     Pos = ScrollInfo.nMax; break;
+            case SB_TOP:        Pos = ScrollInfo.nMin; break;
+            case SB_LINEDOWN:   Pos = State->DisasmAddr/4 + 1; break;
+            case SB_LINEUP:     Pos = State->DisasmAddr/4 - 1; break;
+            case SB_PAGEUP:     Pos -= State->DisasmInstructionPerPage; break;
+            case SB_PAGEDOWN:   Pos += State->DisasmInstructionPerPage; break;
+            case SB_THUMBTRACK:
+            case SB_THUMBPOSITION:
+            {
+                Pos = ScrollInfo.nTrackPos;
+            } break;
+            }
+
+            ScrollInfo.nPos = Pos;
+            State->DisasmAddr = Pos*4;
+            SetScrollInfo(State->DisasmWindow.Handle, SB_VERT, &ScrollInfo, TRUE);
         } break;
         }
     }
@@ -387,17 +603,43 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
 
 
 
-static DisassemblyData DisassembleMemory(const void *Mem, iSize SizeBytes, iSize InstructionCount, u32 VirtualPC, u32 DisasmFlags)
+
+
+
+
+static void Memcpy(void *Dst, const void *Src, iSize SizeBytes)
 {
-#define APPEND(ChrPtr, ChrLeft, Chr) do {\
-    if (ChrLeft > 1) {\
-        ChrPtr[0] = Chr;\
-        ChrPtr[1] = '\0';\
-        ChrLeft -= 2;\
-    } else {\
-        ChrPtr[0] = '\0';\
-    }\
-    } while (0)
+    u8 *DstPtr = Dst;
+    const u8 *SrcPtr = Src;
+    while (SizeBytes --> 0)
+        *DstPtr++ = *SrcPtr++;
+}
+
+static u32 TranslateAddr(u32 LogicalAddr)
+{
+    switch (LogicalAddr)
+    {
+    case TESTSYS_WRITESTR:
+    case TESTSYS_WRITEHEX:
+    case TESTSYS_EXIT:
+    {
+        return LogicalAddr;
+    } break;
+    default: 
+    {
+        if (IN_RANGE(0x80000000, LogicalAddr, 0xA0000000))
+            return LogicalAddr - 0x80000000;
+        return LogicalAddr - R3000A_RESET_VEC;
+    } break;
+    }
+}
+
+static DisassemblyData DisassembleMemory(
+    const void *Mem, iSize SizeBytes, 
+    iSize InstructionCount, 
+    u32 VirtualAddr, 
+    u32 DisasmFlags)
+{
     const u8 *BytePtr = Mem;
     DisassemblyData Disasm;
     char *CurrIns = Disasm.Mnemonic;
@@ -406,14 +648,57 @@ static DisassemblyData DisassembleMemory(const void *Mem, iSize SizeBytes, iSize
     int InsLenLeft = sizeof Disasm.Mnemonic;
     int AddrLenLeft = sizeof Disasm.Addr;
     int HexLenLeft = sizeof Disasm.HexCode;
-    for (iSize i = 0; i < InstructionCount; i++)
+    for (iSize i = 0; 
+        i < InstructionCount; 
+        i++, VirtualAddr += 4)
     {
-        u32 Instruction = 0;
-        InsLenLeft -= R3000A_Disasm(Instruction, VirtualPC, DisasmFlags, CurrIns, InsLenLeft);
-        APPEND(CurrIns, InsLenLeft, '\n');
-    }
+        /* disassemble the address */
+        int Len = snprintf(CurrAddr, AddrLenLeft, "%08x:\n", VirtualAddr);
+        CurrAddr += Len;
+        AddrLenLeft -= Len;
 
-#undef APPEND
+        /* disassemble the instruction */
+        /* disassemble the hexcode */
+        u32 Addr = TranslateAddr(VirtualAddr);
+        u32 Instruction = 0;
+        if (Addr < SizeBytes)
+        {
+            Memcpy(&Instruction, BytePtr + Addr, sizeof Instruction);
+            char Mnemonic[128];
+            R3000A_Disasm(Instruction, VirtualAddr, DisasmFlags, Mnemonic, sizeof Mnemonic);
+            int Len = snprintf(CurrIns, InsLenLeft, "%s\n", Mnemonic);
+            CurrIns += Len;
+            InsLenLeft -= Len;
+
+            Len = snprintf(CurrHex, HexLenLeft, "%08x\n", Instruction);
+            CurrHex += Len;
+            HexLenLeft -= Len;
+        }
+        else
+        {
+            int Len = snprintf(CurrIns, InsLenLeft, "???\n");
+            CurrIns += Len;
+            InsLenLeft -= Len;
+
+            Len = snprintf(CurrHex, HexLenLeft, "????????\n");
+            CurrHex += Len;
+            HexLenLeft -= Len;
+        }
+    }
+    return Disasm;
+}
+
+static DisassemblyRegions GetDisassemblyRegion(const RECT *ClientRect, int MaxAddrLen, int MaxHexLen)
+{
+    DisassemblyRegions Disasm = {
+        .Addr = *ClientRect,
+        .Hex = *ClientRect,
+        .Mnemonic = *ClientRect,
+    };
+    Disasm.Addr.right = ClientRect->left + MaxAddrLen;
+    Disasm.Hex.left = Disasm.Addr.right;
+    Disasm.Hex.right = Disasm.Hex.left + MaxHexLen;
+    Disasm.Mnemonic.left = Disasm.Hex.right;
     return Disasm;
 }
 
@@ -422,7 +707,11 @@ static DWORD Win32_Main(LPVOID UserData)
 {
     HWND ManagerWindow = UserData;
 
-    Win32_MainWindowState State = { 0 };
+    Win32_MainWindowState State = { 
+        .DisasmResetAddr = R3000A_RESET_VEC,
+        .DisasmAddr = R3000A_RESET_VEC,
+        .DisasmMinAddr = R3000A_RESET_VEC,
+    };
     State.MainMenu = CreateMenu();
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_DISASM_WINDOW, "&Disassembly");
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_MEMORY_WINDOW, "&Memory");
@@ -439,21 +728,24 @@ static DWORD Win32_Main(LPVOID UserData)
         WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN, 
         State.MainMenu
     );
+    DragAcceptFiles(State.MainWindow.Handle, TRUE);
     State.DisasmWindow = Win32_CreateWindowOrDie(
         ManagerWindow, 
         State.MainWindow.Handle,
         "Disassembly",
-        50, 50, 512, 360, 
+        100, 100 + 50, 540, 720 - 50, 
         "DisasmWndCls",
-        Win32_MainWndProc, 
-        WS_EX_OVERLAPPEDWINDOW, 
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CHILD,  
+        Win32_DisasmWndProc,
+        0,
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_VSCROLL,  
         NULL
     );
+    DragAcceptFiles(State.DisasmWindow.Handle, TRUE);
+    Win32_DisasmSetScroll(&State.DisasmWindow, R3000A_RESET_VEC, R3000A_RESET_VEC, R3000A_RESET_VEC);
 
     LOGFONTA FontAttr = {
-        .lfWidth = 10, 
-        .lfHeight = 20,
+        .lfWidth = 8, 
+        .lfHeight = 16,
         .lfWeight = FW_BOLD,
         .lfCharSet = ANSI_CHARSET, 
         .lfOutPrecision = OUT_DEFAULT_PRECIS, 
@@ -471,35 +763,63 @@ static DWORD Win32_Main(LPVOID UserData)
         Sleep(5);
 
 
-
-        if (ElapsedTime > 1000.0 / 100.0)
+        if (ElapsedTime == 0)
         {
             Win32_ClientRegion Region = Win32_BeginPaint(&State.MainWindow);
             {
+                FillRect(Region.TmpBackDC, &Region.Rect, WHITE_BRUSH);
                 SelectObject(Region.TmpBackDC, FontHandle);
-                RECT Rect;
-                GetClientRect(State.MainWindow.Handle, &Rect);
-                FillRect(Region.TmpBackDC, &Rect, WHITE_BRUSH);
-                DrawTextA(Region.TmpBackDC, "Hello, world", -1, &Rect, DT_CENTER);
+                DrawTextA(Region.TmpBackDC, "Hello, world", -1, &Region.Rect, DT_CENTER);
             }
             Win32_EndPaint(&Region);
 
 
             Region = Win32_BeginPaint(&State.DisasmWindow);
             {
-                SelectObject(Region.TmpBackDC, FontHandle);
-                RECT Rect;
-                GetClientRect(State.DisasmWindow.Handle, &Rect);
-                FillRect(Region.TmpBackDC, &Rect, WHITE_BRUSH);
+                HDC DC = Region.TmpBackDC;
+                /* clear background */
+                FillRect(DC, &Region.Rect, WHITE_BRUSH);
+
+                /* draw disassembly */
+                SelectObject(DC, FontHandle);
+                int InstructionCount = Region.h / FontAttr.lfHeight;
+                State.DisasmInstructionPerPage = InstructionCount;
+                int AddrWidth = FontAttr.lfWidth*(8+2);
+                int HexWidth = FontAttr.lfWidth*(8+4);
+                DisassemblyData Disasm = DisassembleMemory(
+                    State.OSMem.Ptr, State.OSMem.SizeBytes, 
+                    InstructionCount, 
+                    State.DisasmAddr, 
+                    State.DisasmFlags
+                );
+                DisassemblyRegions DisasmRegion = GetDisassemblyRegion(
+                    &Region.Rect, 
+                    AddrWidth, 
+                    HexWidth
+                );
+                DrawTextA(DC, Disasm.Addr, -1, &DisasmRegion.Addr, DT_LEFT);
+                DrawTextA(DC, Disasm.HexCode, -1, &DisasmRegion.Hex, DT_LEFT);
+                DrawTextA(DC, Disasm.Mnemonic, -1, &DisasmRegion.Mnemonic, DT_LEFT);
+                if (State.OSMem.SizeBytes != 0)
+                {
+                    Win32_DisasmSetScroll(
+                        &State.DisasmWindow, 
+                        State.DisasmAddr, 
+                        State.DisasmMinAddr, 
+                        State.DisasmMinAddr + State.OSMem.SizeBytes - InstructionCount*4
+                    );
+                }
             }
             Win32_EndPaint(&Region);
-            ElapsedTime = 0;
         }
         else
         {
             float EndTime = Win32_GetTimeMillisec();
             ElapsedTime += EndTime - StartTime;
             StartTime = EndTime;
+
+            if (ElapsedTime == 1000.0 / 100.0)
+                ElapsedTime = 0;
         }
     }
 
@@ -527,7 +847,7 @@ int WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, PSTR CmdLine, int CmdSho
         Win32_Fatal("Unable to create a window.");
     }
 
-    Win32_InitPerfCounter();
+    Win32_InitSystem();
 
     /* create the main thread */
     CreateThread(NULL, 0, Win32_Main, ManagerWindow, 0, &Win32_MainThreadID);
