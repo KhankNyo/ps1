@@ -95,6 +95,7 @@ typedef struct Win32_MainWindowState
     Win32_Window MainWindow, 
                  DisasmWindow;
     HMENU MainMenu;
+    R3000A CPU;
 
     u32 DisasmFlags;
     u32 DisasmInstructionPerPage;
@@ -331,19 +332,9 @@ static LRESULT CALLBACK Win32_MainWndProc(HWND Window, UINT Msg, WPARAM wParam, 
     case WM_KEYUP:
     case WM_KEYDOWN:
     case WM_SIZE:
-    {
-        PostThreadMessage(Win32_MainThreadID, Msg, wParam, lParam);
-    } break;
     case WM_DROPFILES:
     {
-        PostThreadMessageA(Win32_MainThreadID, WM_DROPFILES, wParam, 0);
-
-        HDROP Dropped = (HDROP)wParam;
-        UINT FileCount = DragQueryFileA(Dropped, -1, NULL, 0); /* get file count */
-        if (FileCount != 1)
-        {
-            Win32_MsgBox("Warning", MB_ICONWARNING, "%u files recieved, but only 1 will be used.", FileCount);
-        }
+        PostThreadMessage(Win32_MainThreadID, Msg, wParam, lParam);
     } break;
 
     default: 
@@ -535,8 +526,9 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
         } break;
         case WM_DROPFILES:
         {
-            /* get the first dropped file's name */
             HDROP Dropped = (HDROP)Msg.wParam;
+
+            /* get the first dropped file's name */
             UINT FileNameLength = DragQueryFileA(Dropped, 0, NULL, 0);
             if (FileNameLength < sizeof Win32_TmpFileName)
             {
@@ -549,7 +541,18 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
                 );
             }
 
+            UINT FileCount = DragQueryFileA(Dropped, -1, NULL, 0); /* get file count */
+            if (FileCount != 1)
+            {
+                Win32_MsgBox("Warning", MB_ICONWARNING, 
+                    "%u files recieved, but only '%s' will be used.", 
+                    FileCount, Win32_TmpFileName
+                );
+            }
+
+
             Win32_ReadFileSyncIntoOSMem(State, Win32_TmpFileName, OPEN_EXISTING);
+            ShowWindow(State->DisasmWindow.Handle, SW_SHOW);
         } break;
         case WM_KEYUP:
         case WM_KEYDOWN:
@@ -634,6 +637,13 @@ static u32 TranslateAddr(u32 LogicalAddr)
     }
 }
 
+static Bool8 AddrIsValid(u32 Addr, u32 DataSize, u32 MemSize)
+{
+    return Addr < MemSize 
+        && Addr + DataSize < MemSize 
+        && Addr + DataSize > Addr;
+}
+
 static DisassemblyData DisassembleMemory(
     const void *Mem, iSize SizeBytes, 
     iSize InstructionCount, 
@@ -661,7 +671,7 @@ static DisassemblyData DisassembleMemory(
         /* disassemble the hexcode */
         u32 Addr = TranslateAddr(VirtualAddr);
         u32 Instruction = 0;
-        if (Addr < SizeBytes)
+        if (AddrIsValid(Addr, sizeof Instruction, SizeBytes))
         {
             Memcpy(&Instruction, BytePtr + Addr, sizeof Instruction);
             char Mnemonic[128];
@@ -702,6 +712,60 @@ static DisassemblyRegions GetDisassemblyRegion(const RECT *ClientRect, int MaxAd
     return Disasm;
 }
 
+static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3000A_DataSize DataSize)
+{
+    Win32_MainWindowState *State = UserData;
+
+    u32 PhysAddr = TranslateAddr(Addr);
+    if (AddrIsValid(PhysAddr, DataSize, State->OSMem.SizeBytes))
+    {
+        for (int i = 0; i < DataSize; i++)
+        {
+            State->OSMem.Ptr[Addr + i] = (Data >> i*8) & 0xFF;
+        }
+    }
+    else if (Addr == TESTSYS_EXIT)
+    {
+    }
+    else if (Addr == TESTSYS_WRITEHEX)
+    {
+    }
+    else if (Addr == TESTSYS_WRITESTR)
+    {
+    }
+    else
+    {
+        /* TODO: logging */
+    }
+}
+
+static u32 MipsRead(void *UserData, u32 Addr, R3000A_DataSize DataSize)
+{
+    Win32_MainWindowState *State = UserData;
+    u32 PhysAddr = TranslateAddr(Addr);
+    if (AddrIsValid(PhysAddr, DataSize, State->OSMem.SizeBytes))
+    {
+        u32 Data = 0;
+        for (int i = 0; i < DataSize; i++)
+        {
+            Data |= (u32)State->OSMem.Ptr[PhysAddr + i] << i*8;
+        }
+        return Data;
+    }
+    else
+    {
+        /* TODO: logging */
+    }
+    return 0;
+}
+
+static Bool8 MipsVerify(void *UserData, u32 Addr)
+{
+    (void)UserData;
+    (void)Addr;
+    return true;
+}
+
 
 static DWORD Win32_Main(LPVOID UserData)
 {
@@ -711,6 +775,7 @@ static DWORD Win32_Main(LPVOID UserData)
         .DisasmResetAddr = R3000A_RESET_VEC,
         .DisasmAddr = R3000A_RESET_VEC,
         .DisasmMinAddr = R3000A_RESET_VEC,
+        .CPU = R3000A_Init(&State, MipsRead, MipsWrite, MipsVerify, MipsVerify),
     };
     State.MainMenu = CreateMenu();
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_DISASM_WINDOW, "&Disassembly");
@@ -760,10 +825,11 @@ static DWORD Win32_Main(LPVOID UserData)
     float StartTime = Win32_GetTimeMillisec();
     while (Win32_MainPollInputs(ManagerWindow, &State))
     {
+        /* reduce cpu usage */
         Sleep(5);
 
 
-        if (ElapsedTime == 0)
+        if (ElapsedTime >= 1000.0 / 60.0)
         {
             Win32_ClientRegion Region = Win32_BeginPaint(&State.MainWindow);
             {
@@ -782,7 +848,7 @@ static DWORD Win32_Main(LPVOID UserData)
 
                 /* draw disassembly */
                 SelectObject(DC, FontHandle);
-                int InstructionCount = Region.h / FontAttr.lfHeight;
+                int InstructionCount = Region.h / FontAttr.lfHeight + 1; /* +1 for smooth transition */
                 State.DisasmInstructionPerPage = InstructionCount;
                 int AddrWidth = FontAttr.lfWidth*(8+2);
                 int HexWidth = FontAttr.lfWidth*(8+4);
@@ -811,15 +877,13 @@ static DWORD Win32_Main(LPVOID UserData)
                 }
             }
             Win32_EndPaint(&Region);
+            ElapsedTime = 0;
         }
         else
         {
             float EndTime = Win32_GetTimeMillisec();
             ElapsedTime += EndTime - StartTime;
             StartTime = EndTime;
-
-            if (ElapsedTime == 1000.0 / 100.0)
-                ElapsedTime = 0;
         }
     }
 
