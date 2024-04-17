@@ -93,9 +93,11 @@ typedef struct Win32_MainWindowState
     char DroppedFileName[1024];
 
     Win32_Window MainWindow, 
-                 DisasmWindow;
+                 DisasmWindow, 
+                 CPUWindow;
     HMENU MainMenu;
     R3000A CPU;
+    u32 CPUCyclesPerSec;
 
     u32 DisasmFlags;
     u32 DisasmInstructionPerPage;
@@ -118,10 +120,17 @@ static char Win32_TmpFileName[0x10000];
 
 
 #define Win32_MsgBox(title, flags, ...) do {\
-    char TmpBuffer[1024];\
-    snprintf(TmpBuffer, sizeof TmpBuffer, __VA_ARGS__);\
-    MessageBoxA(NULL, TmpBuffer, title, flags);\
+    char tmp_buffer[1024];\
+    snprintf(tmp_buffer, sizeof tmp_buffer, __VA_ARGS__);\
+    MessageBoxA(NULL, tmp_buffer, title, flags);\
 } while (0)
+
+#define Win32_DrawStrFmt(device_context, rectangle_region, flags, buffer_size, ...) do {\
+    char tmp_buffer[buffer_size];\
+    snprintf(tmp_buffer, sizeof tmp_buffer, __VA_ARGS__);\
+    DrawTextA(device_context, tmp_buffer, -1, rectangle_region, flags);\
+} while (0)
+
 
 
 static void Win32_Fatal(const char *Msg)
@@ -213,24 +222,18 @@ static Win32_ClientRegion Win32_BeginPaint(Win32_Window *Window)
 
     ClientRegion.TmpFrontDC = GetDC(Window->Handle);
     if (NULL == ClientRegion.TmpFrontDC)
-    {
         Win32_Fatal("Unable to retrieve device context of a window.");
-    }
 
     ClientRegion.TmpBackDC = CreateCompatibleDC(ClientRegion.TmpFrontDC);
     if (NULL == ClientRegion.TmpBackDC)
-        goto NoBackBuffer;
+        Win32_Fatal("Unable to retrieve a backbuffer.");
 
     ClientRegion.TmpBitmap = CreateCompatibleBitmap(ClientRegion.TmpFrontDC, ClientRegion.w, ClientRegion.h);
     if (NULL == ClientRegion.TmpBitmap)
-        goto NoBackBuffer;
+        Win32_Fatal("Unable to retrieve a backbuffer.");
 
     SelectObject(ClientRegion.TmpBackDC, ClientRegion.TmpBitmap);
     return ClientRegion;
-
-NoBackBuffer:
-    Win32_Fatal("Unable to retrieve a backbuffer.");
-    return (Win32_ClientRegion){ 0 };
 }
 
 static void Win32_EndPaint(Win32_ClientRegion *Region)
@@ -246,6 +249,8 @@ static void Win32_EndPaint(Win32_ClientRegion *Region)
     DeleteDC(Region->TmpFrontDC);
     DeleteObject(Region->TmpBitmap);
 }
+
+
 
 static void *Win32_AllocateMemory(iSize SizeBytes)
 {
@@ -353,7 +358,7 @@ static LRESULT CALLBACK Win32_DisasmWndProc(HWND Window, UINT Msg, WPARAM wParam
     case WM_MOUSEWHEEL:
     case WM_VSCROLL:
     {
-        PostThreadMessageA(Win32_MainThreadID, Msg, wParam, lParam);
+        PostThreadMessageA(Win32_MainThreadID, Msg, wParam, (LPARAM)Window);
     } break;
     default: 
     {
@@ -452,8 +457,9 @@ CreateFileFailed:
     );
 }
 
-static void Win32_DisasmSetScroll(Win32_Window *Window, u64 Pos, u64 Low, u64 High)
+static void Win32_SetWindowScrollbar(Win32_Window *Window, u64 Pos, u64 Low, u64 High)
 {
+    /* to the scrollbar from disappearing */
     if (High == Low)
     {
         High = Low + 256;
@@ -521,6 +527,7 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
             } break;
             case MAINMENU_CPUSTATE_WINDOW:
             {
+                ShowWindow(State->CPUWindow.Handle, SW_SHOW);
             } break;
             }
         } break;
@@ -577,15 +584,16 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
                 .cbSize = sizeof ScrollInfo,
                 .fMask = SIF_POS | SIF_RANGE | SIF_TRACKPOS,
             };
-            GetScrollInfo(State->DisasmWindow.Handle, SB_VERT, &ScrollInfo);
+            HWND Window = (HWND)Msg.lParam;
+            GetScrollInfo(Window, SB_VERT, &ScrollInfo);
 
             u32 Pos = ScrollInfo.nPos;
             switch (LOWORD(Msg.wParam))
             {
             case SB_BOTTOM:     Pos = ScrollInfo.nMax; break;
             case SB_TOP:        Pos = ScrollInfo.nMin; break;
-            case SB_LINEDOWN:   Pos = State->DisasmAddr/4 + 1; break;
-            case SB_LINEUP:     Pos = State->DisasmAddr/4 - 1; break;
+            case SB_LINEUP:     Pos -= 1; break;
+            case SB_LINEDOWN:   Pos += 1; break;
             case SB_PAGEUP:     Pos -= State->DisasmInstructionPerPage; break;
             case SB_PAGEDOWN:   Pos += State->DisasmInstructionPerPage; break;
             case SB_THUMBTRACK:
@@ -597,7 +605,7 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
 
             ScrollInfo.nPos = Pos;
             State->DisasmAddr = Pos*4;
-            SetScrollInfo(State->DisasmWindow.Handle, SB_VERT, &ScrollInfo, TRUE);
+            SetScrollInfo(Window, SB_VERT, &ScrollInfo, TRUE);
         } break;
         }
     }
@@ -726,12 +734,15 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3000A_DataSize DataSi
     }
     else if (Addr == TESTSYS_EXIT)
     {
+        /* TODO: log exit msg */
     }
     else if (Addr == TESTSYS_WRITEHEX)
     {
+        /* TODO: log hex msg */
     }
     else if (Addr == TESTSYS_WRITESTR)
     {
+        /* TODO: log string msg */
     }
     else
     {
@@ -771,11 +782,13 @@ static DWORD Win32_Main(LPVOID UserData)
 {
     HWND ManagerWindow = UserData;
 
+    float FPS = 60.0;
     Win32_MainWindowState State = { 
         .DisasmResetAddr = R3000A_RESET_VEC,
         .DisasmAddr = R3000A_RESET_VEC,
         .DisasmMinAddr = R3000A_RESET_VEC,
         .CPU = R3000A_Init(&State, MipsRead, MipsWrite, MipsVerify, MipsVerify),
+        .CPUCyclesPerSec = FPS,
     };
     State.MainMenu = CreateMenu();
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_DISASM_WINDOW, "&Disassembly");
@@ -798,7 +811,7 @@ static DWORD Win32_Main(LPVOID UserData)
         ManagerWindow, 
         State.MainWindow.Handle,
         "Disassembly",
-        100, 100 + 50, 540, 720 - 50, 
+        100, 150, 540, 670, 
         "DisasmWndCls",
         Win32_DisasmWndProc,
         0,
@@ -806,12 +819,23 @@ static DWORD Win32_Main(LPVOID UserData)
         NULL
     );
     DragAcceptFiles(State.DisasmWindow.Handle, TRUE);
-    Win32_DisasmSetScroll(&State.DisasmWindow, R3000A_RESET_VEC, R3000A_RESET_VEC, R3000A_RESET_VEC);
+    Win32_SetWindowScrollbar(&State.DisasmWindow, R3000A_RESET_VEC, R3000A_RESET_VEC, R3000A_RESET_VEC);
+    State.CPUWindow = Win32_CreateWindowOrDie(
+        ManagerWindow, 
+        State.MainWindow.Handle, 
+        "CPUState",  
+        100 + 540, 150, 540, 670/2, 
+        "CPUStateCls", 
+        Win32_MainWndProc, 
+        0, 
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE, 
+        NULL
+    );
 
     LOGFONTA FontAttr = {
         .lfWidth = 8, 
         .lfHeight = 16,
-        .lfWeight = FW_BOLD,
+        .lfWeight = FW_NORMAL,
         .lfCharSet = ANSI_CHARSET, 
         .lfOutPrecision = OUT_DEFAULT_PRECIS, 
         .lfClipPrecision = CLIP_DEFAULT_PRECIS,
@@ -827,15 +851,89 @@ static DWORD Win32_Main(LPVOID UserData)
     {
         /* reduce cpu usage */
         Sleep(5);
-
-
-        if (ElapsedTime >= 1000.0 / 60.0)
+        float MipsCPUTimeMS = Win32_GetTimeMillisec();
+        int CyclesPerFrame = State.CPUCyclesPerSec / FPS;
+        for (int i = 0; 
+            i < CyclesPerFrame
+            && MipsCPUTimeMS < 1000.0; 
+            i++)
         {
+            R3000A_Execute(&State.CPU);
+            MipsCPUTimeMS = Win32_GetTimeMillisec() - MipsCPUTimeMS;
+        }
+
+
+        if (ElapsedTime >= 1000.0 / FPS)
+        {
+            int FontWidth = FontAttr.lfWidth;
+            int FontHeight = FontAttr.lfHeight;
             Win32_ClientRegion Region = Win32_BeginPaint(&State.MainWindow);
             {
-                FillRect(Region.TmpBackDC, &Region.Rect, WHITE_BRUSH);
-                SelectObject(Region.TmpBackDC, FontHandle);
-                DrawTextA(Region.TmpBackDC, "Hello, world", -1, &Region.Rect, DT_CENTER);
+                HDC DC = Region.TmpBackDC;
+                FillRect(DC, &Region.Rect, WHITE_BRUSH);
+            }
+            Win32_EndPaint(&Region);
+
+
+            Region = Win32_BeginPaint(&State.CPUWindow);
+            {
+                HDC DC = Region.TmpBackDC;
+                SelectObject(DC, FontHandle);
+
+                /* clear background */
+                FillRect(DC, &Region.Rect, WHITE_BRUSH);
+
+                /* register variables */
+                int RegisterBoxWidth = FontWidth * 10;
+                int RegisterBoxHeight = 2*FontHeight + 2;
+                int RegisterBoxVerDist = RegisterBoxHeight + 5;
+                int RegisterBoxHorDist = RegisterBoxWidth + 5;
+                int RegisterBoxPerLine = 4;
+                RECT RegisterBox = {
+                    .left = 10,
+                    .right = 10 + RegisterBoxWidth,
+                    .top = 10,
+                    .bottom = 10 + RegisterBoxHeight,
+                };
+
+                /* draw the registers R00..R31 */
+                COLORREF Color = RGB(0x40, 0x40, 0x40);
+                SetBkColor(DC, Color);
+                SetTextColor(DC, RGB(0xFF, 0xFF, 0xFF));
+                HBRUSH RegisterBoxColorBrush = CreateSolidBrush(Color);
+                HBRUSH LastBrush = SelectObject(DC, RegisterBoxColorBrush);
+                RECT CurrentRegisterBox = RegisterBox;
+                uint RegisterCount = STATIC_ARRAY_SIZE(State.CPU.R);
+                for (uint i = 0; i < RegisterCount; i++)
+                {
+                    FillRect(DC, &CurrentRegisterBox, RegisterBoxColorBrush);
+                    Win32_DrawStrFmt(DC, &CurrentRegisterBox, DT_CENTER, 64, 
+                        "R%02d:\n%08x", i, State.CPU.R[i]
+                    );
+
+                    if ((i + 1) % RegisterBoxPerLine == 0)
+                    {
+                        CurrentRegisterBox.left = RegisterBox.left;
+                        CurrentRegisterBox.right = RegisterBox.right;
+                        CurrentRegisterBox.top += RegisterBoxVerDist;
+                        CurrentRegisterBox.bottom += RegisterBoxVerDist;
+                    }
+                    else
+                    {
+                        CurrentRegisterBox.left += RegisterBoxHorDist;
+                        CurrentRegisterBox.right += RegisterBoxHorDist;
+                    }
+                }
+
+                RECT PCRegisterBox = RegisterBox;
+                PCRegisterBox.left += RegisterBoxHorDist * RegisterBoxPerLine;
+                PCRegisterBox.right += PCRegisterBox.left;
+                FillRect(DC, &PCRegisterBox, RegisterBoxColorBrush);
+                Win32_DrawStrFmt(DC, &PCRegisterBox, DT_CENTER, 64, 
+                    "PC:\n%08x", State.CPU.PC
+                );
+
+                DeleteObject(SelectObject(DC, LastBrush));
             }
             Win32_EndPaint(&Region);
 
@@ -848,10 +946,10 @@ static DWORD Win32_Main(LPVOID UserData)
 
                 /* draw disassembly */
                 SelectObject(DC, FontHandle);
-                int InstructionCount = Region.h / FontAttr.lfHeight + 1; /* +1 for smooth transition */
+                int InstructionCount = Region.h / FontHeight + 1; /* +1 for smooth transition */
                 State.DisasmInstructionPerPage = InstructionCount;
-                int AddrWidth = FontAttr.lfWidth*(8+2);
-                int HexWidth = FontAttr.lfWidth*(8+4);
+                int AddrWidth = FontWidth*(8+2);
+                int HexWidth  = FontWidth*(8+4);
                 DisassemblyData Disasm = DisassembleMemory(
                     State.OSMem.Ptr, State.OSMem.SizeBytes, 
                     InstructionCount, 
@@ -868,7 +966,7 @@ static DWORD Win32_Main(LPVOID UserData)
                 DrawTextA(DC, Disasm.Mnemonic, -1, &DisasmRegion.Mnemonic, DT_LEFT);
                 if (State.OSMem.SizeBytes != 0)
                 {
-                    Win32_DisasmSetScroll(
+                    Win32_SetWindowScrollbar(
                         &State.DisasmWindow, 
                         State.DisasmAddr, 
                         State.DisasmMinAddr, 
