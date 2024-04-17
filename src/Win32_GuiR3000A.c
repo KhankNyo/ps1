@@ -114,7 +114,7 @@ typedef struct Win32_DisassemblyWindow
 
 
 static DWORD Win32_MainThreadID;
-static float Win32_PerfCounterRes;
+static double Win32_PerfCounterRes;
 static SYSTEM_INFO Win32_SysInfo;
 static char Win32_TmpFileName[0x10000];
 
@@ -150,7 +150,7 @@ static void Win32_InitSystem(void)
     GetSystemInfo(&Win32_SysInfo);
 }
 
-static float Win32_GetTimeMillisec(void)
+static double Win32_GetTimeMillisec(void)
 {
     LARGE_INTEGER Li;
     QueryPerformanceCounter(&Li);
@@ -326,6 +326,9 @@ static LRESULT CALLBACK Win32_MainWndProc(HWND Window, UINT Msg, WPARAM wParam, 
     case WM_ERASEBKGND:
     {
         Result = TRUE;
+    } break;
+    case WM_PAINT:
+    {
     } break;
     case WM_COMMAND:
     {
@@ -570,8 +573,15 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
         } break;
         case WM_MOUSEWHEEL:
         {
-            float MouseDelta = GET_WHEEL_DELTA_WPARAM(Msg.wParam);
-            i32 ScrollDelta = -MouseDelta*(1.0 / WHEEL_DELTA);
+            double Res = 8.0;
+            double MouseDelta = GET_WHEEL_DELTA_WPARAM(Msg.wParam);
+            i32 ScrollDelta;
+            if (IN_RANGE(0, MouseDelta, Res))
+                ScrollDelta = -1;
+            else if (IN_RANGE(-Res, MouseDelta, 0))
+                ScrollDelta = 1;
+            else ScrollDelta = -MouseDelta / Res;
+
             State->DisasmAddr += ScrollDelta*4;
             SetScrollPos(State->DisasmWindow.Handle, SB_VERT, State->DisasmAddr/4, TRUE);
         } break;
@@ -782,7 +792,9 @@ static DWORD Win32_Main(LPVOID UserData)
 {
     HWND ManagerWindow = UserData;
 
-    float FPS = 60.0;
+    Win32_InitSystem();
+
+    double FPS = 60.0;
     Win32_MainWindowState State = { 
         .DisasmResetAddr = R3000A_RESET_VEC,
         .DisasmAddr = R3000A_RESET_VEC,
@@ -803,7 +815,7 @@ static DWORD Win32_Main(LPVOID UserData)
         "MainWndCls", 
         Win32_MainWndProc,
         WS_EX_OVERLAPPEDWINDOW,
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN, 
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE, 
         State.MainMenu
     );
     DragAcceptFiles(State.MainWindow.Handle, TRUE);
@@ -814,8 +826,8 @@ static DWORD Win32_Main(LPVOID UserData)
         100, 150, 540, 670, 
         "DisasmWndCls",
         Win32_DisasmWndProc,
-        0,
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_VSCROLL,  
+        WS_EX_OVERLAPPEDWINDOW,
+        WS_THICKFRAME | WS_SYSMENU | WS_VISIBLE | WS_VSCROLL,  
         NULL
     );
     DragAcceptFiles(State.DisasmWindow.Handle, TRUE);
@@ -827,8 +839,8 @@ static DWORD Win32_Main(LPVOID UserData)
         100 + 540, 150, 540, 670/2, 
         "CPUStateCls", 
         Win32_MainWndProc, 
-        0, 
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE, 
+        WS_EX_OVERLAPPEDWINDOW, 
+        WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE, 
         NULL
     );
 
@@ -845,23 +857,31 @@ static DWORD Win32_Main(LPVOID UserData)
     };
     HFONT FontHandle = CreateFontIndirectA(&FontAttr);
 
-    float ElapsedTime = 0;
-    float StartTime = Win32_GetTimeMillisec();
+    double ElapsedTime = 0;
+    double StartTime = Win32_GetTimeMillisec();
     while (Win32_MainPollInputs(ManagerWindow, &State))
     {
         /* reduce cpu usage */
         Sleep(5);
-        float MipsCPUTimeMS = Win32_GetTimeMillisec();
+        double MipsCPUTimeMS = 0, 
+              MipsCPUTimeStart = Win32_GetTimeMillisec();
         int CyclesPerFrame = State.CPUCyclesPerSec / FPS;
+#if 0
         for (int i = 0; 
             i < CyclesPerFrame
             && MipsCPUTimeMS < 1000.0; 
             i++)
         {
-            R3000A_Execute(&State.CPU);
-            MipsCPUTimeMS = Win32_GetTimeMillisec() - MipsCPUTimeMS;
+            R3000A_StepClock(&State.CPU);
+            MipsCPUTimeMS = Win32_GetTimeMillisec() - MipsCPUTimeStart;
         }
+#endif
 
+
+        double EndTime = Win32_GetTimeMillisec();
+        double DeltaTime = EndTime - StartTime;
+        ElapsedTime += DeltaTime;
+        StartTime = EndTime;
 
         if (ElapsedTime >= 1000.0 / FPS)
         {
@@ -929,8 +949,9 @@ static DWORD Win32_Main(LPVOID UserData)
                 PCRegisterBox.left += RegisterBoxHorDist * RegisterBoxPerLine;
                 PCRegisterBox.right += PCRegisterBox.left;
                 FillRect(DC, &PCRegisterBox, RegisterBoxColorBrush);
+                static int FrameCounter = 0;
                 Win32_DrawStrFmt(DC, &PCRegisterBox, DT_CENTER, 64, 
-                    "PC:\n%08x", State.CPU.PC
+                    "f=%d\n dt: %3.2f", FrameCounter++, ElapsedTime
                 );
 
                 DeleteObject(SelectObject(DC, LastBrush));
@@ -977,12 +998,6 @@ static DWORD Win32_Main(LPVOID UserData)
             Win32_EndPaint(&Region);
             ElapsedTime = 0;
         }
-        else
-        {
-            float EndTime = Win32_GetTimeMillisec();
-            ElapsedTime += EndTime - StartTime;
-            StartTime = EndTime;
-        }
     }
 
     ExitProcess(0);
@@ -1009,7 +1024,6 @@ int WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, PSTR CmdLine, int CmdSho
         Win32_Fatal("Unable to create a window.");
     }
 
-    Win32_InitSystem();
 
     /* create the main thread */
     CreateThread(NULL, 0, Win32_Main, ManagerWindow, 0, &Win32_MainThreadID);
