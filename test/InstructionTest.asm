@@ -1915,6 +1915,8 @@ TestException:
     ; test exception: addi
     la $a2, TestException_Arith_Addi
     la $a0, TestArith_Addi_Msg
+    la $t3, TestExceptCounter_Base + TestExceptCounter_Overflow
+    sw $zero, 0($t3)                 ; initialize the exception counter with 0
 TestException_Arith_Addi:
     li $t0, 0x7FFF_FFFF
     li $t1, 0x7FFF_FFFF
@@ -1924,8 +1926,7 @@ TestException_Arith_Addi:
     la $a1, TestExcept_PreserveFailed_Msg
     bne $t0, $t1, TestFailed
         move $ra, $t9               ; restore retaddr from the PrintStr call (in delay slot)
-    la $t3, TestExceptCounter_Base + TestExceptCounter_Overflow
-    lw $t2, 0($t3)
+    lw $t2, 0($t3)                  ; load the exception counter
     li $t4, 1
     la $a1, TestExcept_Wrong_Msg
     bne $t2, $t4, TestFailed        ; assert arith exception counter updated
@@ -1936,7 +1937,7 @@ TestException_Arith_Addi:
 
     ; test exception: add
 TestException_Arith_Add:
-        add $t0, $t1                ; exception: NOTE also in branch delay slot (branch cond = false)
+    add $t0, $t1                    ; exception here 
     la $a0, TestArith_Add_Msg
     la $a1, TestExcept_PreserveFailed_Msg
     la $a2, TestException_Arith_Add
@@ -1999,6 +2000,7 @@ TestException_LwUnaligned:
 
     sw $zero, 0($t0)                    ; zero the location
     sw $zero, 4($t0)
+    sw $zero, 0($t1)                    ; reset the exception counter 
     li $t6, 3
 TestException_LwUnaligned_Again:
         li $t2, 0x420
@@ -2095,6 +2097,7 @@ TestException_SwUnaligned:
     ; zero the location 
     sw $zero, 0($t0)
     sw $zero, 4($t0)
+    sw $zero, 0($t1)                    ; reset the exception counter 
 
     li $t6, 3
     la $t8, TestException_Sw_Ins
@@ -2125,7 +2128,7 @@ TestException_Sw_Ins:
         sw $t7, 0($t8)                  ; patch the sw instruction (patched out by exception handler)
         addiu $t6, -1
     bnz $t6, TestException_Sw_Again     ; loop until all 3 unaligned offsets are tested
-        sw $zero, 0($t1)                 ; reset exception counter
+        sw $zero, 0($t1)                ; reset exception counter
 
     ; test exception: sh
 TestException_ShUnaligned:
