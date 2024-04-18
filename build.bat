@@ -70,9 +70,7 @@ if "clean"=="%1" (
         )
         pushd %BIN_DIR%
 
-            cl /c %MSVC_COMP% /DGLEW_STATIC %MSVC_INC% "%SRC_DIR%\Win32_GuiR3000A.c"
-            cl %MSVC_COMP% /DGLEW_STATIC %MSVC_INC% ^
-                /FeGuiR3000A.exe "%BIN_DIR%\Win32_GuiR3000A.obj" "%EXTERN_DIR%\bin\glew.obj" ^
+            cl %MSVC_COMP% %MSVC_INC% /FeGuiR3000A.exe "%SRC_DIR%\Win32_GuiR3000A.c" ^
                 /link gdi32.lib opengl32.lib user32.lib kernel32.lib shell32.lib comdlg32.lib
 
             cl %MSVC_COMP% %MSVC_INC% %UNITY_BUILD_FILE% /Fe%APPNAME%
@@ -91,8 +89,7 @@ if "clean"=="%1" (
                     -c "%EXTERN_DIR%\glew\glew.c" "%EXTERN_DIR%\bin\glew.o"
             popd
         )
-        %CC% %CC_COMP% %CC_INC% -DGLEW_STATIC ^
-            "%SRC_DIR%\Win32_GuiR3000A.c" "%EXTERN_DIR%\bin\glew.o" -o "%BIN_DIR%\GuiR3000A.exe" ^
+        %CC% %CC_COMP% %CC_INC% "%SRC_DIR%\Win32_GuiR3000A.c" -o "%BIN_DIR%\GuiR3000A.exe" ^
             -lgdi32 -lopengl32 -lshell32 -lcomdlg32
 
         %CC% %CC_COMP% %CC_INC% %UNITY_BUILD_FILE% -o "%BIN_DIR%\%APPNAME%"

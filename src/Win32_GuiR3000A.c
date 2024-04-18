@@ -16,7 +16,9 @@ typedef unsigned char u8;
 typedef u8 Bool8;
 #define MAINTHREAD_CREATE_WINDOW (WM_USER + 0)
 #define MAINTHREAD_CLOSE_WINDOW (WM_USER + 1)
-
+#define MAINTHREAD_MOVE_WINDOW (WM_USER + 2)
+#define MSGTHREAD_MOVING (WM_USER + 3)
+#define MSGTHREAD_SIZING (WM_USER + 4)
 
 typedef enum TestSyscall 
 {
@@ -49,6 +51,8 @@ typedef enum Win32_MainMenuCommand
     MAINMENU_DISASM_WINDOW,
     MAINMENU_CPUSTATE_WINDOW,
     MAINMENU_MEMORY_WINDOW,
+    LOGMENU_CLEAR_LOG,
+    LOGMENU_CLEAR_OUTPUT,
 } Win32_MainMenuCommand;
 
 
@@ -73,7 +77,7 @@ typedef struct Win32_ClientRegion
 
 typedef struct Win32_Window 
 {
-    int w, h;
+    RECT Position;
     HWND Handle;
     HDC TmpDC;
 } Win32_Window;
@@ -87,15 +91,14 @@ typedef struct Win32_BufferData Win32_Stack;
 
 typedef struct Win32_MainWindowState 
 {
-    Bool8 KeyIsDown[0x100];
-    Bool8 KeyWasDown[0x100];
-    unsigned char LastKey;
-    char DroppedFileName[1024];
-
+    HWND ManagerWindow;
     Win32_Window MainWindow, 
                  DisasmWindow, 
-                 CPUWindow;
+                 CPUWindow, 
+                 LogWindow;
     HMENU MainMenu;
+    HMENU LogMenu;
+
     R3000A CPU;
     u32 CPUCyclesPerSec;
 
@@ -105,6 +108,12 @@ typedef struct Win32_MainWindowState
         DisasmResetAddr, 
         DisasmMinAddr;
     Win32_BufferData OSMem;
+
+    unsigned char LastKey;
+    Bool8 KeyIsDown[0x100];
+    Bool8 KeyWasDown[0x100];
+    double KeyDownTimestampMillisec[0x100];
+    char DroppedFileName[1024];
 } Win32_MainWindowState;
 
 typedef struct Win32_DisassemblyWindow
@@ -131,6 +140,11 @@ static char Win32_TmpFileName[0x10000];
     DrawTextA(device_context, tmp_buffer, -1, rectangle_region, flags);\
 } while (0)
 
+static Bool8 Win32_IsKeyPressed(const Win32_MainWindowState *State, UINT VirtualKeyCode)
+{
+    ASSERT(VirtualKeyCode <= sizeof State->KeyWasDown);
+    return State->KeyWasDown[VirtualKeyCode] && !State->KeyIsDown[VirtualKeyCode];
+}
 
 
 static void Win32_Fatal(const char *Msg)
@@ -165,24 +179,11 @@ static Win32_Window Win32_CreateWindowOrDie(
     const char *Title,
     int x, int y, int w, int h,
     const char *ClassName, 
-    WNDPROC WndProc,
     DWORD dwExStyle, 
     DWORD dwStyle,
     HMENU Menu
 )
 {
-    WNDCLASSEXA WindowClass = {
-        .cbSize = sizeof WindowClass,
-        .style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
-        .lpfnWndProc = WndProc,
-        .hIcon = LoadIconA(NULL, IDI_APPLICATION),
-        .hbrBackground = GetStockObject(WHITE_BRUSH),
-        .hCursor = LoadCursorA(NULL, IDC_ARROW),
-        .lpszClassName = ClassName,
-        .hInstance = GetModuleHandleA(NULL),
-    };
-    RegisterClassExA(&WindowClass);
-
     Win32_CreateWindowArgs Args = {
         .x = x, 
         .y = y, 
@@ -202,10 +203,35 @@ static Win32_Window Win32_CreateWindowOrDie(
     }
     Win32_Window Window = {
         .Handle = Handle,
-        .w = w,
-        .h = h,
+        .Position = {
+            .left = x, 
+            .top = y,
+            .right = x + w,
+            .bottom = y + h,
+        },
     };
     return Window;
+}
+
+static void Win32_UpdateWindowPos(Win32_Window *Window, int x, int y)
+{
+    int Dx = x - Window->Position.left;
+    int Dy = y - Window->Position.top;
+    Window->Position.left = x;
+    Window->Position.right += Dx;
+    Window->Position.top = y;
+    Window->Position.bottom += Dy;
+}
+
+static void Win32_MoveWindow(HWND WindowManager, Win32_Window *Window, int Dx, int Dy)
+{
+    Window->Position.left += Dx;
+    Window->Position.right += Dx;
+    Window->Position.top += Dy;
+    Window->Position.bottom += Dy;
+    /* SendMessage does block, so this is fine */
+    SendMessageA(WindowManager, MAINTHREAD_MOVE_WINDOW, (WPARAM)Window, 0);
+
 }
 
 static Win32_ClientRegion Win32_BeginPaint(Win32_Window *Window)
@@ -214,7 +240,7 @@ static Win32_ClientRegion Win32_BeginPaint(Win32_Window *Window)
     GetClientRect(Window->Handle, &Rect);
     Win32_ClientRegion ClientRegion = { 
         .x = Rect.left, 
-        .y = Rect.bottom,
+        .y = Rect.top,
         .w = Rect.right - Rect.left,
         .h = Rect.bottom - Rect.top,
         .Rect = Rect,
@@ -238,16 +264,41 @@ static Win32_ClientRegion Win32_BeginPaint(Win32_Window *Window)
 
 static void Win32_EndPaint(Win32_ClientRegion *Region)
 {
+    /* BitBlt preserves alpha */
     BitBlt(
         Region->TmpFrontDC, 
         0, 0, Region->w, Region->h,
         Region->TmpBackDC, 
-        0, 0, 
+        0, 0,
         SRCCOPY
     );
     DeleteDC(Region->TmpBackDC);
     DeleteDC(Region->TmpFrontDC);
     DeleteObject(Region->TmpBitmap);
+}
+
+static void Win32_BlendRegion(HDC DeviceContext, const RECT *Rect, COLORREF Color)
+{
+    /* we create a 1x1 32bpp bitmap, 
+     * then spread it over the destination */
+    BITMAPINFO BitmapInfo = {
+        .bmiHeader = {
+            .biSize = sizeof BitmapInfo.bmiHeader, 
+            .biWidth = 1,
+            .biHeight = 1,
+            .biPlanes = 1,
+            .biBitCount = 32,
+            .biCompression = BI_RGB,
+        },
+    };
+
+    StretchDIBits(DeviceContext, 
+        Rect->left, Rect->top, Rect->right - Rect->left, Rect->bottom - Rect->top,
+        0, 0, 1, 1, 
+        &Color, &BitmapInfo, 
+        DIB_RGB_COLORS, 
+        SRCAND
+    );
 }
 
 
@@ -296,6 +347,17 @@ static LRESULT CALLBACK Win32_ManagerWndProc(HWND Window, UINT Msg, WPARAM wPara
     {
         CloseWindow((HWND)wParam);
     } break;
+    case MAINTHREAD_MOVE_WINDOW:
+    {
+        const Win32_Window *Window = (Win32_Window*)wParam;
+        MoveWindow(Window->Handle, 
+            Window->Position.left, 
+            Window->Position.top,
+            Window->Position.right - Window->Position.left, 
+            Window->Position.bottom - Window->Position.top, 
+            false
+        );
+    } break;
     default:
     {
         Result = DefWindowProcA(Window, Msg, wParam, lParam);
@@ -325,10 +387,7 @@ static LRESULT CALLBACK Win32_MainWndProc(HWND Window, UINT Msg, WPARAM wParam, 
 
     case WM_ERASEBKGND:
     {
-        Result = TRUE;
-    } break;
-    case WM_PAINT:
-    {
+        Result = TRUE; /* don't want GDI to clear our background, we clear it ourselves */
     } break;
     case WM_COMMAND:
     {
@@ -337,6 +396,14 @@ static LRESULT CALLBACK Win32_MainWndProc(HWND Window, UINT Msg, WPARAM wParam, 
             PostThreadMessageA(Win32_MainThreadID, WM_COMMAND, MenuCommand, (LPARAM)Window);
     } break;
 
+    case WM_MOVING:
+    {
+        RECT Rect = *(RECT *)lParam;
+        int x = Rect.left;
+        int y = Rect.top;
+        lParam = y << 16 | (x & 0xFFFF);
+        PostThreadMessage(Win32_MainThreadID, MSGTHREAD_MOVING, (WPARAM)Window, lParam);
+    } break;
     case WM_KEYUP:
     case WM_KEYDOWN:
     case WM_SIZE:
@@ -470,9 +537,9 @@ static void Win32_SetWindowScrollbar(Win32_Window *Window, u64 Pos, u64 Low, u64
     SCROLLINFO ScrollInfo = {
         .cbSize = sizeof ScrollInfo, 
         .fMask = SIF_RANGE | SIF_POS,
-        .nPos = Pos/4,
-        .nMax = High/4,
-        .nMin = Low/4,
+        .nPos = Pos,
+        .nMax = High,
+        .nMin = Low,
     };
     SetScrollInfo(Window->Handle, SB_VERT, &ScrollInfo, TRUE);
 }
@@ -568,14 +635,25 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
         case WM_KEYDOWN:
         {
             unsigned char Key = Msg.wParam & 0xFF;
-            State->KeyIsDown[Key] = Msg.message == WM_KEYDOWN;
+            Bool8 KeyDown = Msg.message == WM_KEYDOWN;
+            State->KeyIsDown[Key] = KeyDown;
             State->LastKey = Key;
+            if (!KeyDown)
+            {
+                State->KeyDownTimestampMillisec[Key] = 0;
+            }
+            else if (!State->KeyDownTimestampMillisec[Key])
+            {
+                State->KeyDownTimestampMillisec[Key] = Win32_GetTimeMillisec();
+            }
         } break;
         case WM_MOUSEWHEEL:
         {
-            double Res = 8.0;
+            double Res = WHEEL_DELTA;
             double MouseDelta = GET_WHEEL_DELTA_WPARAM(Msg.wParam);
             i32 ScrollDelta;
+
+            /* make sure that when mouse delta is in -1..1, it will be map to -1, 0, or 1 */
             if (IN_RANGE(0, MouseDelta, Res))
                 ScrollDelta = -1;
             else if (IN_RANGE(-Res, MouseDelta, 0))
@@ -617,6 +695,33 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
             State->DisasmAddr = Pos*4;
             SetScrollInfo(Window, SB_VERT, &ScrollInfo, TRUE);
         } break;
+        case MSGTHREAD_MOVING:
+        {
+            HWND WindowHandle = (HWND)Msg.wParam;
+            int x = (i16)LOWORD(Msg.lParam);
+            int y = (i16)HIWORD(Msg.lParam);
+            if (WindowHandle == State->MainWindow.Handle)
+            {
+                int Dx = x - State->MainWindow.Position.left;
+                int Dy = y - State->MainWindow.Position.top;
+                Win32_MoveWindow(State->ManagerWindow, &State->DisasmWindow, Dx, Dy);
+                Win32_MoveWindow(State->ManagerWindow, &State->CPUWindow, Dx, Dy);
+                Win32_MoveWindow(State->ManagerWindow, &State->LogWindow, Dx, Dy);
+                Win32_UpdateWindowPos(&State->MainWindow, x, y);
+            }
+            else if (WindowHandle == State->DisasmWindow.Handle)
+            {
+                Win32_UpdateWindowPos(&State->DisasmWindow, x, y);
+            }
+            else if (WindowHandle == State->LogWindow.Handle)
+            {
+                Win32_UpdateWindowPos(&State->LogWindow, x, y);
+            }
+            else if (WindowHandle == State->CPUWindow.Handle)
+            {
+                Win32_UpdateWindowPos(&State->CPUWindow, x, y);
+            }
+        } break;
         }
     }
     return true;
@@ -648,7 +753,7 @@ static u32 TranslateAddr(u32 LogicalAddr)
     } break;
     default: 
     {
-        if (IN_RANGE(0x80000000, LogicalAddr, 0xA0000000))
+        if (IN_RANGE(0x80000000, LogicalAddr, 0x9FFFFFFF))
             return LogicalAddr - 0x80000000;
         return LogicalAddr - R3000A_RESET_VEC;
     } break;
@@ -734,8 +839,8 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3000A_DataSize DataSi
 {
     Win32_MainWindowState *State = UserData;
 
-    u32 PhysAddr = TranslateAddr(Addr);
-    if (AddrIsValid(PhysAddr, DataSize, State->OSMem.SizeBytes))
+    Addr = TranslateAddr(Addr);
+    if (AddrIsValid(Addr, DataSize, State->OSMem.SizeBytes))
     {
         for (int i = 0; i < DataSize; i++)
         {
@@ -763,13 +868,13 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3000A_DataSize DataSi
 static u32 MipsRead(void *UserData, u32 Addr, R3000A_DataSize DataSize)
 {
     Win32_MainWindowState *State = UserData;
-    u32 PhysAddr = TranslateAddr(Addr);
-    if (AddrIsValid(PhysAddr, DataSize, State->OSMem.SizeBytes))
+    Addr = TranslateAddr(Addr);
+    if (AddrIsValid(Addr, DataSize, State->OSMem.SizeBytes))
     {
         u32 Data = 0;
         for (int i = 0; i < DataSize; i++)
         {
-            Data |= (u32)State->OSMem.Ptr[PhysAddr + i] << i*8;
+            Data |= (u32)State->OSMem.Ptr[Addr + i] << i*8;
         }
         return Data;
     }
@@ -801,47 +906,97 @@ static DWORD Win32_Main(LPVOID UserData)
         .DisasmMinAddr = R3000A_RESET_VEC,
         .CPU = R3000A_Init(&State, MipsRead, MipsWrite, MipsVerify, MipsVerify),
         .CPUCyclesPerSec = FPS,
+        .ManagerWindow = ManagerWindow,
     };
+
+    /* create the main window */
     State.MainMenu = CreateMenu();
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_DISASM_WINDOW, "&Disassembly");
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_MEMORY_WINDOW, "&Memory");
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_CPUSTATE_WINDOW, "&CPU State");
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_OPEN_FILE, "&Open File");
+    const char *MainWndClsName = "MainWndCls";
+    WNDCLASSEXA MainWindowClass = {
+        .cbSize = sizeof MainWindowClass,
+        .style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
+        .lpfnWndProc = Win32_MainWndProc,
+        .hIcon = LoadIconA(NULL, IDI_APPLICATION),
+        .hCursor = LoadCursorA(NULL, IDC_ARROW),
+        .lpszClassName = MainWndClsName,
+        .hInstance = GetModuleHandleA(NULL),
+    };
+    RegisterClassExA(&MainWindowClass);
     State.MainWindow = Win32_CreateWindowOrDie(
         ManagerWindow, 
         NULL,
         "R3000A Debug Emu",
         100, 100, 1080, 720, 
-        "MainWndCls", 
-        Win32_MainWndProc,
+        MainWndClsName,
         WS_EX_OVERLAPPEDWINDOW,
         WS_OVERLAPPEDWINDOW | WS_VISIBLE, 
         State.MainMenu
     );
     DragAcceptFiles(State.MainWindow.Handle, TRUE);
+
+    /* create the disassembly window */
+    const char *ChildWndClsName = "ChildWndCls";
+    WNDCLASSEXA ChildWindowClass = {
+        .cbSize = sizeof ChildWindowClass,
+        .style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
+        .lpfnWndProc = Win32_DisasmWndProc,
+        .hCursor = LoadCursorA(NULL, IDC_ARROW),
+        .lpszClassName = ChildWndClsName,
+        .hInstance = GetModuleHandleA(NULL),
+    };
+    RegisterClassExA(&ChildWindowClass);
     State.DisasmWindow = Win32_CreateWindowOrDie(
         ManagerWindow, 
         State.MainWindow.Handle,
         "Disassembly",
-        100, 150, 540, 670, 
-        "DisasmWndCls",
-        Win32_DisasmWndProc,
+        State.MainWindow.Position.left, 
+        State.MainWindow.Position.top + 60, 
+        540, 660, 
+        ChildWndClsName,
         WS_EX_OVERLAPPEDWINDOW,
-        WS_THICKFRAME | WS_SYSMENU | WS_VISIBLE | WS_VSCROLL,  
+        WS_THICKFRAME | WS_SYSMENU | WS_CAPTION | WS_VISIBLE | WS_VSCROLL,  
         NULL
     );
     DragAcceptFiles(State.DisasmWindow.Handle, TRUE);
-    Win32_SetWindowScrollbar(&State.DisasmWindow, R3000A_RESET_VEC, R3000A_RESET_VEC, R3000A_RESET_VEC);
+    Win32_SetWindowScrollbar(&State.DisasmWindow, 
+        R3000A_RESET_VEC/sizeof(u32), 
+        R3000A_RESET_VEC/sizeof(u32), 
+        R3000A_RESET_VEC/sizeof(u32)
+    );
+
+    /* create the state window */
     State.CPUWindow = Win32_CreateWindowOrDie(
         ManagerWindow, 
         State.MainWindow.Handle, 
-        "CPUState",  
-        100 + 540, 150, 540, 670/2, 
-        "CPUStateCls", 
-        Win32_MainWndProc, 
+        "CPU State",  
+        State.DisasmWindow.Position.right, 
+        State.DisasmWindow.Position.top, 
+        540, 300, 
+        ChildWndClsName, 
         WS_EX_OVERLAPPEDWINDOW, 
-        WS_OVERLAPPED | WS_SYSMENU | WS_VISIBLE, 
+        WS_THICKFRAME | WS_SYSMENU | WS_CAPTION | WS_VISIBLE, 
         NULL
+    );
+
+    /* create the log window */
+    State.LogMenu = CreateMenu();
+    AppendMenuA(State.LogMenu, MF_STRING, LOGMENU_CLEAR_LOG, "&Clear Log");
+    AppendMenuA(State.LogMenu, MF_STRING, LOGMENU_CLEAR_OUTPUT, "&Clear Ouput");
+    State.LogWindow = Win32_CreateWindowOrDie(
+        ManagerWindow,
+        State.MainWindow.Handle, 
+        "Log",
+        State.CPUWindow.Position.left, 
+        State.CPUWindow.Position.bottom, 
+        540, 360,
+        ChildWndClsName, 
+        WS_EX_OVERLAPPEDWINDOW, 
+        WS_THICKFRAME | WS_SYSMENU | WS_CAPTION | WS_VISIBLE | WS_VSCROLL,
+        State.LogMenu
     );
 
     LOGFONTA FontAttr = {
@@ -857,33 +1012,61 @@ static DWORD Win32_Main(LPVOID UserData)
     };
     HFONT FontHandle = CreateFontIndirectA(&FontAttr);
 
-    double ElapsedTime = 0;
+    Bool8 UserStepClock = false;
+    Bool8 AutoClock = false;
+    Bool8 RedrawPCIfNotViewable = true;
+    double ElapsedTimeMillisec = 0;
     double StartTime = Win32_GetTimeMillisec();
     while (Win32_MainPollInputs(ManagerWindow, &State))
     {
         /* reduce cpu usage */
-        Sleep(5);
-        double MipsCPUTimeMS = 0, 
-              MipsCPUTimeStart = Win32_GetTimeMillisec();
-        int CyclesPerFrame = State.CPUCyclesPerSec / FPS;
-#if 0
-        for (int i = 0; 
-            i < CyclesPerFrame
-            && MipsCPUTimeMS < 1000.0; 
-            i++)
+        /* other than that, it's way too fast (holding single step for 150ms completes the whole test) */
+        Sleep(1);
+
+        /* user inputs */
+        /* if the key is down, its timestamp will be nonzero, so it's safe to check the delta */
+        double SpaceDownTimeDelta = Win32_GetTimeMillisec() - State.KeyDownTimestampMillisec[VK_SPACE];
+        UserStepClock = 
+            Win32_IsKeyPressed(&State, VK_SPACE)
+            || (State.KeyIsDown[VK_SPACE] 
+                && SpaceDownTimeDelta > 150.0);
+        if (Win32_IsKeyPressed(&State, 'R'))
+        {
+            R3000A_Reset(&State.CPU);
+            RedrawPCIfNotViewable = true;
+        }
+        if (Win32_IsKeyPressed(&State, 'A'))
+        {
+            AutoClock = !AutoClock;
+            RedrawPCIfNotViewable = true;
+        }
+
+        /* clocking the mips */
+        if (UserStepClock)
         {
             R3000A_StepClock(&State.CPU);
-            MipsCPUTimeMS = Win32_GetTimeMillisec() - MipsCPUTimeStart;
+            RedrawPCIfNotViewable = true;
         }
-#endif
+        else if (AutoClock)
+        {
+            int CyclesPerFrame = State.CPUCyclesPerSec / FPS;
+            for (int i = 0; 
+                i < CyclesPerFrame;
+                i++)
+            {
+                R3000A_StepClock(&State.CPU);
+            }
+            RedrawPCIfNotViewable = true;
+        }
 
-
+        /* frame time calculation */
         double EndTime = Win32_GetTimeMillisec();
         double DeltaTime = EndTime - StartTime;
-        ElapsedTime += DeltaTime;
+        ElapsedTimeMillisec += DeltaTime;
         StartTime = EndTime;
 
-        if (ElapsedTime >= 1000.0 / FPS)
+        /* rendering */
+        if (ElapsedTimeMillisec >= 1000.0 / FPS)
         {
             int FontWidth = FontAttr.lfWidth;
             int FontHeight = FontAttr.lfHeight;
@@ -908,7 +1091,7 @@ static DWORD Win32_Main(LPVOID UserData)
                 int RegisterBoxHeight = 2*FontHeight + 2;
                 int RegisterBoxVerDist = RegisterBoxHeight + 5;
                 int RegisterBoxHorDist = RegisterBoxWidth + 5;
-                int RegisterBoxPerLine = 4;
+                int RegisterBoxPerLine = 6;
                 RECT RegisterBox = {
                     .left = 10,
                     .right = 10 + RegisterBoxWidth,
@@ -946,12 +1129,9 @@ static DWORD Win32_Main(LPVOID UserData)
                 }
 
                 RECT PCRegisterBox = RegisterBox;
-                PCRegisterBox.left += RegisterBoxHorDist * RegisterBoxPerLine;
-                PCRegisterBox.right += PCRegisterBox.left;
                 FillRect(DC, &PCRegisterBox, RegisterBoxColorBrush);
-                static int FrameCounter = 0;
                 Win32_DrawStrFmt(DC, &PCRegisterBox, DT_CENTER, 64, 
-                    "f=%d\n dt: %3.2f", FrameCounter++, ElapsedTime
+                    "PC:\n%08x", State.CPU.PC
                 );
 
                 DeleteObject(SelectObject(DC, LastBrush));
@@ -965,14 +1145,29 @@ static DWORD Win32_Main(LPVOID UserData)
                 /* clear background */
                 FillRect(DC, &Region.Rect, WHITE_BRUSH);
 
-                /* draw disassembly */
+
+                /* disassembly variables */
                 SelectObject(DC, FontHandle);
                 int InstructionCount = Region.h / FontHeight + 1; /* +1 for smooth transition */
                 State.DisasmInstructionPerPage = InstructionCount;
                 int AddrWidth = FontWidth*(8+2);
                 int HexWidth  = FontWidth*(8+4);
+
+                /* make sure PC is in drawable range before disassembly */
+                u32 ViewableDisasmAddrLo = State.DisasmAddr;
+                u32 ViewableDisasmAddrHi = ViewableDisasmAddrLo + InstructionCount*4;
+                if (RedrawPCIfNotViewable && !IN_RANGE(ViewableDisasmAddrLo, State.CPU.PC, ViewableDisasmAddrHi))
+                {
+                    State.DisasmAddr = State.CPU.PC;
+                    ViewableDisasmAddrLo = State.CPU.PC;
+                    ViewableDisasmAddrHi = State.CPU.PC + InstructionCount*4;
+                }
+                RedrawPCIfNotViewable = false;
+
+                /* disassmble the instructions */
                 DisassemblyData Disasm = DisassembleMemory(
-                    State.OSMem.Ptr, State.OSMem.SizeBytes, 
+                    State.OSMem.Ptr, 
+                    State.OSMem.SizeBytes, 
                     InstructionCount, 
                     State.DisasmAddr, 
                     State.DisasmFlags
@@ -982,6 +1177,8 @@ static DWORD Win32_Main(LPVOID UserData)
                     AddrWidth, 
                     HexWidth
                 );
+
+                /* draw disassembly */
                 DrawTextA(DC, Disasm.Addr, -1, &DisasmRegion.Addr, DT_LEFT);
                 DrawTextA(DC, Disasm.HexCode, -1, &DisasmRegion.Hex, DT_LEFT);
                 DrawTextA(DC, Disasm.Mnemonic, -1, &DisasmRegion.Mnemonic, DT_LEFT);
@@ -989,14 +1186,28 @@ static DWORD Win32_Main(LPVOID UserData)
                 {
                     Win32_SetWindowScrollbar(
                         &State.DisasmWindow, 
-                        State.DisasmAddr, 
-                        State.DisasmMinAddr, 
-                        State.DisasmMinAddr + State.OSMem.SizeBytes - InstructionCount*4
+                        State.DisasmAddr/sizeof(u32), 
+                        State.DisasmMinAddr/sizeof(u32), 
+                        (State.DisasmMinAddr + State.OSMem.SizeBytes)/sizeof(u32) - InstructionCount
                     );
+                }
+
+                /* draw the PC highlighter */
+                int PCInstructionIndex = (State.CPU.PC - ViewableDisasmAddrLo)/sizeof(u32);
+                if (IN_RANGE(0, PCInstructionIndex, InstructionCount - 2))
+                {
+                    /* the highlighter surrounds an instruction */
+                    RECT PCRect = Region.Rect;
+                    PCRect.top += PCInstructionIndex * FontHeight;
+                    PCRect.bottom = PCRect.top + FontHeight;
+
+                    /* draw the highlighter */
+                    u32 HighlighterColorARGB = 0x00eb5d05;
+                    Win32_BlendRegion(DC, &PCRect, HighlighterColorARGB);
                 }
             }
             Win32_EndPaint(&Region);
-            ElapsedTime = 0;
+            ElapsedTimeMillisec = 0;
         }
     }
 
