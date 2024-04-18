@@ -17,8 +17,9 @@ typedef u8 Bool8;
 #define MAINTHREAD_CREATE_WINDOW (WM_USER + 0)
 #define MAINTHREAD_CLOSE_WINDOW (WM_USER + 1)
 #define MAINTHREAD_MOVE_WINDOW (WM_USER + 2)
-#define MSGTHREAD_MOVING (WM_USER + 3)
-#define MSGTHREAD_SIZING (WM_USER + 4)
+#define MAINTHREAD_SET_VERT_SCROLL_INFO (WM_USER + 3)
+#define MSGTHREAD_MOVING (WM_USER + 32)
+#define MSGTHREAD_SIZING (WM_USER + 33)
 
 typedef enum TestSyscall 
 {
@@ -44,15 +45,16 @@ typedef struct DisassemblyData
 
 
 
-#define IS_MENU_COMMAND(cmd) IN_RANGE(MAINMENU_OPEN_FILE, cmd, MAINMENU_MEMORY_WINDOW)
+#define IS_MENU_COMMAND(cmd) IN_RANGE(MAINMENU_OPEN_FILE, cmd, LOGMENU_SWAP)
 typedef enum Win32_MainMenuCommand 
 {
-    MAINMENU_OPEN_FILE = 1,
+    MAINMENU_OPEN_FILE = 2,
     MAINMENU_DISASM_WINDOW,
     MAINMENU_CPUSTATE_WINDOW,
+    MAINMENU_LOG_WINDOW,
     MAINMENU_MEMORY_WINDOW,
-    LOGMENU_CLEAR_LOG,
-    LOGMENU_CLEAR_OUTPUT,
+    LOGMENU_CLEAR,
+    LOGMENU_SWAP,
 } Win32_MainMenuCommand;
 
 
@@ -79,7 +81,8 @@ typedef struct Win32_Window
 {
     RECT Position;
     HWND Handle;
-    HDC TmpDC;
+    uint CurrentShowState:1;
+    UINT ShowState[2];
 } Win32_Window;
 
 typedef struct Win32_BufferData 
@@ -87,11 +90,17 @@ typedef struct Win32_BufferData
     u8 *Ptr;
     iSize SizeBytes;
 } Win32_BufferData;
-typedef struct Win32_BufferData Win32_Stack;
+
+typedef struct StringBuffer 
+{
+    char *Ptr;
+    iSize Size;
+    iSize Capacity;
+} StringBuffer;
 
 typedef struct Win32_MainWindowState 
 {
-    HWND ManagerWindow;
+    HWND WindowManager;
     Win32_Window MainWindow, 
                  DisasmWindow, 
                  CPUWindow, 
@@ -114,6 +123,9 @@ typedef struct Win32_MainWindowState
     Bool8 KeyWasDown[0x100];
     double KeyDownTimestampMillisec[0x100];
     char DroppedFileName[1024];
+    StringBuffer *WorkingStrBuffer;
+    StringBuffer StdOut;
+    StringBuffer StdErr;
 } Win32_MainWindowState;
 
 typedef struct Win32_DisassemblyWindow
@@ -174,7 +186,7 @@ static double Win32_GetTimeMillisec(void)
 
 
 static Win32_Window Win32_CreateWindowOrDie(
-    HWND ManagerWindow, 
+    HWND WindowManager, 
     HWND Parent, 
     const char *Title,
     int x, int y, int w, int h,
@@ -196,7 +208,7 @@ static Win32_Window Win32_CreateWindowOrDie(
         .lpWindowName = Title, 
         .ParentWindow = Parent, 
     };
-    HWND Handle = (HWND)SendMessageA(ManagerWindow, MAINTHREAD_CREATE_WINDOW, (WPARAM)&Args, 0);
+    HWND Handle = (HWND)SendMessageA(WindowManager, MAINTHREAD_CREATE_WINDOW, (WPARAM)&Args, 0);
     if (NULL == Handle)
     {
         Win32_Fatal("Unable to create a window");
@@ -209,8 +221,15 @@ static Win32_Window Win32_CreateWindowOrDie(
             .right = x + w,
             .bottom = y + h,
         },
+        .CurrentShowState = 0,
+        .ShowState = { SW_HIDE, SW_SHOW },
     };
     return Window;
+}
+
+static void Win32_ToggleShowState(Win32_Window *Window)
+{
+    ShowWindow(Window->Handle, Window->ShowState[Window->CurrentShowState++]); 
 }
 
 static void Win32_UpdateWindowPos(Win32_Window *Window, int x, int y)
@@ -318,6 +337,52 @@ static void Win32_DeallocateMemory(void *Ptr)
     VirtualFree(Ptr, 0, 0);
 }
 
+static void Memcpy(void *Dst, const void *Src, iSize Size)
+{
+    u8 *DstPtr = Dst;
+    const u8 *SrcPtr = Src;
+    while (Size --> 0)
+    {
+        *DstPtr++ = *SrcPtr++;
+    }
+}
+
+
+
+static void StrResizeCapacity(StringBuffer *StrBuf, iSize NewCapacity)
+{
+    char *Ptr = Win32_AllocateMemory(NewCapacity);
+    ASSERT(NewCapacity > StrBuf->Size);
+    Memcpy(Ptr, StrBuf->Ptr, StrBuf->Size);
+    Win32_DeallocateMemory(StrBuf->Ptr);
+
+    StrBuf->Ptr = Ptr;
+    StrBuf->Capacity = NewCapacity;
+}
+
+static void StrWriteFmt(StringBuffer *StrBuf, const char *Fmt, ...)
+{
+    va_list Args;
+    va_start(Args, Fmt);
+
+    /* TODO: this is slow */
+    int RequiredLen = vsnprintf(NULL, 0, Fmt, Args);
+    if (StrBuf->Size + RequiredLen + 1 > StrBuf->Capacity)
+    {
+        iSize NewCapacity = (StrBuf->Size + RequiredLen + 1)*4;
+        StrResizeCapacity(StrBuf, NewCapacity);
+    }
+
+    int WrittenLen = vsnprintf(
+        StrBuf->Ptr + StrBuf->Size, 
+        StrBuf->Capacity - StrBuf->Size, 
+        Fmt, Args
+    );
+    StrBuf->Size += WrittenLen;
+
+    va_end(Args);
+}
+
 
 
 static LRESULT CALLBACK Win32_ManagerWndProc(HWND Window, UINT Msg, WPARAM wParam, LPARAM lParam)
@@ -357,6 +422,12 @@ static LRESULT CALLBACK Win32_ManagerWndProc(HWND Window, UINT Msg, WPARAM wPara
             Window->Position.bottom - Window->Position.top, 
             false
         );
+    } break;
+    case MAINTHREAD_SET_VERT_SCROLL_INFO:
+    {
+        HWND Window = (HWND)wParam;
+        SCROLLINFO *ScrollInfo = (SCROLLINFO *)lParam;
+        SetScrollInfo(Window, SB_VERT, ScrollInfo, FALSE);
     } break;
     default:
     {
@@ -509,6 +580,7 @@ static void Win32_ReadFileSyncIntoOSMem(
         if (!ReadFile(FileHandle, Buffer, FileSize, &ReadSize, NULL) || ReadSize != FileSize)
             goto ReadFileFailed;
 
+        /* deallocate the old OS memory */
         Win32_DeallocateMemory(State->OSMem.Ptr);
         State->OSMem.Ptr = Buffer;
         State->OSMem.SizeBytes = BufferSize;
@@ -527,9 +599,9 @@ CreateFileFailed:
     );
 }
 
-static void Win32_SetWindowScrollbar(Win32_Window *Window, u64 Pos, u64 Low, u64 High)
+static void Win32_SetWindowScrollbar(HWND WindowManager, Win32_Window *Window, u64 Pos, u64 Low, u64 High)
 {
-    /* to the scrollbar from disappearing */
+    /* to prevent the scrollbar from disappearing */
     if (High == Low)
     {
         High = Low + 256;
@@ -541,11 +613,11 @@ static void Win32_SetWindowScrollbar(Win32_Window *Window, u64 Pos, u64 Low, u64
         .nMax = High,
         .nMin = Low,
     };
-    SetScrollInfo(Window->Handle, SB_VERT, &ScrollInfo, TRUE);
+    SendMessageA(WindowManager, MAINTHREAD_SET_VERT_SCROLL_INFO, (WPARAM)Window->Handle, (LPARAM)&ScrollInfo);
 }
 
 
-static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *State)
+static Bool8 Win32_MainPollInputs(HWND WindowManager, Win32_MainWindowState *State)
 {
     MSG Msg;
     State->KeyWasDown[State->LastKey] = State->KeyIsDown[State->LastKey];
@@ -557,48 +629,75 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
         case WM_QUIT:
         {
             HWND Window = (HWND)Msg.wParam;
-            if (Window != State->MainWindow.Handle) /* close child window, just hide it, don't actually close */
+            if (Window == State->DisasmWindow.Handle)
             {
-                ShowWindow(Window, SW_HIDE);
+                Win32_ToggleShowState(&State->DisasmWindow);
+            }
+            else if (Window == State->CPUWindow.Handle)
+            {
+                Win32_ToggleShowState(&State->CPUWindow);
             }
             else /* close main window */
             {
                 /* because the message we're recieving is from the message window, 
                  * we can't just send the same message back (if we do, that'll be an infinite loop), 
                  * so we send our custom messages instead */
-                SendMessageA(ManagerWindow, MAINTHREAD_CLOSE_WINDOW, (WPARAM)Window, 0);
+                SendMessageA(WindowManager, MAINTHREAD_CLOSE_WINDOW, (WPARAM)Window, 0);
                 return false;
             }
         } break;
         case WM_COMMAND:
         {
             Win32_MainMenuCommand Cmd = LOWORD(Msg.wParam);
-            switch (Cmd)
+            if (HIWORD(Msg.wParam) == 0)
             {
-            case MAINMENU_OPEN_FILE:
-            {
-                OPENFILENAMEA Prompt = Win32_CreateFileSelectionPrompt(
-                    State->MainWindow.Handle, 
-                    Win32_TmpFileName, 
-                    sizeof Win32_TmpFileName,
-                    0
-                );
-                if (GetOpenFileNameA(&Prompt))
+                switch (Cmd)
                 {
-                    Win32_ReadFileSyncIntoOSMem(State, Prompt.lpstrFile, OPEN_EXISTING);
+                case MAINMENU_OPEN_FILE:
+                {
+                    OPENFILENAMEA Prompt = Win32_CreateFileSelectionPrompt(
+                        State->MainWindow.Handle, 
+                        Win32_TmpFileName, 
+                        sizeof Win32_TmpFileName,
+                        0
+                    );
+                    if (GetOpenFileNameA(&Prompt))
+                    {
+                        Win32_ReadFileSyncIntoOSMem(State, Prompt.lpstrFile, OPEN_EXISTING);
+                    }
+                } break;
+                case MAINMENU_DISASM_WINDOW: 
+                {
+                    Win32_ToggleShowState(&State->DisasmWindow);
+                } break;
+                case MAINMENU_MEMORY_WINDOW:
+                {
+                } break;
+                case MAINMENU_CPUSTATE_WINDOW:
+                {
+                    Win32_ToggleShowState(&State->CPUWindow);
+                } break;
+                case MAINMENU_LOG_WINDOW:
+                {
+                    Win32_ToggleShowState(&State->LogWindow);
+                } break;
+
+                case LOGMENU_CLEAR:
+                {
+                    ASSERT(State->WorkingStrBuffer 
+                        && (State->WorkingStrBuffer == &State->StdOut 
+                        || State->WorkingStrBuffer == &State->StdErr)
+                    );
+                    State->WorkingStrBuffer->Size = 0;
+                } break;
+                case LOGMENU_SWAP:
+                {
+                    if (State->WorkingStrBuffer == &State->StdOut)
+                        State->WorkingStrBuffer = &State->StdErr;
+                    else if (State->WorkingStrBuffer == &State->StdErr)
+                        State->WorkingStrBuffer = &State->StdOut;
+                } break;
                 }
-            } break;
-            case MAINMENU_DISASM_WINDOW: 
-            {
-                ShowWindow(State->DisasmWindow.Handle, SW_SHOW); 
-            } break;
-            case MAINMENU_MEMORY_WINDOW:
-            {
-            } break;
-            case MAINMENU_CPUSTATE_WINDOW:
-            {
-                ShowWindow(State->CPUWindow.Handle, SW_SHOW);
-            } break;
             }
         } break;
         case WM_DROPFILES:
@@ -649,7 +748,7 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
         } break;
         case WM_MOUSEWHEEL:
         {
-            double Res = WHEEL_DELTA;
+            double Res = 8;
             double MouseDelta = GET_WHEEL_DELTA_WPARAM(Msg.wParam);
             i32 ScrollDelta;
 
@@ -704,9 +803,9 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
             {
                 int Dx = x - State->MainWindow.Position.left;
                 int Dy = y - State->MainWindow.Position.top;
-                Win32_MoveWindow(State->ManagerWindow, &State->DisasmWindow, Dx, Dy);
-                Win32_MoveWindow(State->ManagerWindow, &State->CPUWindow, Dx, Dy);
-                Win32_MoveWindow(State->ManagerWindow, &State->LogWindow, Dx, Dy);
+                Win32_MoveWindow(State->WindowManager, &State->DisasmWindow, Dx, Dy);
+                Win32_MoveWindow(State->WindowManager, &State->CPUWindow, Dx, Dy);
+                Win32_MoveWindow(State->WindowManager, &State->LogWindow, Dx, Dy);
                 Win32_UpdateWindowPos(&State->MainWindow, x, y);
             }
             else if (WindowHandle == State->DisasmWindow.Handle)
@@ -731,15 +830,6 @@ static Bool8 Win32_MainPollInputs(HWND ManagerWindow, Win32_MainWindowState *Sta
 
 
 
-
-
-static void Memcpy(void *Dst, const void *Src, iSize SizeBytes)
-{
-    u8 *DstPtr = Dst;
-    const u8 *SrcPtr = Src;
-    while (SizeBytes --> 0)
-        *DstPtr++ = *SrcPtr++;
-}
 
 static u32 TranslateAddr(u32 LogicalAddr)
 {
@@ -835,11 +925,11 @@ static DisassemblyRegions GetDisassemblyRegion(const RECT *ClientRect, int MaxAd
     return Disasm;
 }
 
-static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3000A_DataSize DataSize)
+static void MipsWrite(void *UserData, u32 LogicalAddr, u32 Data, R3000A_DataSize DataSize)
 {
     Win32_MainWindowState *State = UserData;
 
-    Addr = TranslateAddr(Addr);
+    u32 Addr = TranslateAddr(LogicalAddr);
     if (AddrIsValid(Addr, DataSize, State->OSMem.SizeBytes))
     {
         for (int i = 0; i < DataSize; i++)
@@ -849,26 +939,40 @@ static void MipsWrite(void *UserData, u32 Addr, u32 Data, R3000A_DataSize DataSi
     }
     else if (Addr == TESTSYS_EXIT)
     {
-        /* TODO: log exit msg */
+        StrWriteFmt(&State->StdErr, "[LOG]: Exited\n");
     }
     else if (Addr == TESTSYS_WRITEHEX)
     {
-        /* TODO: log hex msg */
+        StrWriteFmt(&State->StdOut, "0x%0x\n", DataSize, Data);
     }
     else if (Addr == TESTSYS_WRITESTR)
     {
-        /* TODO: log string msg */
+        u32 Location = TranslateAddr(Data);
+        if (AddrIsValid(Location, 1, State->OSMem.SizeBytes))
+        {
+            const char *Str = (const char *)State->OSMem.Ptr + Location;
+            int StrLen = 0;
+            for (u32 i = Location; i < State->OSMem.SizeBytes && Str[StrLen]; i++)
+            {
+                StrLen++;
+            }
+            StrWriteFmt(&State->StdOut, "%.*s", StrLen, Str);
+        }
+        else
+        {
+            StrWriteFmt(&State->StdErr, "[LOG]: Invalid string address: %08x\n", Data);
+        }
     }
     else
     {
-        /* TODO: logging */
+        StrWriteFmt(&State->StdErr, "[LOG]: Invalid address: writing %08x of size %d to %08x\n", Data, DataSize, Addr);
     }
 }
 
-static u32 MipsRead(void *UserData, u32 Addr, R3000A_DataSize DataSize)
+static u32 MipsRead(void *UserData, u32 LogicalAddr, R3000A_DataSize DataSize)
 {
     Win32_MainWindowState *State = UserData;
-    Addr = TranslateAddr(Addr);
+    u32 Addr = TranslateAddr(LogicalAddr);
     if (AddrIsValid(Addr, DataSize, State->OSMem.SizeBytes))
     {
         u32 Data = 0;
@@ -880,7 +984,7 @@ static u32 MipsRead(void *UserData, u32 Addr, R3000A_DataSize DataSize)
     }
     else
     {
-        /* TODO: logging */
+        StrWriteFmt(&State->StdErr, "[LOG]: Invalid address: reading %d bytes at %08x\n", DataSize, LogicalAddr);
     }
     return 0;
 }
@@ -893,9 +997,154 @@ static Bool8 MipsVerify(void *UserData, u32 Addr)
 }
 
 
+
+static Bool8 Win32_PaintDisasmWindow(
+    Win32_MainWindowState *State, 
+    int FontWidth, 
+    int FontHeight, 
+    HFONT FontHandle, 
+    Bool8 RedrawPCIfNotViewable
+)
+{
+    Win32_ClientRegion Region = Win32_BeginPaint(&State->DisasmWindow);
+    {
+        HDC DC = Region.TmpBackDC;
+        /* clear background */
+        FillRect(DC, &Region.Rect, WHITE_BRUSH);
+        SelectObject(DC, FontHandle);
+
+
+        /* disassembly variables */
+        int InstructionCount = Region.h / FontHeight + 1; /* +1 for smooth transition */
+        State->DisasmInstructionPerPage = InstructionCount;
+        int AddrWidth = FontWidth*(8+2);
+        int HexWidth  = FontWidth*(8+4);
+
+        /* make sure PC is in drawable range before disassembly */
+        u32 ViewableDisasmAddrLo = State->DisasmAddr;
+        u32 ViewableDisasmAddrHi = ViewableDisasmAddrLo + InstructionCount*4;
+        if (RedrawPCIfNotViewable && !IN_RANGE(ViewableDisasmAddrLo, State->CPU.PC, ViewableDisasmAddrHi))
+        {
+            State->DisasmAddr = State->CPU.PC;
+            ViewableDisasmAddrLo = State->CPU.PC;
+            ViewableDisasmAddrHi = State->CPU.PC + InstructionCount*4;
+        }
+        RedrawPCIfNotViewable = false;
+
+        /* disassmble the instructions */
+        DisassemblyData Disasm = DisassembleMemory(
+            State->OSMem.Ptr, 
+            State->OSMem.SizeBytes, 
+            InstructionCount, 
+            State->DisasmAddr, 
+            State->DisasmFlags
+        );
+        DisassemblyRegions DisasmRegion = GetDisassemblyRegion(
+            &Region.Rect, 
+            AddrWidth, 
+            HexWidth
+        );
+
+        /* draw disassembly */
+        DrawTextA(DC, Disasm.Addr, -1, &DisasmRegion.Addr, DT_LEFT);
+        DrawTextA(DC, Disasm.HexCode, -1, &DisasmRegion.Hex, DT_LEFT);
+        DrawTextA(DC, Disasm.Mnemonic, -1, &DisasmRegion.Mnemonic, DT_LEFT);
+        if (State->OSMem.SizeBytes != 0)
+        {
+            Win32_SetWindowScrollbar(
+                State->WindowManager, 
+                &State->DisasmWindow, 
+                State->DisasmAddr/sizeof(u32), 
+                State->DisasmMinAddr/sizeof(u32), 
+                (State->DisasmMinAddr + State->OSMem.SizeBytes)/sizeof(u32) - InstructionCount
+            );
+        }
+
+        /* draw the PC highlighter */
+        int PCInstructionIndex = (State->CPU.PC - ViewableDisasmAddrLo)/sizeof(u32);
+        if (IN_RANGE(0, PCInstructionIndex, InstructionCount - 2))
+        {
+            /* the highlighter surrounds an instruction */
+            RECT PCRect = Region.Rect;
+            PCRect.top += PCInstructionIndex * FontHeight;
+            PCRect.bottom = PCRect.top + FontHeight;
+
+            /* draw the highlighter */
+            u32 HighlighterColorARGB = 0x00eb5d05;
+            Win32_BlendRegion(DC, &PCRect, HighlighterColorARGB);
+        }
+    }
+    Win32_EndPaint(&Region);
+    return RedrawPCIfNotViewable;
+}
+
+static void Win32_PaintStateWindow(Win32_MainWindowState *State, int FontWidth, int FontHeight, HFONT FontHandle)
+{
+    Win32_ClientRegion Region = Win32_BeginPaint(&State->CPUWindow);
+    {
+        HDC DC = Region.TmpBackDC;
+        SelectObject(DC, FontHandle);
+
+        /* clear background */
+        FillRect(DC, &Region.Rect, WHITE_BRUSH);
+
+        /* register variables */
+        int RegisterBoxWidth = FontWidth * 10;
+        int RegisterBoxHeight = 2*FontHeight + 2;
+        int RegisterBoxVerDist = RegisterBoxHeight + 5;
+        int RegisterBoxHorDist = RegisterBoxWidth + 5;
+        int RegisterBoxPerLine = 6;
+        RECT RegisterBox = {
+            .left = 10,
+            .right = 10 + RegisterBoxWidth,
+            .top = 10,
+            .bottom = 10 + RegisterBoxHeight,
+        };
+
+        /* draw the registers R00..R31 */
+        COLORREF Color = RGB(0x40, 0x40, 0x40);
+        SetBkColor(DC, Color);
+        SetTextColor(DC, RGB(0xFF, 0xFF, 0xFF));
+        HBRUSH RegisterBoxColorBrush = CreateSolidBrush(Color);
+        HBRUSH LastBrush = SelectObject(DC, RegisterBoxColorBrush);
+        RECT CurrentRegisterBox = RegisterBox;
+        uint RegisterCount = STATIC_ARRAY_SIZE(State->CPU.R);
+        for (uint i = 0; i < RegisterCount; i++)
+        {
+            FillRect(DC, &CurrentRegisterBox, RegisterBoxColorBrush);
+            Win32_DrawStrFmt(DC, &CurrentRegisterBox, DT_CENTER, 64, 
+                "R%02d:\n%08x", i, State->CPU.R[i]
+            );
+
+            if ((i + 1) % RegisterBoxPerLine == 0)
+            {
+                CurrentRegisterBox.left = RegisterBox.left;
+                CurrentRegisterBox.right = RegisterBox.right;
+                CurrentRegisterBox.top += RegisterBoxVerDist;
+                CurrentRegisterBox.bottom += RegisterBoxVerDist;
+            }
+            else
+            {
+                CurrentRegisterBox.left += RegisterBoxHorDist;
+                CurrentRegisterBox.right += RegisterBoxHorDist;
+            }
+        }
+
+        RECT PCRegisterBox = RegisterBox;
+        FillRect(DC, &PCRegisterBox, RegisterBoxColorBrush);
+        Win32_DrawStrFmt(DC, &PCRegisterBox, DT_CENTER, 64, 
+            "PC:\n%08x", State->CPU.PC
+        );
+
+        DeleteObject(SelectObject(DC, LastBrush));
+    }
+    Win32_EndPaint(&Region);
+}
+
+
 static DWORD Win32_Main(LPVOID UserData)
 {
-    HWND ManagerWindow = UserData;
+    HWND WindowManager = UserData;
 
     Win32_InitSystem();
 
@@ -906,14 +1155,17 @@ static DWORD Win32_Main(LPVOID UserData)
         .DisasmMinAddr = R3000A_RESET_VEC,
         .CPU = R3000A_Init(&State, MipsRead, MipsWrite, MipsVerify, MipsVerify),
         .CPUCyclesPerSec = FPS,
-        .ManagerWindow = ManagerWindow,
+        .WindowManager = WindowManager,
+
+        .WorkingStrBuffer = &State.StdOut,
     };
 
     /* create the main window */
     State.MainMenu = CreateMenu();
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_DISASM_WINDOW, "&Disassembly");
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_MEMORY_WINDOW, "&Memory");
-    AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_CPUSTATE_WINDOW, "&CPU State");
+    AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_CPUSTATE_WINDOW, "&CPU");
+    AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_LOG_WINDOW, "&Log");
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_OPEN_FILE, "&Open File");
     const char *MainWndClsName = "MainWndCls";
     WNDCLASSEXA MainWindowClass = {
@@ -927,7 +1179,7 @@ static DWORD Win32_Main(LPVOID UserData)
     };
     RegisterClassExA(&MainWindowClass);
     State.MainWindow = Win32_CreateWindowOrDie(
-        ManagerWindow, 
+        WindowManager, 
         NULL,
         "R3000A Debug Emu",
         100, 100, 1080, 720, 
@@ -950,7 +1202,7 @@ static DWORD Win32_Main(LPVOID UserData)
     };
     RegisterClassExA(&ChildWindowClass);
     State.DisasmWindow = Win32_CreateWindowOrDie(
-        ManagerWindow, 
+        WindowManager, 
         State.MainWindow.Handle,
         "Disassembly",
         State.MainWindow.Position.left, 
@@ -962,7 +1214,9 @@ static DWORD Win32_Main(LPVOID UserData)
         NULL
     );
     DragAcceptFiles(State.DisasmWindow.Handle, TRUE);
-    Win32_SetWindowScrollbar(&State.DisasmWindow, 
+    Win32_SetWindowScrollbar(
+        State.WindowManager,
+        &State.DisasmWindow, 
         R3000A_RESET_VEC/sizeof(u32), 
         R3000A_RESET_VEC/sizeof(u32), 
         R3000A_RESET_VEC/sizeof(u32)
@@ -970,7 +1224,7 @@ static DWORD Win32_Main(LPVOID UserData)
 
     /* create the state window */
     State.CPUWindow = Win32_CreateWindowOrDie(
-        ManagerWindow, 
+        WindowManager, 
         State.MainWindow.Handle, 
         "CPU State",  
         State.DisasmWindow.Position.right, 
@@ -984,10 +1238,10 @@ static DWORD Win32_Main(LPVOID UserData)
 
     /* create the log window */
     State.LogMenu = CreateMenu();
-    AppendMenuA(State.LogMenu, MF_STRING, LOGMENU_CLEAR_LOG, "&Clear Log");
-    AppendMenuA(State.LogMenu, MF_STRING, LOGMENU_CLEAR_OUTPUT, "&Clear Ouput");
+    AppendMenuA(State.LogMenu, MF_STRING, LOGMENU_CLEAR, "&Clear");
+    AppendMenuA(State.LogMenu, MF_STRING, LOGMENU_SWAP, "&Swap");
     State.LogWindow = Win32_CreateWindowOrDie(
-        ManagerWindow,
+        WindowManager,
         State.MainWindow.Handle, 
         "Log",
         State.CPUWindow.Position.left, 
@@ -1015,12 +1269,12 @@ static DWORD Win32_Main(LPVOID UserData)
     Bool8 UserStepClock = false;
     Bool8 AutoClock = false;
     Bool8 RedrawPCIfNotViewable = true;
-    double ElapsedTimeMillisec = 0;
+    double ElapsedTimeMillisec = 1000; /* force initial frame to be drawn immediately */
     double StartTime = Win32_GetTimeMillisec();
-    while (Win32_MainPollInputs(ManagerWindow, &State))
+    while (Win32_MainPollInputs(WindowManager, &State))
     {
         /* reduce cpu usage */
-        /* other than that, it's way too fast (holding single step for 150ms completes the whole test) */
+        /* slowing down because it's way too fast (finished the test in less than 100ms) */
         Sleep(1);
 
         /* user inputs */
@@ -1059,158 +1313,62 @@ static DWORD Win32_Main(LPVOID UserData)
             RedrawPCIfNotViewable = true;
         }
 
+        /* rendering */
+        if (ElapsedTimeMillisec > 1000.0 / FPS)
+        {
+            int FontWidth = FontAttr.lfWidth;
+            int FontHeight = FontAttr.lfHeight;
+            Win32_ClientRegion Region = Win32_BeginPaint(&State.MainWindow);
+            {
+                /* clear background */
+                HDC DC = Region.TmpBackDC;
+                FillRect(DC, &Region.Rect, WHITE_BRUSH);
+            }
+            Win32_EndPaint(&Region);
+
+            Win32_PaintStateWindow(&State, FontWidth, FontHeight, FontHandle);
+            RedrawPCIfNotViewable = Win32_PaintDisasmWindow(&State, FontWidth, FontHeight, FontHandle, RedrawPCIfNotViewable);
+
+            Region = Win32_BeginPaint(&State.LogWindow);
+            {
+                HDC DC = Region.TmpBackDC;
+                SelectObject(DC, FontHandle);
+
+                COLORREF BackgroundColor = 0x00202020;
+                COLORREF TextColor = 0x00FFFFFF;
+                /* clear background */
+                {
+                    HBRUSH BackgroundBrush = CreateSolidBrush(BackgroundColor);
+                    FillRect(DC, &Region.Rect, BackgroundBrush);
+                    DeleteObject(BackgroundBrush);
+                }
+
+                /* draw current text buffer */
+                SetTextColor(DC, TextColor);
+                SetBkColor(DC, BackgroundColor);
+                RECT StdOutRect = Region.Rect;
+                DrawText(DC, State.WorkingStrBuffer->Ptr, State.WorkingStrBuffer->Size, &StdOutRect, DT_LEFT);
+            }
+            Win32_EndPaint(&Region);
+
+            ElapsedTimeMillisec = 0;
+        }
+
         /* frame time calculation */
         double EndTime = Win32_GetTimeMillisec();
         double DeltaTime = EndTime - StartTime;
         ElapsedTimeMillisec += DeltaTime;
         StartTime = EndTime;
 
-        /* rendering */
-        if (ElapsedTimeMillisec >= 1000.0 / FPS)
-        {
-            int FontWidth = FontAttr.lfWidth;
-            int FontHeight = FontAttr.lfHeight;
-            Win32_ClientRegion Region = Win32_BeginPaint(&State.MainWindow);
-            {
-                HDC DC = Region.TmpBackDC;
-                FillRect(DC, &Region.Rect, WHITE_BRUSH);
-            }
-            Win32_EndPaint(&Region);
 
-
-            Region = Win32_BeginPaint(&State.CPUWindow);
-            {
-                HDC DC = Region.TmpBackDC;
-                SelectObject(DC, FontHandle);
-
-                /* clear background */
-                FillRect(DC, &Region.Rect, WHITE_BRUSH);
-
-                /* register variables */
-                int RegisterBoxWidth = FontWidth * 10;
-                int RegisterBoxHeight = 2*FontHeight + 2;
-                int RegisterBoxVerDist = RegisterBoxHeight + 5;
-                int RegisterBoxHorDist = RegisterBoxWidth + 5;
-                int RegisterBoxPerLine = 6;
-                RECT RegisterBox = {
-                    .left = 10,
-                    .right = 10 + RegisterBoxWidth,
-                    .top = 10,
-                    .bottom = 10 + RegisterBoxHeight,
-                };
-
-                /* draw the registers R00..R31 */
-                COLORREF Color = RGB(0x40, 0x40, 0x40);
-                SetBkColor(DC, Color);
-                SetTextColor(DC, RGB(0xFF, 0xFF, 0xFF));
-                HBRUSH RegisterBoxColorBrush = CreateSolidBrush(Color);
-                HBRUSH LastBrush = SelectObject(DC, RegisterBoxColorBrush);
-                RECT CurrentRegisterBox = RegisterBox;
-                uint RegisterCount = STATIC_ARRAY_SIZE(State.CPU.R);
-                for (uint i = 0; i < RegisterCount; i++)
-                {
-                    FillRect(DC, &CurrentRegisterBox, RegisterBoxColorBrush);
-                    Win32_DrawStrFmt(DC, &CurrentRegisterBox, DT_CENTER, 64, 
-                        "R%02d:\n%08x", i, State.CPU.R[i]
-                    );
-
-                    if ((i + 1) % RegisterBoxPerLine == 0)
-                    {
-                        CurrentRegisterBox.left = RegisterBox.left;
-                        CurrentRegisterBox.right = RegisterBox.right;
-                        CurrentRegisterBox.top += RegisterBoxVerDist;
-                        CurrentRegisterBox.bottom += RegisterBoxVerDist;
-                    }
-                    else
-                    {
-                        CurrentRegisterBox.left += RegisterBoxHorDist;
-                        CurrentRegisterBox.right += RegisterBoxHorDist;
-                    }
-                }
-
-                RECT PCRegisterBox = RegisterBox;
-                FillRect(DC, &PCRegisterBox, RegisterBoxColorBrush);
-                Win32_DrawStrFmt(DC, &PCRegisterBox, DT_CENTER, 64, 
-                    "PC:\n%08x", State.CPU.PC
-                );
-
-                DeleteObject(SelectObject(DC, LastBrush));
-            }
-            Win32_EndPaint(&Region);
-
-
-            Region = Win32_BeginPaint(&State.DisasmWindow);
-            {
-                HDC DC = Region.TmpBackDC;
-                /* clear background */
-                FillRect(DC, &Region.Rect, WHITE_BRUSH);
-
-
-                /* disassembly variables */
-                SelectObject(DC, FontHandle);
-                int InstructionCount = Region.h / FontHeight + 1; /* +1 for smooth transition */
-                State.DisasmInstructionPerPage = InstructionCount;
-                int AddrWidth = FontWidth*(8+2);
-                int HexWidth  = FontWidth*(8+4);
-
-                /* make sure PC is in drawable range before disassembly */
-                u32 ViewableDisasmAddrLo = State.DisasmAddr;
-                u32 ViewableDisasmAddrHi = ViewableDisasmAddrLo + InstructionCount*4;
-                if (RedrawPCIfNotViewable && !IN_RANGE(ViewableDisasmAddrLo, State.CPU.PC, ViewableDisasmAddrHi))
-                {
-                    State.DisasmAddr = State.CPU.PC;
-                    ViewableDisasmAddrLo = State.CPU.PC;
-                    ViewableDisasmAddrHi = State.CPU.PC + InstructionCount*4;
-                }
-                RedrawPCIfNotViewable = false;
-
-                /* disassmble the instructions */
-                DisassemblyData Disasm = DisassembleMemory(
-                    State.OSMem.Ptr, 
-                    State.OSMem.SizeBytes, 
-                    InstructionCount, 
-                    State.DisasmAddr, 
-                    State.DisasmFlags
-                );
-                DisassemblyRegions DisasmRegion = GetDisassemblyRegion(
-                    &Region.Rect, 
-                    AddrWidth, 
-                    HexWidth
-                );
-
-                /* draw disassembly */
-                DrawTextA(DC, Disasm.Addr, -1, &DisasmRegion.Addr, DT_LEFT);
-                DrawTextA(DC, Disasm.HexCode, -1, &DisasmRegion.Hex, DT_LEFT);
-                DrawTextA(DC, Disasm.Mnemonic, -1, &DisasmRegion.Mnemonic, DT_LEFT);
-                if (State.OSMem.SizeBytes != 0)
-                {
-                    Win32_SetWindowScrollbar(
-                        &State.DisasmWindow, 
-                        State.DisasmAddr/sizeof(u32), 
-                        State.DisasmMinAddr/sizeof(u32), 
-                        (State.DisasmMinAddr + State.OSMem.SizeBytes)/sizeof(u32) - InstructionCount
-                    );
-                }
-
-                /* draw the PC highlighter */
-                int PCInstructionIndex = (State.CPU.PC - ViewableDisasmAddrLo)/sizeof(u32);
-                if (IN_RANGE(0, PCInstructionIndex, InstructionCount - 2))
-                {
-                    /* the highlighter surrounds an instruction */
-                    RECT PCRect = Region.Rect;
-                    PCRect.top += PCInstructionIndex * FontHeight;
-                    PCRect.bottom = PCRect.top + FontHeight;
-
-                    /* draw the highlighter */
-                    u32 HighlighterColorARGB = 0x00eb5d05;
-                    Win32_BlendRegion(DC, &PCRect, HighlighterColorARGB);
-                }
-            }
-            Win32_EndPaint(&Region);
-            ElapsedTimeMillisec = 0;
-        }
     }
 
+    /* NOTE: These variables contain dynamic memory, 
+     * but they don't need to be deallocated, 
+     * because we're exiting so Windows does it for us, and they do it faster than us */
+    (void)State.OSMem.Ptr;
+    (void)State.StdOut.Ptr;
+    (void)State.StdErr.Ptr;
     ExitProcess(0);
 }
 
@@ -1219,25 +1377,25 @@ int WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, PSTR CmdLine, int CmdSho
 {
     (void)PrevInstance, (void)CmdLine, (void)CmdShow;
 
-    const char *ManagerWindowName = "WndMan";
+    const char *WindowManagerName = "WndMan";
     WNDCLASSEXA WndCls = {
         .cbSize = sizeof WndCls,
         .lpfnWndProc = Win32_ManagerWndProc,
         .hIcon = LoadIconA(NULL, IDI_APPLICATION),
         .hCursor = LoadCursorA(NULL, IDC_ARROW),
-        .lpszClassName = ManagerWindowName,
+        .lpszClassName = WindowManagerName,
         .hInstance = GetModuleHandleA(NULL),
     };
     RegisterClassExA(&WndCls);
-    HWND ManagerWindow = CreateWindowExA(0, ManagerWindowName, ManagerWindowName, 0, 0, 0, 0, 0, NULL, NULL, Instance, 0);
-    if (NULL == ManagerWindow)
+    HWND WindowManager = CreateWindowExA(0, WindowManagerName, WindowManagerName, 0, 0, 0, 0, 0, NULL, NULL, Instance, 0);
+    if (NULL == WindowManager)
     {
         Win32_Fatal("Unable to create a window.");
     }
 
 
     /* create the main thread */
-    CreateThread(NULL, 0, Win32_Main, ManagerWindow, 0, &Win32_MainThreadID);
+    CreateThread(NULL, 0, Win32_Main, WindowManager, 0, &Win32_MainThreadID);
 
     while (1)
     {
