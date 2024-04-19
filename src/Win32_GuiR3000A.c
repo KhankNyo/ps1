@@ -16,10 +16,16 @@ typedef unsigned char u8;
 typedef u8 Bool8;
 #define MAINTHREAD_CREATE_WINDOW (WM_USER + 0)
 #define MAINTHREAD_CLOSE_WINDOW (WM_USER + 1)
-#define MAINTHREAD_MOVE_WINDOW (WM_USER + 2)
 #define MAINTHREAD_SET_VERT_SCROLL_INFO (WM_USER + 3)
 #define MSGTHREAD_MOVING (WM_USER + 32)
 #define MSGTHREAD_SIZING (WM_USER + 33)
+
+#define SET_SIZING_TYPE(v) (((v) & 0x7) << (14*2))
+#define SET_SIZING_HEIGHT(v) (((v) & 0x3FFF) << 14)
+#define SET_SIZING_WIDTH(v) (((v) & 0x3FFF) << 0)
+#define GET_SIZING_TYPE(u32v) (((u32v) >> (14*2)) & 0x7)
+#define GET_SIZING_HEIGHT(u32v) (((u32v) >> 14) & 0x3FFF)
+#define GET_SIZING_WIDTH(u32v) ((u32v) & 0x3FFF)
 
 typedef enum TestSyscall 
 {
@@ -69,6 +75,13 @@ typedef struct Win32_CreateWindowArgs
     HMENU Menu;
 } Win32_CreateWindowArgs;
 
+typedef struct Win32_EnumMoveArgs 
+{
+    int Dx, Dy;
+    int WindowsLeft;
+    HWND WindowHandles[4];
+} Win32_EnumMoveArgs;
+
 typedef struct Win32_ClientRegion
 {
     HDC TmpBackDC, TmpFrontDC;
@@ -101,10 +114,15 @@ typedef struct StringBuffer
 typedef struct Win32_MainWindowState 
 {
     HWND WindowManager;
-    Win32_Window MainWindow, 
-                 DisasmWindow, 
-                 CPUWindow, 
-                 LogWindow;
+    Win32_Window MainWindow;
+    union {
+        struct {
+            Win32_Window DisasmWindow,
+                         CPUWindow, 
+                         LogWindow;
+        };
+        Win32_Window ChildWindow[3];
+    };
     HMENU MainMenu;
     HMENU LogMenu;
 
@@ -135,6 +153,7 @@ typedef struct Win32_DisassemblyWindow
 
 
 static DWORD Win32_MainThreadID;
+static DWORD Win32_MsgThreadID;
 static double Win32_PerfCounterRes;
 static SYSTEM_INFO Win32_SysInfo;
 static char Win32_TmpFileName[0x10000];
@@ -230,22 +249,12 @@ static void Win32_ToggleShowState(Win32_Window *Window)
     ShowWindow(Window->Handle, Window->ShowState[Window->CurrentShowState++]); 
 }
 
-static void Win32_UpdateWindowDimension(Win32_Window *Window, int x, int y, int w, int h)
+static void Win32_MoveWindow(Win32_Window *Window, int Dx, int Dy, int Dw, int Dh)
 {
-    Window->x = x;
-    Window->y = y;
-    Window->w = w;
-    Window->h = h;
-}
-
-static void Win32_MoveWindow(HWND WindowManager, Win32_Window *Window, int Dx, int Dy, int Dw, int Dh)
-{
-    /* SendMessage does block, so this is fine */
     Window->x += Dx;
     Window->y += Dy;
     Window->w += Dw;
     Window->h += Dh;
-    SendMessageA(WindowManager, MAINTHREAD_MOVE_WINDOW, (WPARAM)Window, 0);
 }
 
 static Win32_ClientRegion Win32_BeginPaint(Win32_Window *Window)
@@ -380,6 +389,7 @@ static void StrWriteFmt(StringBuffer *StrBuf, const char *Fmt, ...)
 
 
 
+
 static LRESULT CALLBACK Win32_ManagerWndProc(HWND Window, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
     LRESULT Result = 0;
@@ -406,17 +416,6 @@ static LRESULT CALLBACK Win32_ManagerWndProc(HWND Window, UINT Msg, WPARAM wPara
     case MAINTHREAD_CLOSE_WINDOW:
     {
         CloseWindow((HWND)wParam);
-    } break;
-    case MAINTHREAD_MOVE_WINDOW:
-    {
-        const Win32_Window *Window = (Win32_Window*)wParam;
-        MoveWindow(Window->Handle, 
-            Window->Position.left, 
-            Window->Position.top,
-            Window->Position.right - Window->Position.left, 
-            Window->Position.bottom - Window->Position.top, 
-            false
-        );
     } break;
     case MAINTHREAD_SET_VERT_SCROLL_INFO:
     {
@@ -472,6 +471,14 @@ static LRESULT CALLBACK Win32_MainWndProc(HWND Window, UINT Msg, WPARAM wParam, 
     } break;
     case WM_SIZING:
     {
+        RECT Rect = *(RECT *)lParam;
+        int w = Rect.right - Rect.left;
+        int h = Rect.bottom - Rect.top;
+        u32 Param = 
+            SET_SIZING_TYPE(wParam)
+            | SET_SIZING_WIDTH(w) 
+            | SET_SIZING_HEIGHT(h);
+        PostThreadMessage(Win32_MainThreadID, MSGTHREAD_SIZING, (WPARAM)Window, Param);
     } break;
     case WM_KEYUP:
     case WM_KEYDOWN:
@@ -794,71 +801,73 @@ static Bool8 Win32_MainPollInputs(HWND WindowManager, Win32_MainWindowState *Sta
         } break;
         case MSGTHREAD_SIZING:
         {
-            HWND WindowHandle = (HWND)Msg.wParam;
-            Win32_Window *WindowToUpdate = &State->MainWindow;
-            uint SizingType = Msg.lParam >> 13;
-            int w = Msg.lParam & 0x3FFF;
-            int h = (Msg.lParam >> 14) & 0x3FFF;
-            if (WindowHandle == State->MainWindow.Handle)
-            {
-                //Win32_ResizeWindow(State->WindowManager, &State->DisasmWindow, w, h);
-                //Win32_ResizeWindow(State->WindowManager, &State->CPUWindow, w, h);
-                //Win32_ResizeWindow(State->WindowManager, &State->LogWindow, w, h);
+            HWND Window = (HWND)Msg.wParam;
+            if (Window != State->MainWindow.Handle)
                 break;
-            }
-            else if (WindowHandle == State->DisasmWindow.Handle)
-            {
-                WindowToUpdate = &State->DisasmWindow;
-            }
-            else if (WindowHandle == State->LogWindow.Handle)
-            {
-                WindowToUpdate = &State->LogWindow;
-            }
-            else if (WindowHandle == State->CPUWindow.Handle)
-            {
-                WindowToUpdate = &State->CPUWindow;
-            }
 
-            int Dw = w - WindowToUpdate->w;
-            int Dh = h - WindowToUpdate->h;
-            switch (SizingType)
+            Win32_Window *MainWindow = &State->MainWindow;
+            int w = GET_SIZING_WIDTH(Msg.lParam);
+            int h = GET_SIZING_HEIGHT(Msg.lParam);
+            int Dw = w - MainWindow->w;
+            int Dh = h - MainWindow->h;
+            MainWindow->w = w;
+            MainWindow->h = h;
+
+            /* resizing types that might affect x and y pos */
+            uint Type = GET_SIZING_TYPE(Msg.lParam);
+            switch (Type)
             {
+            case WMSZ_TOPRIGHT:
             case WMSZ_TOP:
+            {
+                MainWindow->y -= Dh;
+            } break;
+            case WMSZ_BOTTOMLEFT:
             case WMSZ_LEFT:
-            case WMSZ_RIGHT:
-            case WMSZ_BOTTOM:
-                break;
+            {
+                MainWindow->x -= Dw;
+            } break;
+            case WMSZ_TOPLEFT:
+            {
+                MainWindow->x -= Dw;
+                MainWindow->y -= Dh;
+            } break;
             }
-            Win32_UpdateWindowDimension(WindowToUpdate, x, y, w, h);
         } break;
         case MSGTHREAD_MOVING:
         {
-            HWND WindowHandle = (HWND)Msg.wParam;
-            Win32_Window *WindowToUpdate = &State->MainWindow;
+            HWND Window = (HWND)Msg.wParam;
+            if (Window != State->MainWindow.Handle)
+                break;
+
             int x = (i16)LOWORD(Msg.lParam);
             int y = (i16)HIWORD(Msg.lParam);
-            if (WindowHandle == State->MainWindow.Handle)
+            int Dx = x - State->MainWindow.x;
+            int Dy = y - State->MainWindow.y;
+            State->MainWindow.x = x;
+            State->MainWindow.y = y;
+            for (uint i = 0; i < STATIC_ARRAY_SIZE(State->ChildWindow); i++)
             {
-                int Dx = x - State->MainWindow.x;
-                int Dy = y - State->MainWindow.x;
-                Win32_MoveWindow(State->WindowManager, &State->DisasmWindow, Dx, Dy, 0, 0);
-                Win32_MoveWindow(State->WindowManager, &State->CPUWindow, Dx, Dy, 0, 0);
-                Win32_MoveWindow(State->WindowManager, &State->LogWindow, Dx, Dy, 0, 0);
-            }
-            else if (WindowHandle == State->DisasmWindow.Handle)
-            {
-                WindowToUpdate = &State->DisasmWindow;
-            }
-            else if (WindowHandle == State->LogWindow.Handle)
-            {
-                WindowToUpdate = &State->LogWindow;
-            }
-            else if (WindowHandle == State->CPUWindow.Handle)
-            {
-                WindowToUpdate = &State->CPUWindow;
-            }
+                RECT Rect;
+                GetWindowRect(State->ChildWindow[i].Handle, &Rect);
+                Rect.left += Dx;
+                Rect.right += Dx;
+                Rect.top += Dy;
+                Rect.bottom += Dy;
+                State->ChildWindow[i].x += Dx;
+                State->ChildWindow[i].y += Dy;
 
-            Win32_UpdateWindowDimension(WindowToUpdate, x, y, WindowToUpdate->w, WindowToUpdate->h);
+                /* resize the window on its owner thread */
+                SetWindowPos(
+                    State->ChildWindow[i].Handle, 
+                    NULL, 
+                    Rect.left,
+                    Rect.top,
+                    Rect.right - Rect.left,
+                    Rect.bottom - Rect.top, 
+                    SWP_NOOWNERZORDER
+                );
+            }
         } break;
         }
     }
@@ -1224,7 +1233,7 @@ static DWORD Win32_Main(LPVOID UserData)
         100, 100, 1080, 720, 
         MainWndClsName,
         WS_EX_OVERLAPPEDWINDOW,
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE, 
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN, 
         State.MainMenu
     );
     DragAcceptFiles(State.MainWindow.Handle, TRUE);
@@ -1244,8 +1253,8 @@ static DWORD Win32_Main(LPVOID UserData)
         WindowManager, 
         State.MainWindow.Handle,
         "Disassembly",
-        State.MainWindow.Position.left, 
-        State.MainWindow.Position.top + 60, 
+        State.MainWindow.x, 
+        State.MainWindow.y + 60, 
         540, 660, 
         ChildWndClsName,
         WS_EX_OVERLAPPEDWINDOW,
@@ -1266,8 +1275,8 @@ static DWORD Win32_Main(LPVOID UserData)
         WindowManager, 
         State.MainWindow.Handle, 
         "CPU State",  
-        State.DisasmWindow.Position.right, 
-        State.DisasmWindow.Position.top, 
+        State.DisasmWindow.x + State.DisasmWindow.w, 
+        State.DisasmWindow.y, 
         540, 300, 
         ChildWndClsName, 
         WS_EX_OVERLAPPEDWINDOW, 
@@ -1283,8 +1292,8 @@ static DWORD Win32_Main(LPVOID UserData)
         WindowManager,
         State.MainWindow.Handle, 
         "Log",
-        State.CPUWindow.Position.left, 
-        State.CPUWindow.Position.bottom, 
+        State.CPUWindow.x, 
+        State.CPUWindow.y + State.CPUWindow.h, 
         540, 360,
         ChildWndClsName, 
         WS_EX_OVERLAPPEDWINDOW, 
@@ -1398,8 +1407,6 @@ static DWORD Win32_Main(LPVOID UserData)
         double DeltaTime = EndTime - StartTime;
         ElapsedTimeMillisec += DeltaTime;
         StartTime = EndTime;
-
-
     }
 
     /* NOTE: These variables contain dynamic memory, 
@@ -1432,6 +1439,7 @@ int WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, PSTR CmdLine, int CmdSho
         Win32_Fatal("Unable to create a window.");
     }
 
+    Win32_MsgThreadID = GetCurrentThreadId();
 
     /* create the main thread */
     CreateThread(NULL, 0, Win32_Main, WindowManager, 0, &Win32_MainThreadID);
