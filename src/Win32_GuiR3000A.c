@@ -6,6 +6,7 @@
 
 #include "Common.h"
 #include "R3000A.h"
+
 #include "Disassembler.c"
 #include "R3000A.c"
 #include "CP0.c"
@@ -58,7 +59,6 @@ typedef enum Win32_MainMenuCommand
     MAINMENU_DISASM_WINDOW,
     MAINMENU_CPUSTATE_WINDOW,
     MAINMENU_LOG_WINDOW,
-    MAINMENU_MEMORY_WINDOW,
     LOGMENU_CLEAR,
     LOGMENU_SWAP,
 } Win32_MainMenuCommand;
@@ -249,13 +249,6 @@ static void Win32_ToggleShowState(Win32_Window *Window)
     ShowWindow(Window->Handle, Window->ShowState[Window->CurrentShowState++]); 
 }
 
-static void Win32_MoveWindow(Win32_Window *Window, int Dx, int Dy, int Dw, int Dh)
-{
-    Window->x += Dx;
-    Window->y += Dy;
-    Window->w += Dw;
-    Window->h += Dh;
-}
 
 static Win32_ClientRegion Win32_BeginPaint(Win32_Window *Window)
 {
@@ -675,9 +668,6 @@ static Bool8 Win32_MainPollInputs(HWND WindowManager, Win32_MainWindowState *Sta
                 {
                     Win32_ToggleShowState(&State->DisasmWindow);
                 } break;
-                case MAINMENU_MEMORY_WINDOW:
-                {
-                } break;
                 case MAINMENU_CPUSTATE_WINDOW:
                 {
                     Win32_ToggleShowState(&State->CPUWindow);
@@ -980,7 +970,7 @@ static void MipsWrite(void *UserData, u32 LogicalAddr, u32 Data, R3000A_DataSize
     u32 Addr = TranslateAddr(LogicalAddr);
     if (AddrIsValid(Addr, DataSize, State->OSMem.SizeBytes))
     {
-        for (int i = 0; i < DataSize; i++)
+        for (int i = 0; i < (int)DataSize; i++)
         {
             State->OSMem.Ptr[Addr + i] = (Data >> i*8) & 0xFF;
         }
@@ -1024,7 +1014,7 @@ static u32 MipsRead(void *UserData, u32 LogicalAddr, R3000A_DataSize DataSize)
     if (AddrIsValid(Addr, DataSize, State->OSMem.SizeBytes))
     {
         u32 Data = 0;
-        for (int i = 0; i < DataSize; i++)
+        for (int i = 0; i < (int)DataSize; i++)
         {
             Data |= (u32)State->OSMem.Ptr[Addr + i] << i*8;
         }
@@ -1211,7 +1201,6 @@ static DWORD Win32_Main(LPVOID UserData)
     /* create the main window */
     State.MainMenu = CreateMenu();
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_DISASM_WINDOW, "&Disassembly");
-    AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_MEMORY_WINDOW, "&Memory");
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_CPUSTATE_WINDOW, "&CPU");
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_LOG_WINDOW, "&Log");
     AppendMenuA(State.MainMenu, MF_STRING, MAINMENU_OPEN_FILE, "&Open File");
