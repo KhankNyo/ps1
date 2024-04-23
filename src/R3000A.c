@@ -1405,6 +1405,7 @@ static u32 MipsRead(void *UserData, u32 Addr, R3000A_DataSize Size)
 
 static Bool8 MipsVerify(void *UserData, u32 Addr)
 {
+    (void)UserData, (void)Addr;
     return true;
 }
 

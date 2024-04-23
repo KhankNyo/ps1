@@ -2,26 +2,7 @@
 #define R051_DISASSEMBLER_C
 
 #include "Common.h"
-
-
-#define DISASM_BEAUTIFUL_REGNAME (u32)(1 << 0)
-#define DISASM_IMM16_AS_HEX (u32)(1 << 1)
-/* returns the string length written (excluding null terminator) */
-/* generally, a buffer of 64 bytes or more will not result in truncation */
-int R3000A_Disasm(
-    u32 Instruction, 
-    u32 CurrentPC, 
-    u32 Flags, 
-    char *OutBuffer, 
-    iSize OutBufferSize
-);
-
-
-/* =============================================================================================
- *
- *                                       IMPLEMENTATION 
- *
- *=============================================================================================*/
+#include "Disassembler.h"
 
 #include <stdio.h> /* snprintf */
 
@@ -265,10 +246,10 @@ int R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
 
             if (Flags & DISASM_IMM16_AS_HEX)
             {
-                const char *FormatString = "%s %s, %s 0x%08x";
+                const char *FormatString = "%s %s, %s, 0x%08x";
                 if (OpcodeMode >= 4)
                 {
-                    FormatString = "%s %s, %s 0x%04x";
+                    FormatString = "%s %s, %s, 0x%04x";
                     Immediate &= 0xFFFF;
                 }
                 return snprintf(OutBuffer, OutBufferSize, FormatString, 
