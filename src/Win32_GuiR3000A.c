@@ -130,7 +130,6 @@ typedef struct Win32_MainWindowState
     u32 CPUCyclesPerSec;
 
     u32 DisasmFlags;
-    u32 DisasmInstructionPerPage;
     u64 DisasmAddr, 
         DisasmResetAddr, 
         DisasmMinAddr;
@@ -142,6 +141,7 @@ typedef struct Win32_MainWindowState
     double KeyDownTimestampMillisec[0x100];
     char DroppedFileName[1024];
     StringBuffer *WorkingStrBuffer;
+    int WorkingBufferLine;
     StringBuffer StdOut;
     StringBuffer StdErr;
 } Win32_MainWindowState;
@@ -344,6 +344,14 @@ static void Memcpy(void *Dst, const void *Src, iSize Size)
     }
 }
 
+static uint Strlend(const char *s, char Delim)
+{
+    const char *i = s;
+    while (*i && *i != Delim)
+        i++;
+    return i - s;
+}
+
 
 
 static void StrResizeCapacity(StringBuffer *StrBuf, iSize NewCapacity)
@@ -378,6 +386,19 @@ static void StrWriteFmt(StringBuffer *StrBuf, const char *Fmt, ...)
     StrBuf->Size += WrittenLen;
 
     va_end(Args);
+}
+
+static const char *StrGetBufferLine(const StringBuffer *StrBuf, uint Line)
+{
+    ASSERT(StrBuf->Ptr != NULL);
+
+    const char *Str = StrBuf->Ptr;
+    for (uint i = 0; i < Line && *Str; i++)
+    {
+        uint NewlineOffset = Strlend(Str, '\n');
+        Str += NewlineOffset + (Str[NewlineOffset] == '\n');
+    }
+    return Str;
 }
 
 
@@ -602,7 +623,7 @@ static void Win32_SetWindowScrollbar(HWND WindowManager, Win32_Window *Window, u
     /* to prevent the scrollbar from disappearing */
     if (High == Low)
     {
-        High = Low + 256;
+        High = Low + 1;
     }
     SCROLLINFO ScrollInfo = {
         .cbSize = sizeof ScrollInfo, 
@@ -634,6 +655,10 @@ static Bool8 Win32_MainPollInputs(HWND WindowManager, Win32_MainWindowState *Sta
             else if (Window == State->CPUWindow.Handle)
             {
                 Win32_ToggleShowState(&State->CPUWindow);
+            }
+            else if (Window == State->LogWindow.Handle)
+            {
+                Win32_ToggleShowState(&State->LogWindow);
             }
             else /* close main window */
             {
@@ -754,12 +779,22 @@ static Bool8 Win32_MainPollInputs(HWND WindowManager, Win32_MainWindowState *Sta
                 ScrollDelta = 1;
             else ScrollDelta = -MouseDelta / Res;
 
-            State->DisasmAddr += ScrollDelta*4;
-            SetScrollPos(State->DisasmWindow.Handle, SB_VERT, State->DisasmAddr/4, TRUE);
+            HWND Window = (HWND)Msg.lParam;
+            if (Window == State->DisasmWindow.Handle)
+            {
+                State->DisasmAddr += ScrollDelta*4;
+            }
+            else 
+            {
+                State->WorkingBufferLine += ScrollDelta;
+                if (State->WorkingBufferLine < 0)
+                    State->WorkingBufferLine = 0;
+            }
+            SetScrollPos(Window, SB_VERT, ScrollDelta, TRUE);
         } break;
         case WM_VSCROLL:
         {
-            if (SB_ENDSCROLL == Msg.wParam)
+            if (SB_ENDSCROLL == Msg.wParam || SB_PAGEDOWN == Msg.wParam || SB_PAGEUP == Msg.wParam)
                 break;
 
             SCROLLINFO ScrollInfo = {
@@ -769,15 +804,13 @@ static Bool8 Win32_MainPollInputs(HWND WindowManager, Win32_MainWindowState *Sta
             HWND Window = (HWND)Msg.lParam;
             GetScrollInfo(Window, SB_VERT, &ScrollInfo);
 
-            u32 Pos = ScrollInfo.nPos;
+            int Pos = ScrollInfo.nPos;
             switch (LOWORD(Msg.wParam))
             {
             case SB_BOTTOM:     Pos = ScrollInfo.nMax; break;
             case SB_TOP:        Pos = ScrollInfo.nMin; break;
             case SB_LINEUP:     Pos -= 1; break;
             case SB_LINEDOWN:   Pos += 1; break;
-            case SB_PAGEUP:     Pos -= State->DisasmInstructionPerPage; break;
-            case SB_PAGEDOWN:   Pos += State->DisasmInstructionPerPage; break;
             case SB_THUMBTRACK:
             case SB_THUMBPOSITION:
             {
@@ -785,9 +818,19 @@ static Bool8 Win32_MainPollInputs(HWND WindowManager, Win32_MainWindowState *Sta
             } break;
             }
 
-            ScrollInfo.nPos = Pos;
-            State->DisasmAddr = Pos*4;
-            SetScrollInfo(Window, SB_VERT, &ScrollInfo, TRUE);
+
+            if (State->DisasmWindow.Handle == Window)
+            {
+                State->DisasmAddr = Pos*4;
+                ScrollInfo.nPos = Pos;
+                SetScrollInfo(Window, SB_VERT, &ScrollInfo, TRUE);
+            }
+            else if (State->LogWindow.Handle == Window && Pos >= 0)
+            {
+                State->WorkingBufferLine = Pos;
+                ScrollInfo.nPos = Pos;
+                SetScrollInfo(Window, SB_VERT, &ScrollInfo, TRUE);
+            }
         } break;
         case MSGTHREAD_SIZING:
         {
@@ -1003,7 +1046,7 @@ static void MipsWrite(void *UserData, u32 LogicalAddr, u32 Data, R3000A_DataSize
     }
     else
     {
-        StrWriteFmt(&State->StdErr, "[LOG]: Invalid address: writing %08x of size %d to %08x\n", Data, DataSize, Addr);
+        StrWriteFmt(&State->StdErr, "[LOG]: Invalid address: writing %08x of size %d to %08x\n", Data, DataSize, LogicalAddr);
     }
 }
 
@@ -1054,7 +1097,6 @@ static Bool8 Win32_PaintDisasmWindow(
 
         /* disassembly variables */
         int InstructionCount = Region.h / FontHeight + 1; /* +1 for smooth transition */
-        State->DisasmInstructionPerPage = InstructionCount;
         int AddrWidth = FontWidth*(8+2);
         int HexWidth  = FontWidth*(8+4);
 
@@ -1196,6 +1238,7 @@ static DWORD Win32_Main(LPVOID UserData)
         .WindowManager = WindowManager,
 
         .WorkingStrBuffer = &State.StdOut,
+        .WorkingBufferLine = 0,
     };
 
     /* create the main window */
@@ -1371,6 +1414,14 @@ static DWORD Win32_Main(LPVOID UserData)
                 HDC DC = Region.TmpBackDC;
                 SelectObject(DC, FontHandle);
 
+                Win32_SetWindowScrollbar(
+                    State.WindowManager, 
+                    &State.LogWindow, 
+                    State.WorkingBufferLine, 
+                    0, 
+                    Region.h / FontHeight
+                );
+
                 COLORREF BackgroundColor = 0x00202020;
                 COLORREF TextColor = 0x00FFFFFF;
                 /* clear background */
@@ -1383,8 +1434,16 @@ static DWORD Win32_Main(LPVOID UserData)
                 /* draw current text buffer */
                 SetTextColor(DC, TextColor);
                 SetBkColor(DC, BackgroundColor);
-                RECT StdOutRect = Region.Rect;
-                DrawText(DC, State.WorkingStrBuffer->Ptr, State.WorkingStrBuffer->Size, &StdOutRect, DT_LEFT);
+                if (NULL != State.WorkingStrBuffer->Ptr)
+                {
+                    DrawText(DC, 
+                        StrGetBufferLine(State.WorkingStrBuffer, State.WorkingBufferLine), 
+                        -1, 
+                        &Region.Rect, 
+                        DT_LEFT
+                    );
+                }
+                
             }
             Win32_EndPaint(&Region);
 
