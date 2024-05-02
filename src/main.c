@@ -4,24 +4,52 @@
 
 #include <stdio.h>
 #include <string.h>
-#define KS1_BASE 0xBFC00000
+
 
 typedef struct PS1 
 {
     R3000A CPU;
-    u8 Rom[512 * KB];
+    u32 BiosRomSize,
+        RamSize;
+    u8 *BiosRom;
+    u8 *Ram;
 } PS1;
+
+#define KUSEG 0
+#define KSEG0 0x80000000
+#define KSEG1 0xA0000000 
+
+#define MAIN_RAM(Seg_)      ((Seg_) + 0)
+#define EXPANSION_1(Seg_)   ((Seg_) + 0x1F000000)
+#define IO_PORTS(Seg_)      ((Seg_) + 0x1F801000)
+#define EXPANSION_2(Seg_)   ((Seg_) + 0x1F802000)
+#define EXPANSION_3(Seg_)   ((Seg_) + 0x1FA00000)
+#define BIOS_ROM(Seg_)      ((Seg_) + 0x1FC00000)
+
+#define ACCESS_BIOS_ROM(Seg_, Addr_)    IN_RANGE(BIOS_ROM(Seg_), Addr_, BIOS_ROM(Seg_) + 512*KB)
+#define ACCESS_RAM(Seg_, Addr_)         IN_RANGE(MAIN_RAM(Seg_), Addr_, MAIN_RAM(Seg_) + 2*MB)
+
 
 static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
 {
     PS1 *Ps1 = UserData;
-    if (IN_RANGE(KS1_BASE, Addr, KS1_BASE + 512*KB))
+    if (ACCESS_BIOS_ROM(KSEG1, Addr))
     {
-        u32 PhysicalAddr = Addr - KS1_BASE;
+        u32 PhysicalAddr = Addr - BIOS_ROM(KSEG1);
         u32 Data = 0;
         for (int i = 0; i < (int)Size; i++)
         {
-            Data |= (u32)Ps1->Rom[PhysicalAddr + i] << i*8;
+            Data |= (u32)Ps1->BiosRom[PhysicalAddr + i] << i*8;
+        }
+        return Data;
+    }
+    else if (ACCESS_RAM(KSEG1, Addr))
+    {
+        u32 PhysicalAddr = Addr - MAIN_RAM(KSEG1);
+        u32 Data = 0;
+        for (int i = 0; i < (int)Size; i++)
+        {
+            Data |= (u32)Ps1->Ram[PhysicalAddr + i] << i*8;
         }
         return Data;
     }
@@ -34,8 +62,16 @@ static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
 
 static void Ps1_WriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size)
 {
-    (void)UserData, (void)Size;
-    if (IN_RANGE(0x1F801000, Addr, 0x1F801020)) /* mem ctrl 1 */
+    PS1 *Ps1 = UserData;
+    if (ACCESS_RAM(KSEG1, Addr))
+    {
+        u32 PhysicalAddr = Addr - MAIN_RAM(KSEG1);
+        for (int i = 0; i < (int)Size; i++)
+        {
+            Ps1->Ram[PhysicalAddr + i] = Data >> i*8;
+        }
+    }
+    else if (IN_RANGE(0x1F801000, Addr, 0x1F801020)) /* mem ctrl 1 */
     {
         printf("Writing %08x to %08x (memctrl 1)\n", Data, Addr);
     }
@@ -55,6 +91,26 @@ static Bool8 Ps1_VerifyAddr(void *UserData, u32 Addr)
     return true;
 }
 
+
+static void Ps1_Init(PS1 *Ps1)
+{
+    *Ps1 = (PS1){
+        .CPU = R3000A_Init(Ps1, Ps1_ReadFn, Ps1_WriteFn, Ps1_VerifyAddr, Ps1_VerifyAddr),
+        .BiosRomSize = 512 * KB,
+        .RamSize = 2 * MB,
+    };
+    u8 *Ptr = malloc(Ps1->BiosRomSize + Ps1->RamSize);
+    ASSERT(NULL != Ptr);
+    Ps1->BiosRom = Ptr;
+    Ps1->Ram = Ptr + Ps1->BiosRomSize;
+}
+
+static void Ps1_Destroy(PS1 *Ps1)
+{
+    free(Ps1->BiosRom);
+    Ps1->BiosRom = NULL;
+    Ps1->Ram = NULL;
+}
 
 
 
@@ -76,11 +132,11 @@ static void UpdateDisassembly(const R3000A *Mips)
         u32 CurrentPC = Mips->PC;
         for (int i = 0; i < NUM_INS; i++)
         {
-            if (IN_RANGE(KS1_BASE, CurrentPC, KS1_BASE + sizeof Ps1->Rom))
+            if (ACCESS_BIOS_ROM(KSEG1, CurrentPC))
             {
-                u32 PhysAddr = CurrentPC - KS1_BASE;
+                u32 PhysAddr = CurrentPC - BIOS_ROM(KSEG1);
                 u32 Instruction;
-                memcpy(&Instruction, Ps1->Rom + PhysAddr, sizeof Instruction);
+                memcpy(&Instruction, Ps1->BiosRom + PhysAddr, sizeof Instruction);
                 R3000A_Disasm(
                     Instruction, 
                     CurrentPC,
@@ -163,6 +219,7 @@ int main(int argc, char **argv)
     }
 
     PS1 Ps1;
+    Ps1_Init(&Ps1);
     const char *FileName = argv[1];
     FILE *RomFile = fopen(FileName, "rb");
     {
@@ -170,13 +227,13 @@ int main(int argc, char **argv)
         iSize FileSize = ftell(RomFile);
         fseek(RomFile, 0, SEEK_SET);
 
-        if (FileSize != sizeof Ps1.Rom)
+        if (FileSize != Ps1.BiosRomSize)
         {
-            printf("Error: rom size must be exactly %d KB\n", (int)(sizeof Ps1.Rom)/KB);
+            printf("Error: rom size must be exactly %d KB\n", (int)(Ps1.BiosRomSize)/KB);
             goto CloseRom;
         }
-        int ReadSize = fread(Ps1.Rom, 1, sizeof Ps1.Rom, RomFile);
-        if (ReadSize != sizeof Ps1.Rom)
+        u32 ReadSize = fread(Ps1.BiosRom, 1, Ps1.BiosRomSize, RomFile);
+        if (ReadSize != Ps1.BiosRomSize)
         {
             printf("Error: unable to fully read '%s' (read %d bytes).", FileName, ReadSize);
             goto CloseRom;
@@ -195,6 +252,7 @@ int main(int argc, char **argv)
         DumpState(&Ps1.CPU);
         R3000A_StepClock(&Ps1.CPU);
     } while ('q' != GetCmdLine("Press Enter to cont...\n"));
+    Ps1_Destroy(&Ps1);
     return 0;
 
 CloseRom:
