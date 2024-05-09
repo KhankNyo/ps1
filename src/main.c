@@ -9,8 +9,8 @@
 typedef struct PS1 
 {
     R3000A CPU;
-    u32 BiosRomSize,
-        RamSize;
+    u32 BiosRomSize;
+    u32 RamSize;
     u8 *BiosRom;
     u8 *Ram;
 } PS1;
@@ -30,58 +30,97 @@ typedef struct PS1
 #define ACCESS_RAM(Seg_, Addr_)         IN_RANGE(MAIN_RAM(Seg_), Addr_, MAIN_RAM(Seg_) + 2*MB)
 
 
+static u32 Ps1_TranslateAddr(PS1 *Ps1, u32 Addr)
+{
+    u32 PhysicalAddr = Addr;
+    if (IN_RANGE(KSEG0, Addr, KSEG1 - 1)) /* kseg 0 */
+    {
+        PhysicalAddr -= KSEG0;
+    }
+    else if (IN_RANGE(KSEG1, Addr, 0xFFFE0000 - 1)) /* kseg 1 */
+    {
+        PhysicalAddr -= KSEG1;
+    }
+    return PhysicalAddr;
+}
+
+
 static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
 {
     PS1 *Ps1 = UserData;
-    if (ACCESS_BIOS_ROM(KSEG1, Addr))
+
+    if (Addr > 0xFFFE0000) /* memctrl IO ports (kseg2) */
     {
-        u32 PhysicalAddr = Addr - BIOS_ROM(KSEG1);
+        printf("Reading from %08x: (memctrl)\n", Addr);
+        return 0;
+    }
+
+    u32 PhysicalAddr = Ps1_TranslateAddr(Ps1, Addr); 
+    if (ACCESS_BIOS_ROM(0, PhysicalAddr))
+    {
+        PhysicalAddr -= BIOS_ROM(0);
+
         u32 Data = 0;
-        for (int i = 0; i < (int)Size; i++)
+        for (int i = 0; 
+            i < (int)Size 
+            && PhysicalAddr + i < Ps1->BiosRomSize; 
+            i++)
         {
             Data |= (u32)Ps1->BiosRom[PhysicalAddr + i] << i*8;
         }
         return Data;
     }
-    else if (ACCESS_RAM(KSEG1, Addr))
+    else if (ACCESS_RAM(0, PhysicalAddr))
     {
-        u32 PhysicalAddr = Addr - MAIN_RAM(KSEG1);
+        PhysicalAddr -= MAIN_RAM(0);
+
         u32 Data = 0;
-        for (int i = 0; i < (int)Size; i++)
+        for (int i = 0; 
+            i < (int)Size 
+            && PhysicalAddr + i < Ps1->RamSize; 
+            i++)
         {
             Data |= (u32)Ps1->Ram[PhysicalAddr + i] << i*8;
         }
+        printf("Reading %08x from %08x (ram)\n", Data, Addr);
         return Data;
     }
-    else
+    else 
     {
-        printf("Unknown read addr: %08x\n", Addr);
-        return 0;
+        printf("Reading from %08x: (unknown)\n", Addr);
     }
+    return 0;
 }
 
 static void Ps1_WriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size)
 {
     PS1 *Ps1 = UserData;
-    if (ACCESS_RAM(KSEG1, Addr))
+
+    printf("Writing %08x to %08x ", Data, Addr);
+    u32 PhysicalAddr = Ps1_TranslateAddr(Ps1, Addr);
+    if (ACCESS_RAM(0, PhysicalAddr))
     {
-        u32 PhysicalAddr = Addr - MAIN_RAM(KSEG1);
-        for (int i = 0; i < (int)Size; i++)
+        PhysicalAddr -= MAIN_RAM(0);
+        for (int i = 0; 
+            i < (int)Size
+            && PhysicalAddr + i < Ps1->RamSize; 
+            i++)
         {
             Ps1->Ram[PhysicalAddr + i] = Data >> i*8;
         }
+        puts("(ram)");
     }
     else if (IN_RANGE(0x1F801000, Addr, 0x1F801020)) /* mem ctrl 1 */
     {
-        printf("Writing %08x to %08x (memctrl 1)\n", Data, Addr);
+        puts("(memctrl 1)");
     }
     else if (Addr == 0x1F801060) /* mem ctrl 2 (ram size) */
     {
-        printf("Writing %08x to %08x (memctrl 2 - RAM_SIZE)\n", Data, Addr);
+        puts("(memctrl 2 / RAM_SIZE)");
     }
     else
     {
-        printf("Writing %08x to %08x (unknown)\n", Data, Addr);
+        puts("(unknown)");
     }
 }
 
@@ -99,6 +138,7 @@ static void Ps1_Init(PS1 *Ps1)
         .BiosRomSize = 512 * KB,
         .RamSize = 2 * MB,
     };
+
     u8 *Ptr = malloc(Ps1->BiosRomSize + Ps1->RamSize);
     ASSERT(NULL != Ptr);
     Ps1->BiosRom = Ptr;
@@ -204,10 +244,13 @@ static void DumpState(const R3000A *Mips)
 
 static char GetCmdLine(const char *Prompt)
 {
+#if 0
     printf("%s", Prompt);
     char Tmp[256];
     fgets(Tmp, sizeof Tmp, stdin);
     return Tmp[0];
+#endif 
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -249,7 +292,7 @@ int main(int argc, char **argv)
         Ps1_VerifyAddr
     );
     do {
-        DumpState(&Ps1.CPU);
+        //DumpState(&Ps1.CPU);
         R3000A_StepClock(&Ps1.CPU);
     } while ('q' != GetCmdLine("Press Enter to cont...\n"));
     Ps1_Destroy(&Ps1);
