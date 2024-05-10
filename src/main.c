@@ -5,10 +5,26 @@
 #include <stdio.h>
 #include <string.h>
 
+typedef struct DMA 
+{
+    struct {
+        struct {
+            u32 Addr;
+            u32 Len;
+            u32 Ctrl;
+            u32 Mirror;
+        };
+        u32 R[4];
+    } Channel[7];
+    u32 DPCR;
+    u32 DICR;
+} DMA;
 
 typedef struct PS1 
 {
+    DMA Dma;
     R3000A CPU;
+
     u32 BiosRomSize;
     u32 RamSize;
     u8 *BiosRom;
@@ -28,6 +44,63 @@ typedef struct PS1
 
 #define ACCESS_BIOS_ROM(Seg_, Addr_)    IN_RANGE(BIOS_ROM(Seg_), Addr_, BIOS_ROM(Seg_) + 512*KB)
 #define ACCESS_RAM(Seg_, Addr_)         IN_RANGE(MAIN_RAM(Seg_), Addr_, MAIN_RAM(Seg_) + 2*MB)
+#define ACCESS_DMA_PORTS(Addr_)         IN_RANGE(0x1F801080, Addr_, 0x1F8010FF)
+
+static u32 DMA_Read(DMA *Dma, u32 Addr)
+{
+    u32 Data = 0;
+    /* TODO: unaligned read */
+    switch (Addr & ~0x7)
+    {
+    case 0x1F8010F0:
+    {
+        Data = Dma->DPCR;
+    } break;
+    case 0x1F8010F4:
+    {
+        Data = Dma->DICR;
+    } break;
+    case 0x1F8010F8:
+    case 0x1F8010FC:
+    {
+        /* unknown channels (prob a nop) */
+    } break;
+    default:
+    {
+        u32 ChannelIndex = (Addr & 0xF0) >> 4;
+        u32 RegIndex = Addr & 0x0F;
+        Data = Dma->Channel[ChannelIndex].R[RegIndex];
+    } break;
+    }
+    return Data;
+}
+
+static void DMA_Write(DMA *Dma, u32 Addr, u32 Data)
+{
+    /* TODO: unaligned write */
+    switch (Addr & ~0x7)
+    {
+    case 0x1F8010F0:
+    {
+        Dma->DPCR = Data;
+    } break;
+    case 0x1F8010F4:
+    {
+        Dma->DICR = Data;
+    } break;
+    case 0x1F8010F8:
+    case 0x1F8010FC:
+    {
+        /* unknown channels (prob a nop) */
+    } break;
+    default:
+    {
+        u32 ChannelIndex = (Addr & 0xF0) >> 4;
+        u32 RegIndex = Addr & 0x0F;
+        Dma->Channel[ChannelIndex].R[RegIndex] = Data;
+    } break;
+    }
+}
 
 
 static u32 Ps1_TranslateAddr(PS1 *Ps1, u32 Addr)
@@ -85,6 +158,10 @@ static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
         printf("Reading %08x from %08x (ram)\n", Data, Addr);
         return Data;
     }
+    else if (ACCESS_DMA_PORTS(PhysicalAddr))
+    {
+        return DMA_Read(&Ps1->Dma, PhysicalAddr);
+    }
     else 
     {
         printf("Reading from %08x: (unknown)\n", Addr);
@@ -109,6 +186,10 @@ static void Ps1_WriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size
             Ps1->Ram[PhysicalAddr + i] = Data >> i*8;
         }
         puts("(ram)");
+    }
+    else if (ACCESS_DMA_PORTS(PhysicalAddr))
+    {
+        DMA_Write(&Ps1->Dma, PhysicalAddr, Data);
     }
     else if (IN_RANGE(0x1F801000, Addr, 0x1F801020)) /* mem ctrl 1 */
     {
@@ -137,10 +218,12 @@ static void Ps1_Init(PS1 *Ps1)
         .CPU = R3000A_Init(Ps1, Ps1_ReadFn, Ps1_WriteFn, Ps1_VerifyAddr, Ps1_VerifyAddr),
         .BiosRomSize = 512 * KB,
         .RamSize = 2 * MB,
+        .Dma.DPCR = 0x07654321,
     };
 
     u8 *Ptr = malloc(Ps1->BiosRomSize + Ps1->RamSize);
     ASSERT(NULL != Ptr);
+
     Ps1->BiosRom = Ptr;
     Ps1->Ram = Ptr + Ps1->BiosRomSize;
 }
