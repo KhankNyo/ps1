@@ -5,25 +5,57 @@
 #include <stdio.h>
 #include <string.h>
 
+
+#define DMA_CHANNEL_COUNT 7
+
 typedef struct DMA 
 {
     struct {
+        u32 Addr;
+        union {
+            struct {
+                u16 BC;
+            } Sync0;
+            struct {
+                u16 BS, 
+                    BA;
+            } Sync1;
+            u32 U32;
+        } BlockLen;
         struct {
-            u32 Addr;
-            u32 Len;
-            u32 Ctrl;
-            u32 Mirror;
-        };
-        u32 R[4];
-    } Channel[7];
-    u32 DPCR;
-    u32 DICR;
+            unsigned Direction:1;       /* 0 */
+            unsigned Decrement:1;       /* 1 */
+            unsigned Chopping:1;        /* 2 */
+            unsigned SyncType:2;        /* 9..10 */
+            unsigned ChopDMAWindow:3;   /* 16..18 */
+            unsigned ChopCPUWindow:3;   /* 20..22 */
+            unsigned Enable:1;          /* 24 */
+            unsigned ManualTrigger:1;   /* 28 */
+            unsigned Unknown:2;         /* 29..30 */
+        } Ctrl;
+    } Channel[DMA_CHANNEL_COUNT];
+
+    struct {
+        struct {
+            unsigned Priority:3;
+            unsigned Enable:1;
+        } Channel[DMA_CHANNEL_COUNT];
+    } DPCR;
+
+    struct{
+        unsigned Unknown:6;     /* 0..5 */
+        unsigned ForceIRQ:1;    /* 15 */
+        unsigned IRQEnable:7;   /* 16..22 */
+        unsigned IRQMaster:1;   /* 23 */
+        unsigned IRQStatus:7;   /* 24..30 */
+        unsigned IRQActive:1;   /* 31 */
+    } DICR;
 } DMA;
 
 typedef struct PS1 
 {
     DMA Dma;
-    R3000A CPU;
+    R3000A Cpu;
 
     u32 BiosRomSize;
     u32 RamSize;
@@ -46,62 +78,6 @@ typedef struct PS1
 #define ACCESS_RAM(Seg_, Addr_)         IN_RANGE(MAIN_RAM(Seg_), Addr_, MAIN_RAM(Seg_) + 2*MB)
 #define ACCESS_DMA_PORTS(Addr_)         IN_RANGE(0x1F801080, Addr_, 0x1F8010FF)
 
-static u32 DMA_Read(DMA *Dma, u32 Addr)
-{
-    u32 Data = 0;
-    /* TODO: unaligned read */
-    switch (Addr & ~0x7)
-    {
-    case 0x1F8010F0:
-    {
-        Data = Dma->DPCR;
-    } break;
-    case 0x1F8010F4:
-    {
-        Data = Dma->DICR;
-    } break;
-    case 0x1F8010F8:
-    case 0x1F8010FC:
-    {
-        /* unknown channels (prob a nop) */
-    } break;
-    default:
-    {
-        u32 ChannelIndex = (Addr & 0xF0) >> 4;
-        u32 RegIndex = Addr & 0x0F;
-        Data = Dma->Channel[ChannelIndex].R[RegIndex];
-    } break;
-    }
-    return Data;
-}
-
-static void DMA_Write(DMA *Dma, u32 Addr, u32 Data)
-{
-    /* TODO: unaligned write */
-    switch (Addr & ~0x7)
-    {
-    case 0x1F8010F0:
-    {
-        Dma->DPCR = Data;
-    } break;
-    case 0x1F8010F4:
-    {
-        Dma->DICR = Data;
-    } break;
-    case 0x1F8010F8:
-    case 0x1F8010FC:
-    {
-        /* unknown channels (prob a nop) */
-    } break;
-    default:
-    {
-        u32 ChannelIndex = (Addr & 0xF0) >> 4;
-        u32 RegIndex = Addr & 0x0F;
-        Dma->Channel[ChannelIndex].R[RegIndex] = Data;
-    } break;
-    }
-}
-
 
 static u32 Ps1_TranslateAddr(PS1 *Ps1, u32 Addr)
 {
@@ -115,6 +91,138 @@ static u32 Ps1_TranslateAddr(PS1 *Ps1, u32 Addr)
         PhysicalAddr -= KSEG1;
     }
     return PhysicalAddr;
+}
+
+
+
+static u32 DMA_Read(DMA *Dma, u32 Addr)
+{
+    u32 Data = 0;
+    /* TODO: unaligned read */
+    switch (Addr & ~0x7)
+    {
+    case 0x1F8010F0: /* DPCR */
+    {
+        for (uint i = 0; i < DMA_CHANNEL_COUNT; i++)
+        {
+            Data |= (u32)Dma->DPCR.Channel[i].Priority << i*4;
+            Data |= (u32)Dma->DPCR.Channel[i].Enable << (i*4 + 3);
+        }
+    } break;
+    case 0x1F8010F4: /* DICR */
+    {
+        Data = 
+            Dma->DICR.Unknown          << 0
+            | (u32)Dma->DICR.ForceIRQ  << 15
+            | (u32)Dma->DICR.IRQEnable << 16 
+            | (u32)Dma->DICR.IRQMaster << 23 
+            | (u32)Dma->DICR.IRQStatus << 24 
+            | (u32)Dma->DICR.IRQActive << 31;
+    } break;
+    case 0x1F8010F8:
+    case 0x1F8010FC:
+    {
+        /* unknown channels (prob a nop) */
+    } break;
+    default: /* dma channels */
+    {
+        u32 ChannelIndex = (Addr & 0x70) >> 4;
+        u32 RegIndex = (Addr & 0x0F) / sizeof(u32);
+        switch (RegIndex)
+        {
+        case 0: /* addr */
+        {
+            Data = Dma->Channel[ChannelIndex].Addr;
+        } break;
+        case 1: /* len */
+        {
+            Data = Dma->Channel[ChannelIndex].BlockLen.U32;
+        } break;
+        case 2: /* ctrl */
+        {
+            Data = 
+                (u32)Dma->Channel[ChannelIndex].Ctrl.Direction          << 0
+                | (u32)Dma->Channel[ChannelIndex].Ctrl.Decrement        << 1
+                | (u32)Dma->Channel[ChannelIndex].Ctrl.Chopping         << 2
+                | (u32)Dma->Channel[ChannelIndex].Ctrl.SyncType         << 9
+                | (u32)Dma->Channel[ChannelIndex].Ctrl.ChopDMAWindow    << 16
+                | (u32)Dma->Channel[ChannelIndex].Ctrl.ChopCPUWindow    << 20
+                | (u32)Dma->Channel[ChannelIndex].Ctrl.Enable           << 24
+                | (u32)Dma->Channel[ChannelIndex].Ctrl.ManualTrigger    << 28
+                | (u32)Dma->Channel[ChannelIndex].Ctrl.Unknown          << 29
+                ;
+        } break;
+        default:
+        {
+            printf("Reading Index: %d, addr: 0x%08x\n", RegIndex, Addr);
+            ASSERT(false && "Unreachable");
+        } break;
+        }
+    } break;
+    }
+    return Data;
+}
+
+static void DMA_Write(DMA *Dma, u32 Addr, u32 Data)
+{
+    /* TODO: unaligned write */
+    switch (Addr & ~0x7)
+    {
+    case 0x1F8010F0: /* DPCR */
+    {
+        for (uint i = 0; i < DMA_CHANNEL_COUNT; i++)
+        {
+            Dma->DPCR.Channel[i].Enable     = Data >> (3 + i*4);
+            Dma->DPCR.Channel[i].Priority   = Data >> (0 + i*4);
+        }
+    } break;
+    case 0x1F8010F4: /* DICR */
+    {
+        Dma->DICR.Unknown   = Data >> 0;
+        Dma->DICR.ForceIRQ  = Data >> 15;
+        Dma->DICR.IRQEnable = Data >> 16;
+        Dma->DICR.IRQMaster = Data >> 23;
+        Dma->DICR.IRQStatus = Data >> 24;
+    } break;
+    case 0x1F8010F8:
+    case 0x1F8010FC:
+    {
+        /* unknown channels (prob a nop) */
+    } break;
+    default: /* dma channels */
+    {
+        u32 ChannelIndex = (Addr & 0x70) >> 4;
+        u32 RegIndex = (Addr & 0x0F) / sizeof(u32);
+        switch (RegIndex)
+        {
+        case 0: /* addr */
+        {
+            Dma->Channel[ChannelIndex].Addr = Data;
+        } break;
+        case 1: /* len */
+        {
+            Dma->Channel[ChannelIndex].BlockLen.U32 = Data;
+        } break;
+        case 2: /* ctrl */
+        {
+            Dma->Channel[ChannelIndex].Ctrl.Direction        = Data >> 0;
+            Dma->Channel[ChannelIndex].Ctrl.Decrement        = Data >> 1;
+            Dma->Channel[ChannelIndex].Ctrl.Chopping         = Data >> 2;
+            Dma->Channel[ChannelIndex].Ctrl.SyncType         = Data >> 9;
+            Dma->Channel[ChannelIndex].Ctrl.ChopDMAWindow    = Data >> 16;
+            Dma->Channel[ChannelIndex].Ctrl.ChopCPUWindow    = Data >> 20;
+            Dma->Channel[ChannelIndex].Ctrl.Enable           = Data >> 24;
+            Dma->Channel[ChannelIndex].Ctrl.ManualTrigger    = Data >> 28;
+            Dma->Channel[ChannelIndex].Ctrl.Unknown          = Data >> 29;
+        } break;
+        default:
+        {
+            printf("Writing Index: %d, addr: 0x%08x\n", RegIndex, Addr);
+            ASSERT(false && "Unreachable");
+        } break;
+        }
+    } break;
+    }
 }
 
 
@@ -215,15 +323,19 @@ static Bool8 Ps1_VerifyAddr(void *UserData, u32 Addr)
 static void Ps1_Init(PS1 *Ps1)
 {
     *Ps1 = (PS1){
-        .CPU = R3000A_Init(Ps1, Ps1_ReadFn, Ps1_WriteFn, Ps1_VerifyAddr, Ps1_VerifyAddr),
+        .Cpu = R3000A_Init(Ps1, Ps1_ReadFn, Ps1_WriteFn, Ps1_VerifyAddr, Ps1_VerifyAddr),
         .BiosRomSize = 512 * KB,
         .RamSize = 2 * MB,
-        .Dma.DPCR = 0x07654321,
     };
+
+    /* default priority, 0x07654321 */
+    for (uint i = 0; i < DMA_CHANNEL_COUNT; i++)
+    {
+        Ps1->Dma.DPCR.Channel[i].Priority = i + 1;
+    }
 
     u8 *Ptr = malloc(Ps1->BiosRomSize + Ps1->RamSize);
     ASSERT(NULL != Ptr);
-
     Ps1->BiosRom = Ptr;
     Ps1->Ram = Ptr + Ps1->BiosRomSize;
 }
@@ -367,7 +479,7 @@ int main(int argc, char **argv)
     }
     fclose(RomFile);
 
-    Ps1.CPU = R3000A_Init(
+    Ps1.Cpu = R3000A_Init(
         &Ps1, 
         Ps1_ReadFn, 
         Ps1_WriteFn, 
@@ -375,8 +487,8 @@ int main(int argc, char **argv)
         Ps1_VerifyAddr
     );
     do {
-        //DumpState(&Ps1.CPU);
-        R3000A_StepClock(&Ps1.CPU);
+        //DumpState(&Ps1.Cpu);
+        R3000A_StepClock(&Ps1.Cpu);
     } while ('q' != GetCmdLine("Press Enter to cont...\n"));
     Ps1_Destroy(&Ps1);
     return 0;
