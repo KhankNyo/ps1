@@ -57,8 +57,8 @@ typedef struct PS1
     DMA Dma;
     R3000A Cpu;
 
-    u32 BiosRomSize;
-    u32 RamSize;
+    i32 BiosRomSize;
+    i32 RamSize;
     u8 *BiosRom;
     u8 *Ram;
 } PS1;
@@ -74,9 +74,10 @@ typedef struct PS1
 #define EXPANSION_3(Seg_)   ((Seg_) + 0x1FA00000)
 #define BIOS_ROM(Seg_)      ((Seg_) + 0x1FC00000)
 
+#define ACCESS_RAM(Addr_)               ((Addr_) < 2*MB)
 #define ACCESS_BIOS_ROM(Seg_, Addr_)    IN_RANGE(BIOS_ROM(Seg_), Addr_, BIOS_ROM(Seg_) + 512*KB)
-#define ACCESS_RAM(Seg_, Addr_)         IN_RANGE(MAIN_RAM(Seg_), Addr_, MAIN_RAM(Seg_) + 2*MB)
 #define ACCESS_DMA_PORTS(Addr_)         IN_RANGE(0x1F801080, Addr_, 0x1F8010FF)
+#define ACCESS_EXPANSION_1(Addr_)       IN_RANGE(EXPANSION_1(0), Addr_, EXPANSION_1(0) + 8192*KB)
 
 
 static u32 Ps1_TranslateAddr(PS1 *Ps1, u32 Addr)
@@ -236,7 +237,7 @@ static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
         return 0;
     }
 
-    u32 PhysicalAddr = Ps1_TranslateAddr(Ps1, Addr); 
+    i32 PhysicalAddr = Ps1_TranslateAddr(Ps1, Addr); 
     if (ACCESS_BIOS_ROM(0, PhysicalAddr))
     {
         PhysicalAddr -= BIOS_ROM(0);
@@ -251,7 +252,7 @@ static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
         }
         return Data;
     }
-    else if (ACCESS_RAM(0, PhysicalAddr))
+    else if (ACCESS_RAM(PhysicalAddr))
     {
         PhysicalAddr -= MAIN_RAM(0);
 
@@ -263,12 +264,19 @@ static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
         {
             Data |= (u32)Ps1->Ram[PhysicalAddr + i] << i*8;
         }
-        printf("Reading %08x from %08x (ram)\n", Data, Addr);
         return Data;
     }
     else if (ACCESS_DMA_PORTS(PhysicalAddr))
     {
-        return DMA_Read(&Ps1->Dma, PhysicalAddr);
+        u32 Data = DMA_Read(&Ps1->Dma, PhysicalAddr);
+        printf("Reading from %08x: 0x%08x(DMA)\n", Addr, Data);
+        return Data;
+    }
+    else if (ACCESS_EXPANSION_1(Addr))
+    {
+        u32 Data = 0xFF;
+        printf("Reading from %08x: 0x%08x (Expansion 1)\n", Addr, Data);
+        return Data;
     }
     else 
     {
@@ -281,9 +289,8 @@ static void Ps1_WriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size
 {
     PS1 *Ps1 = UserData;
 
-    printf("Writing %08x to %08x ", Data, Addr);
-    u32 PhysicalAddr = Ps1_TranslateAddr(Ps1, Addr);
-    if (ACCESS_RAM(0, PhysicalAddr))
+    i32 PhysicalAddr = Ps1_TranslateAddr(Ps1, Addr);
+    if (ACCESS_RAM(PhysicalAddr))
     {
         PhysicalAddr -= MAIN_RAM(0);
         for (int i = 0; 
@@ -293,23 +300,23 @@ static void Ps1_WriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size
         {
             Ps1->Ram[PhysicalAddr + i] = Data >> i*8;
         }
-        puts("(ram)");
     }
     else if (ACCESS_DMA_PORTS(PhysicalAddr))
     {
+        printf("Writing %08x to %08x (DMA)\n", Data, Addr);
         DMA_Write(&Ps1->Dma, PhysicalAddr, Data);
     }
     else if (IN_RANGE(0x1F801000, Addr, 0x1F801020)) /* mem ctrl 1 */
     {
-        puts("(memctrl 1)");
+        printf("Writing %08x to %08x (memctrl 1)\n", Data, Addr);
     }
     else if (Addr == 0x1F801060) /* mem ctrl 2 (ram size) */
     {
-        puts("(memctrl 2 / RAM_SIZE)");
+        printf("Writing %08x to %08x (memctrl 2, RAM_SIZE)\n", Data, Addr);
     }
     else
     {
-        puts("(unknown)");
+        printf("Writing %08x to %08x (unknown)\n", Data, Addr);
     }
 }
 
@@ -470,7 +477,7 @@ int main(int argc, char **argv)
             printf("Error: rom size must be exactly %d KB\n", (int)(Ps1.BiosRomSize)/KB);
             goto CloseRom;
         }
-        u32 ReadSize = fread(Ps1.BiosRom, 1, Ps1.BiosRomSize, RomFile);
+        i32 ReadSize = fread(Ps1.BiosRom, 1, Ps1.BiosRomSize, RomFile);
         if (ReadSize != Ps1.BiosRomSize)
         {
             printf("Error: unable to fully read '%s' (read %d bytes).", FileName, ReadSize);
