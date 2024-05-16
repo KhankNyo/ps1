@@ -40,6 +40,8 @@ typedef struct StringView
 #define IN_RANGE(lower, n, upper) ((lower) <= (n) && (n) <= (upper))
 #define MASKED_LOAD(dst, src, mask) (dst = ((dst) & ~(mask)) | ((src) & (mask)))
 #define STATIC_ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define MIN(a, b) ((a) > (b)? (b) : (a))
+#define MAX(a, b) ((a) < (b)? (b) : (a))
 
 #define KB 1024
 #define MB (1024*1024)

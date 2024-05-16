@@ -725,6 +725,7 @@ static R3000A_StageStatus R3000A_Execute(R3000A *This)
         case 0x00:
         case 0x01: /* mfc0 */
         {
+            /* NOTE: mfc0 should be delayed by 1 cycle */
             *Rt = CP0_Read(&This->CP0, REG(Instruction, RD));
         } break;
         case 0x04:

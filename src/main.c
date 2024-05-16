@@ -8,6 +8,29 @@
 
 #define DMA_CHANNEL_COUNT 7
 
+#define KUSEG 0
+#define KSEG0 0x80000000
+#define KSEG1 0xA0000000 
+
+#define MAIN_RAM(Seg_)      ((Seg_) + 0)
+#define EXPANSION_1(Seg_)   ((Seg_) + 0x1F000000)
+#define IO_PORTS(Seg_)      ((Seg_) + 0x1F801000)
+#define EXPANSION_2(Seg_)   ((Seg_) + 0x1F802000)
+#define EXPANSION_3(Seg_)   ((Seg_) + 0x1FA00000)
+#define BIOS_ROM(Seg_)      ((Seg_) + 0x1FC00000)
+
+#define ACCESS_RAM(Addr_)               ((u32)(Addr_) < 2*MB)
+#define ACCESS_BIOS_ROM(Addr_)          IN_RANGE(BIOS_ROM(0), (u32)(Addr_), BIOS_ROM(0) + 512*KB)
+#define ACCESS_DMA_PORTS(Addr_)         IN_RANGE(0x1F801080, (u32)(Addr_), 0x1F8010FF)
+#define ACCESS_EXPANSION_1(Addr_)       IN_RANGE(EXPANSION_1(0), (u32)(Addr_), EXPANSION_1(0) + 8192)
+#define ACCESS_EXPANSION_2(Addr_)       IN_RANGE(EXPANSION_2(0), (u32)(Addr_), EXPANSION_2(0) + 8192)
+#define ACCESS_MEM_CTRL(Addr_)          IN_RANGE(IO_PORTS(0), (u32)(Addr_), IO_PORTS(0) + 0x20)
+#define ACCESS_CACHE_CTRL(Addr_)        ((u32)(Addr_) >= 0xFFFE0000)
+#define ACCESS_SPU_CTRL(Addr_)          IN_RANGE(0x1F801D80, (u32)(Addr_), 0x1F801DBC)
+
+#define STREQ(s1, strlit) (strncmp(s1, strlit, sizeof strlit - 1) == 0)
+
+
 typedef struct DMA 
 {
     struct {
@@ -52,35 +75,56 @@ typedef struct DMA
     } DICR;
 } DMA;
 
+typedef struct DisassembledInstruction 
+{
+    char Line[64];
+    u32 Instruction;
+    u32 Address;
+} DisassembledInstruction;
+
 typedef struct PS1 
 {
     DMA Dma;
     R3000A Cpu;
 
-    i32 BiosRomSize;
-    i32 RamSize;
+    u32 BiosRomSize;
+    u32 RamSize;
     u8 *BiosRom;
     u8 *Ram;
+
+    Bool8 SingleStep;
+    Bool8 HasReadWatch;
+    Bool8 HasWriteWatch;
+    Bool8 HasBreakpoint;
+    Bool8 HasCycleCounterWatch;
+    Bool8 HasRegWatch;
+    Bool8 HasMemWatch;
+    u32 LastReadAddr, ReadWatch;
+    u32 LastWriteAddr, WriteWatch;
+    u32 BreakpointAddr;
+    u32 CyclesUntilSingleStep;
+    u32 RegWatchValue, RegWatchIndex;
 } PS1;
 
-#define KUSEG 0
-#define KSEG0 0x80000000
-#define KSEG1 0xA0000000 
+typedef struct MemoryInfo 
+{
+    const char *Name;
+    u32 Data;
+} MemoryInfo;
 
-#define MAIN_RAM(Seg_)      ((Seg_) + 0)
-#define EXPANSION_1(Seg_)   ((Seg_) + 0x1F000000)
-#define IO_PORTS(Seg_)      ((Seg_) + 0x1F801000)
-#define EXPANSION_2(Seg_)   ((Seg_) + 0x1F802000)
-#define EXPANSION_3(Seg_)   ((Seg_) + 0x1FA00000)
-#define BIOS_ROM(Seg_)      ((Seg_) + 0x1FC00000)
+static const char *sBiosRomLiteral = "Bios Rom";
+static const char *sRamLiteral = "Ram";
+static const char *sDMAPortLiteral = "DMA Ports";
+static const char *sExpansion1Literal = "Expansion 1";
+static const char *sExpansion2Literal = "Expansion 2";
+static const char *sSPUCtrlLiteral = "SPU Ctrl";
+static const char *sUnknownLiteral = "Unknown";
+static const char *sCacheCtrlLiteral = "Cache Ctrl";
+static const char *sMemCtrlLiteral = "Mem Ctrl";
+static const char *sRamSizeLiteral = "RAM_SIZE";
 
-#define ACCESS_RAM(Addr_)               ((Addr_) < 2*MB)
-#define ACCESS_BIOS_ROM(Seg_, Addr_)    IN_RANGE(BIOS_ROM(Seg_), Addr_, BIOS_ROM(Seg_) + 512*KB)
-#define ACCESS_DMA_PORTS(Addr_)         IN_RANGE(0x1F801080, Addr_, 0x1F8010FF)
-#define ACCESS_EXPANSION_1(Addr_)       IN_RANGE(EXPANSION_1(0), Addr_, EXPANSION_1(0) + 8192*KB)
 
-
-static u32 Ps1_TranslateAddr(PS1 *Ps1, u32 Addr)
+static u32 Ps1_TranslateAddr(const PS1 *Ps1, u32 Addr)
 {
     u32 PhysicalAddr = Addr;
     if (IN_RANGE(KSEG0, Addr, KSEG1 - 1)) /* kseg 0 */
@@ -96,7 +140,7 @@ static u32 Ps1_TranslateAddr(PS1 *Ps1, u32 Addr)
 
 
 
-static u32 DMA_Read(DMA *Dma, u32 Addr)
+static u32 DMA_Read(const DMA *Dma, u32 Addr)
 {
     u32 Data = 0;
     /* TODO: unaligned read */
@@ -227,96 +271,147 @@ static void DMA_Write(DMA *Dma, u32 Addr, u32 Data)
 }
 
 
-static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
+static MemoryInfo Ps1_Read(const PS1 *Ps1, u32 Addr, R3000A_DataSize Size, Bool8 DebugRead)
 {
-    PS1 *Ps1 = UserData;
-
-    if (Addr > 0xFFFE0000) /* memctrl IO ports (kseg2) */
-    {
-        printf("Reading from %08x: (memctrl)\n", Addr);
-        return 0;
-    }
-
-    i32 PhysicalAddr = Ps1_TranslateAddr(Ps1, Addr); 
-    if (ACCESS_BIOS_ROM(0, PhysicalAddr))
+    u32 PhysicalAddr = Ps1_TranslateAddr(Ps1, Addr);
+    MemoryInfo Info = { 0 };
+    if (ACCESS_BIOS_ROM(PhysicalAddr))
     {
         PhysicalAddr -= BIOS_ROM(0);
-
-        u32 Data = 0;
-        for (int i = 0; 
-            i < (int)Size 
-            && PhysicalAddr + i < Ps1->BiosRomSize; 
-            i++)
+        for (uint i = 0; i < (uint)Size && PhysicalAddr + i < Ps1->BiosRomSize; i++)
         {
-            Data |= (u32)Ps1->BiosRom[PhysicalAddr + i] << i*8;
+            Info.Data |= (u32)Ps1->BiosRom[PhysicalAddr + i] << i*8;
         }
-        return Data;
+        Info.Name = sBiosRomLiteral;
     }
     else if (ACCESS_RAM(PhysicalAddr))
     {
         PhysicalAddr -= MAIN_RAM(0);
-
-        u32 Data = 0;
-        for (int i = 0; 
-            i < (int)Size 
-            && PhysicalAddr + i < Ps1->RamSize; 
-            i++)
+        for (uint i = 0; i < (uint)Size && PhysicalAddr + i < Ps1->RamSize; i++)
         {
-            Data |= (u32)Ps1->Ram[PhysicalAddr + i] << i*8;
+            Info.Data |= (u32)Ps1->Ram[PhysicalAddr + i] << i*8;
         }
-        return Data;
+        Info.Name = sRamLiteral;
     }
     else if (ACCESS_DMA_PORTS(PhysicalAddr))
     {
-        u32 Data = DMA_Read(&Ps1->Dma, PhysicalAddr);
-        printf("Reading from %08x: 0x%08x(DMA)\n", Addr, Data);
-        return Data;
+        Info.Data = DMA_Read(&Ps1->Dma, PhysicalAddr);
+        Info.Name = sDMAPortLiteral;
     }
-    else if (ACCESS_EXPANSION_1(Addr))
+    else if (ACCESS_EXPANSION_1(PhysicalAddr))
     {
-        u32 Data = 0xFF;
-        printf("Reading from %08x: 0x%08x (Expansion 1)\n", Addr, Data);
-        return Data;
+        Info.Data = 0xFF;
+        Info.Name = sExpansion1Literal;
+    }
+    else if (ACCESS_EXPANSION_2(PhysicalAddr))
+    {
+        Info.Data = 0xFF;
+        Info.Name = sExpansion2Literal;
+    }
+    else if (ACCESS_MEM_CTRL(PhysicalAddr))
+    {
+        Info.Name = sMemCtrlLiteral;
+    }
+    else if (PhysicalAddr == 0x1F801060) /* RAM_SIZE */
+    {
+        Info.Name = sRamSizeLiteral;
+    }
+    else if (ACCESS_SPU_CTRL(PhysicalAddr))
+    {
+        Info.Name = sSPUCtrlLiteral;
+    }
+    else if (ACCESS_CACHE_CTRL(PhysicalAddr))
+    {
+        Info.Name = sCacheCtrlLiteral;
     }
     else 
     {
-        printf("Reading from %08x: (unknown)\n", Addr);
+        Info.Name = sUnknownLiteral;
     }
-    return 0;
+    return Info;
+}
+
+static const char *Ps1_Write(PS1 *Ps1, u32 Addr, u32 Data, R3000A_DataSize Size, Bool8 DebugWrite)
+{
+    u32 PhysicalAddr = Ps1_TranslateAddr(Ps1, Addr);
+    if (DebugWrite && ACCESS_BIOS_ROM(PhysicalAddr))
+    {
+        for (uint i = 0; i < (uint)Size && PhysicalAddr + i < Ps1->BiosRomSize; i++)
+        {
+            Ps1->BiosRom[PhysicalAddr + i] = Data >> i*8;
+        }
+        return sBiosRomLiteral;
+    }
+    if (ACCESS_RAM(PhysicalAddr))
+    {
+        for (uint i = 0; i < (uint)Size && PhysicalAddr + i < Ps1->RamSize; i++)
+        {
+            Ps1->Ram[PhysicalAddr + i] = Data >> i*8;
+        }
+        return sRamLiteral;
+    }
+    if (ACCESS_DMA_PORTS(PhysicalAddr))
+    {
+        DMA_Write(&Ps1->Dma, Addr, Data);
+        return sDMAPortLiteral;
+    }
+    if (ACCESS_EXPANSION_1(PhysicalAddr))
+    {
+        /* nop */
+        return sExpansion1Literal;
+    }
+    if (ACCESS_EXPANSION_2(PhysicalAddr))
+    {
+        /* nop */
+        return sExpansion2Literal;
+    }
+    if (ACCESS_MEM_CTRL(PhysicalAddr))
+    {
+        /* nop */
+        return sMemCtrlLiteral;
+    }
+    if (PhysicalAddr == 0x1F801060) /* RAM_SIZE */
+    {
+        /* nop */
+        return sRamSizeLiteral;
+    }
+    if (ACCESS_CACHE_CTRL(PhysicalAddr))
+    {
+        /* nop */
+        return sCacheCtrlLiteral;
+    }
+    if (ACCESS_SPU_CTRL(PhysicalAddr))
+    {
+        /* nop */
+        return sSPUCtrlLiteral;
+    }
+    
+    return sUnknownLiteral;
+}
+
+static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
+{
+    PS1 *Ps1 = UserData;
+    Ps1->LastReadAddr = Addr;
+    MemoryInfo Location = Ps1_Read(Ps1, Addr, Size, false);
+
+    if (Location.Name != sBiosRomLiteral 
+    && Location.Name != sRamLiteral)
+    {
+        printf("Reading %d bytes from 0x%08x: %08x (%s)\n", Size, Addr, Location.Data, Location.Name);
+    }
+    return Location.Data;
 }
 
 static void Ps1_WriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size)
 {
     PS1 *Ps1 = UserData;
-
-    i32 PhysicalAddr = Ps1_TranslateAddr(Ps1, Addr);
-    if (ACCESS_RAM(PhysicalAddr))
+    Ps1->LastWriteAddr = Addr;
+    const char *LocationName = Ps1_Write(Ps1, Addr, Data, Size, false);
+    if (LocationName != sRamLiteral
+    && LocationName != sBiosRomLiteral)
     {
-        PhysicalAddr -= MAIN_RAM(0);
-        for (int i = 0; 
-            i < (int)Size
-            && PhysicalAddr + i < Ps1->RamSize; 
-            i++)
-        {
-            Ps1->Ram[PhysicalAddr + i] = Data >> i*8;
-        }
-    }
-    else if (ACCESS_DMA_PORTS(PhysicalAddr))
-    {
-        printf("Writing %08x to %08x (DMA)\n", Data, Addr);
-        DMA_Write(&Ps1->Dma, PhysicalAddr, Data);
-    }
-    else if (IN_RANGE(0x1F801000, Addr, 0x1F801020)) /* mem ctrl 1 */
-    {
-        printf("Writing %08x to %08x (memctrl 1)\n", Data, Addr);
-    }
-    else if (Addr == 0x1F801060) /* mem ctrl 2 (ram size) */
-    {
-        printf("Writing %08x to %08x (memctrl 2, RAM_SIZE)\n", Data, Addr);
-    }
-    else
-    {
-        printf("Writing %08x to %08x (unknown)\n", Data, Addr);
+        printf("Writing 0x%08x (%d bytes) to 0x%08x (%s)\n", Data, Size, Addr, LocationName);
     }
 }
 
@@ -325,7 +420,6 @@ static Bool8 Ps1_VerifyAddr(void *UserData, u32 Addr)
     (void)UserData, (void)Addr;
     return true;
 }
-
 
 static void Ps1_Init(PS1 *Ps1)
 {
@@ -357,62 +451,7 @@ static void Ps1_Destroy(PS1 *Ps1)
 
 
 
-static void UpdateDisassembly(const R3000A *Mips)
-{
-#define NUM_INS 10
-    typedef struct DisasmInfo 
-    {
-        char Opc[64];
-        u32 Instruction;
-        u32 Addr;
-    } DisasmInfo;
 
-    static DisasmInfo Disasm[NUM_INS] = { 0 };
-    if (!IN_RANGE(Disasm[0].Addr, Mips->PC, Disasm[NUM_INS - 1].Addr))
-    {
-        const PS1 *Ps1 = Mips->UserData;
-        u32 CurrentPC = Mips->PC;
-        for (int i = 0; i < NUM_INS; i++)
-        {
-            if (ACCESS_BIOS_ROM(KSEG1, CurrentPC))
-            {
-                u32 PhysAddr = CurrentPC - BIOS_ROM(KSEG1);
-                u32 Instruction;
-                memcpy(&Instruction, Ps1->BiosRom + PhysAddr, sizeof Instruction);
-                R3000A_Disasm(
-                    Instruction, 
-                    CurrentPC,
-                    DISASM_IMM16_AS_HEX,
-                    Disasm[i].Opc, 
-                    sizeof Disasm[i].Opc
-                );
-                Disasm[i].Instruction = Instruction;
-                Disasm[i].Addr = CurrentPC;
-                CurrentPC += 4;
-            }
-            else
-            {
-                Disasm[i].Addr = CurrentPC;
-                Disasm[i].Instruction = 0;
-                snprintf(Disasm[i].Opc, sizeof Disasm[i].Opc, "???");
-            }
-        }
-    }
-
-    for (int i = 0; i < NUM_INS; i++)
-    {
-        const char *Pointer = "   ";
-        if (Mips->PC == Disasm[i].Addr)
-            Pointer = "PC>";
-        else if (Mips->PC - 4*sizeof(Disasm[0].Instruction) == Disasm[i].Addr)
-            Pointer = "wb>";
-        printf( 
-            "%s %08X:  %08X  %s\n", 
-            Pointer, Disasm[i].Addr, Disasm[i].Instruction, Disasm[i].Opc
-        );
-    }
-#undef NUM_INS
-}
 
 static void DumpState(const R3000A *Mips)
 {
@@ -437,22 +476,222 @@ static void DumpState(const R3000A *Mips)
         printf("\n");
     }
 
-    Display = "========== Disassembly ==========";
-    printf("%s\n", Display);
-
-    UpdateDisassembly(Mips);
-    LastState = *Mips;
+    printf("PC=0x%08x\n", Mips->PC);
 }
 
-static char GetCmdLine(const char *Prompt)
+static u32 ParseUint(const char *Str, const char **Next)
 {
-#if 0
-    printf("%s", Prompt);
-    char Tmp[256];
-    fgets(Tmp, sizeof Tmp, stdin);
-    return Tmp[0];
-#endif 
-    return 0;
+    u32 Value = 0;
+    while (' ' == *Str || '\t' == *Str || '\n' == *Str || '\r' == *Str)
+    {
+        Str++;
+    }
+
+    if (Str[0] == '0' && Str[1] == 'x') /* base 16, 0x */
+    {
+        Str += 2;
+        while (1)
+        {
+            char Upper = *Str & ~(1 << 5);
+            if (IN_RANGE('0', *Str, '9'))
+            {
+                Value *= 16;
+                Value += *Str - '0';
+            }
+            else if (IN_RANGE('A', Upper, 'F'))
+            {
+                Value *= 16;
+                Value += Upper - 'A' + 10;
+            }
+            else if ('_' == *Str) 
+            {
+                /* nop */
+            }
+            else break;
+
+            Str++;
+        }
+    }
+    else /* base 10 */
+    {
+        while (1)
+        {
+            if (IN_RANGE('0', *Str, '9'))
+            {
+                Value *= 10;
+                Value += *Str - '0';
+            }
+            else if ('_' == *Str) 
+            {
+                /* nop */
+            }
+            else break;
+            Str++;
+        }
+    }
+
+    if (Next)
+        *Next = Str;
+    return Value;
+}
+
+static Bool8 GetCmdLine(PS1 *Ps1, const char *Prompt)
+{
+    printf("%s, type Help to see a list of commands\n\n", Prompt);
+    do {
+        char Input[256];
+        char *Cmd = Input;
+        printf(">> ");
+        fgets(Cmd, sizeof Input, stdin);
+
+        Bool8 EnableCmd = !STREQ(Cmd, "Disable");
+        if (!EnableCmd)
+            Cmd += sizeof("Disable") - 1; /* space counts */
+
+        if (STREQ(Cmd, "Breakpoint"))
+        {
+            Ps1->HasBreakpoint = EnableCmd;
+            if (EnableCmd)
+            {
+                Ps1->BreakpointAddr = ParseUint(Cmd + sizeof("Breakpoint") - 1, NULL);
+                printf("Enabled breakpoint at 0x%08x\n", Ps1->BreakpointAddr);
+            }
+            else
+            {
+                printf("Disabled breakpoint\n");
+            }
+        }
+        else if (STREQ(Cmd, "BreakOnRead"))
+        {
+            Ps1->HasReadWatch = EnableCmd;
+            if (EnableCmd)
+            {
+                Ps1->ReadWatch = ParseUint(Cmd + sizeof("BreakOnRead") - 1, NULL);
+                printf("Enabled breakpoint on read at 0x%08x\n", Ps1->ReadWatch);
+            }
+            else
+            {
+                printf("Disabled breakpoint on read\n");
+            }
+        }
+        else if (STREQ(Cmd, "BreakOnWrite"))
+        {
+            Ps1->HasWriteWatch = EnableCmd;
+            if (EnableCmd)
+            {
+                Ps1->WriteWatch = ParseUint(Cmd + sizeof("BreakOnWrite") - 1, NULL);
+                printf("Enabled breakpoint on write at 0x%08x\n", Ps1->WriteWatch);
+            }
+            else
+            {
+                printf("Disabled breakpoint on write\n");
+            }
+        }
+        else if (STREQ(Cmd, "Peek"))
+        {
+            u32 Addr = ParseUint(Cmd + sizeof("Peek") - 1, NULL);
+            MemoryInfo Location = Ps1_Read(Ps1, Addr, 4, true);
+
+            printf("%08x: %08x (%s)\n", Addr, Location.Data, Location.Name);
+        }
+        else if (STREQ(Cmd, "Poke"))
+        {
+            const char *NextArg;
+            u32 Addr = ParseUint(Cmd + sizeof("Poke") - 1, &NextArg);
+            u32 Value = ParseUint(NextArg, NULL);
+
+            MemoryInfo Location = Ps1_Read(Ps1, Addr, 4, true);
+            Ps1_Write(Ps1, Addr, Value, 4, true);
+
+            printf("%08x: %08x -> %08x (%s)\n", Addr, Location.Data, Value, Location.Name);
+        }
+        else if (STREQ(Cmd, "Disasm"))
+        {
+            const char *NextArg;
+            u32 Addr = ParseUint(Cmd + sizeof("Disasm") - 1, &NextArg);
+            uint InstructionCount = ParseUint(NextArg, NULL);
+            for (u32 i = 0; i < InstructionCount; i++)
+            {
+                u32 CurrentAddr = Addr + i*4;
+                MemoryInfo Location = Ps1_Read(Ps1, CurrentAddr, 4, true);
+                char Mnemonic[64];
+                R3000A_Disasm(
+                    Location.Data, 
+                    CurrentAddr, 
+                    DISASM_IMM16_AS_HEX, 
+                    Mnemonic, 
+                    sizeof Mnemonic
+                );
+
+                const char *Pointer = "   ";
+                if (CurrentAddr == Ps1->Cpu.PC)
+                    Pointer = "PC>";
+                printf("%s%08x: %08x    %s\n", Pointer, CurrentAddr, Location.Data, Mnemonic);
+            }
+        }
+        else if (STREQ(Cmd, "Help"))
+        {
+            printf(
+                "Commands list:\n"
+                "\tBreakpoint 0x123456:   Sets a breakpoint at address 0x123456\n"
+                "\tBreakOnRead 0x123456:  Halts the emulator when address 0x123456 was read\n"
+                "\tBreakOnWrite 0x123456: Halts the emulator when address 0x123456 was written to\n"
+                "\tPeek 0x123456:         Reads a word (4 bytes) at address 0x123456\n"
+                "\tPoke 0x123456 420:     Writes 420 to address 0x123456\n"
+                "\tDisasm 0x123456:       Disassembles instructions at 0x123456\n"
+                "\tRuntil 56:             Runs the emulator for 56 instructions\n"
+                "\tRun:                   Runs the emulator\n"
+                "\tQuit/q:                Exits the emulator\n"
+                "\tHelp:                  Shows this message\n"
+                "Prefix breakpoint commands with 'Disable' to disable them\n"
+            );
+        }
+        else if (STREQ(Cmd, "Quit") || Cmd[0] == 'q')
+        {
+            printf("Quitting\n");
+            return false;
+        }
+        else if (STREQ(Cmd, "Runtil"))
+        {
+            Ps1->HasCycleCounterWatch = true;
+            Ps1->CyclesUntilSingleStep = atoi(Cmd + sizeof("runtil")); /* space is required */
+            break;
+        }
+        else if (STREQ(Cmd, "Run"))
+        {
+            Ps1->SingleStep = false;
+            break;
+        }
+        else break;
+    } while (1);
+    return true;
+}
+
+static void Ps1_ManageWatchdogs(PS1 *Ps1)
+{
+    Bool8 ShouldChangeSingleStep = (Ps1->HasBreakpoint && Ps1->BreakpointAddr == Ps1->Cpu.PC)
+        || (Ps1->HasReadWatch && Ps1->LastReadAddr == Ps1->ReadWatch)
+        || (Ps1->HasWriteWatch && Ps1->LastWriteAddr == Ps1->WriteWatch) 
+        || (Ps1->HasRegWatch && Ps1->RegWatchValue != Ps1->Cpu.R[Ps1->RegWatchIndex]);
+    Ps1->SingleStep = ((Ps1->SingleStep ^ ShouldChangeSingleStep) & 1);
+
+    if (Ps1->HasCycleCounterWatch)
+    {
+        if (Ps1->CyclesUntilSingleStep == 0)
+        {
+            Ps1->SingleStep = true;
+            Ps1->HasCycleCounterWatch = false;
+        }
+        else
+        {
+            Ps1->CyclesUntilSingleStep--;
+        }
+    }
+
+    if (Ps1->HasMemWatch)
+    {
+        ASSERT(false && "TODO");
+    }
 }
 
 int main(int argc, char **argv)
@@ -468,6 +707,8 @@ int main(int argc, char **argv)
     const char *FileName = argv[1];
     FILE *RomFile = fopen(FileName, "rb");
     {
+        ASSERT(RomFile);
+
         fseek(RomFile, 0, SEEK_END);
         iSize FileSize = ftell(RomFile);
         fseek(RomFile, 0, SEEK_SET);
@@ -477,7 +718,7 @@ int main(int argc, char **argv)
             printf("Error: rom size must be exactly %d KB\n", (int)(Ps1.BiosRomSize)/KB);
             goto CloseRom;
         }
-        i32 ReadSize = fread(Ps1.BiosRom, 1, Ps1.BiosRomSize, RomFile);
+        u32 ReadSize = fread(Ps1.BiosRom, 1, Ps1.BiosRomSize, RomFile);
         if (ReadSize != Ps1.BiosRomSize)
         {
             printf("Error: unable to fully read '%s' (read %d bytes).", FileName, ReadSize);
@@ -493,10 +734,18 @@ int main(int argc, char **argv)
         Ps1_VerifyAddr, 
         Ps1_VerifyAddr
     );
+    Ps1.SingleStep = true;
     do {
-        //DumpState(&Ps1.Cpu);
+        Ps1_ManageWatchdogs(&Ps1);
+        if (Ps1.SingleStep)
+        {
+            DumpState(&Ps1.Cpu);
+            if (!GetCmdLine(&Ps1, "Press Enter to cont..."))
+                break;
+        }
+
         R3000A_StepClock(&Ps1.Cpu);
-    } while ('q' != GetCmdLine("Press Enter to cont...\n"));
+    } while (1);
     Ps1_Destroy(&Ps1);
     return 0;
 
