@@ -546,7 +546,7 @@ static Bool8 GetCmdLine(PS1 *Ps1, const char *Prompt)
 
         Bool8 EnableCmd = !STREQ(Cmd, "Disable");
         if (!EnableCmd)
-            Cmd += sizeof("Disable") - 1; /* space counts */
+            Cmd += sizeof("Disable"); /* space counts, only 1 */
 
         if (STREQ(Cmd, "Breakpoint"))
         {
