@@ -964,6 +964,9 @@ static int R3000A_ExecutePipeline(R3000A *This)
     if (MemoryStage.HasException)
         return EXECUTE_STAGE;
 
+    R3000A_Writeback(This);
+    This->R[0] = 0;
+
     R3000A_StageStatus ExecuteStage = R3000A_Execute(This);
     This->R[0] = 0;
     if (MemoryStage.RegIndex)
@@ -981,9 +984,6 @@ static int R3000A_ExecutePipeline(R3000A *This)
     This->R[0] = 0;
     if (HasException)
         return FETCH_STAGE;
-
-    R3000A_Writeback(This);
-    This->R[0] = 0;
     return -1;
 }
 
