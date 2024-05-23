@@ -35,7 +35,7 @@ set APPNAME=PS1Emu.exe
 
 set MSVC_COMP=/DDEBUG /Zi /Od
 set MSVC_INC=/I"%SRC_DIR%\Include" /I"%RAYLIB_SRC%" /I"%EXTERN_DIR%\glew"
-set CC=gcc
+set CC=tcc
 set CC_COMP=-O1 -DDEBUG -Wall -Wextra -Wpedantic -Wno-missing-braces
 set CC_INC=-I"%SRC_DIR%\Include" -I"%RAYLIB_SRC%" -I"%EXTERN_DIR%\glew"
 

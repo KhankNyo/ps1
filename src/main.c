@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 
 #define DMA_CHANNEL_COUNT 7
@@ -30,18 +31,21 @@
 
 #define STREQ(s1, strlit) (strncmp(s1, strlit, sizeof strlit - 1) == 0)
 
-#define DISABLE_CMD "D"
+#define CMD_BUFFER_SIZE 128
+#define DISABLE_CMD "-"
 #define BREAKPOINT_CMD "B"
 #define BREAKPOINT_ON_READ_CMD "R"
 #define BREAKPOINT_ON_WRITE_CMD "W"
-#define PEEK_CMD "p"
+#define BREAKPOINT_COP_CMD "C"
 #define POKE_CMD "w"
-#define DISASSEMBLE_CMD "d"
+#define DISASSEMBLE_CMD "D"
+#define DUMP_MEM_CMD "d"
 #define RUN_CYCLES_CMD "c"
 #define RUN_CMD "r"
 #define QUIT_CMD "q"
 #define HELP_CMD "h"
 #define STEP_CMD "n"
+#define VIEW_STATE_CMD "v"
 
 
 typedef struct DMA 
@@ -95,6 +99,27 @@ typedef struct DisassembledInstruction
     u32 Address;
 } DisassembledInstruction;
 
+typedef struct Debugger 
+{
+    R3000A LastCpuState;
+
+    char LastCmd[CMD_BUFFER_SIZE];
+    Bool8 SingleStep;
+    Bool8 HasReadWatch;
+    Bool8 HasWriteWatch;
+    Bool8 HasBreakpoint;
+    Bool8 HasCycleCounterWatch;
+    Bool8 HasRegWatch;
+    Bool8 HasMemWatch;
+    Bool8 HasCP0Watch;
+    Bool8 Cp0Changed;
+    u32 LastReadAddr, ReadWatch;
+    u32 LastWriteAddr, WriteWatch;
+    u32 BreakpointAddr;
+    u32 CyclesUntilSingleStep;
+    u32 RegWatchValue, RegWatchIndex;
+} Debugger;
+
 typedef struct PS1 
 {
     DMA Dma;
@@ -105,18 +130,7 @@ typedef struct PS1
     u8 *BiosRom;
     u8 *Ram;
 
-    Bool8 SingleStep;
-    Bool8 HasReadWatch;
-    Bool8 HasWriteWatch;
-    Bool8 HasBreakpoint;
-    Bool8 HasCycleCounterWatch;
-    Bool8 HasRegWatch;
-    Bool8 HasMemWatch;
-    u32 LastReadAddr, ReadWatch;
-    u32 LastWriteAddr, WriteWatch;
-    u32 BreakpointAddr;
-    u32 CyclesUntilSingleStep;
-    u32 RegWatchValue, RegWatchIndex;
+    Debugger Dbg;
 } PS1;
 
 typedef struct MemoryInfo 
@@ -405,7 +419,7 @@ static const char *Ps1_Write(PS1 *Ps1, u32 Addr, u32 Data, R3000A_DataSize Size,
 static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
 {
     PS1 *Ps1 = UserData;
-    Ps1->LastReadAddr = Addr;
+    Ps1->Dbg.LastReadAddr = Addr;
     MemoryInfo Location = Ps1_Read(Ps1, Addr, Size, false);
 
     if (Location.Name != sBiosRomLiteral 
@@ -419,7 +433,7 @@ static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
 static void Ps1_WriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size)
 {
     PS1 *Ps1 = UserData;
-    Ps1->LastWriteAddr = Addr;
+    Ps1->Dbg.LastWriteAddr = Addr;
     const char *LocationName = Ps1_Write(Ps1, Addr, Data, Size, false);
     if (LocationName != sRamLiteral
     && LocationName != sBiosRomLiteral)
@@ -493,12 +507,11 @@ static void DumpState(const PS1 *Ps1)
 {
 #define DISPLAY_REGISTER(reg, fmtstr, ...) \
     do {\
-        if (Mips->reg == LastState.reg)\
+        if (Mips->reg == Ps1->Dbg.LastCpuState.reg)\
             printf(" "fmtstr" ", __VA_ARGS__);\
         else printf("["fmtstr"]", __VA_ARGS__);\
     } while (0)
 
-    static R3000A LastState;
     const R3000A *Mips = &Ps1->Cpu;
     int RegisterCount = STATIC_ARRAY_SIZE(Mips->R);
     int RegisterBoxPerLine = 4;
@@ -538,10 +551,7 @@ static void DumpState(const PS1 *Ps1)
         }
         printf("\n");
     }
-
-    /* disassembles instructions at PC */
-    printf("\n========== PC=0x%08x ==========\n", Mips->PC);
-    Ps1_Disasm(Ps1, Mips->PC - R3000A_PIPESTAGE_COUNT*4 + 4, 10);
+    printf("PC=%08x\n", Mips->PC);
 #undef DISPLAY_REGISTER
 }
 
@@ -607,10 +617,21 @@ static Bool8 ParseUint(const char *Str, const char **Next, u32 *Out)
     return true;
 }
 
+static void AsciiDump(u8 *ByteBuffer, iSize ByteBufferSize)
+{
+    for (uint i = 0; i < ByteBufferSize; i++)
+    {
+        char Byte = '.';
+        if (isprint(ByteBuffer[i]))
+            Byte = ByteBuffer[i];
+        putc(Byte, stdout);
+    }
+}
+
 /* returns 0 if should continue polling commands, 
  * returns 1 if there was an error 
  * returns 2 if the user wants to exit */
-static int ParseCommand(PS1 *Ps1, const char Cmd[256], Bool8 EnableCmd)
+static int ParseCommand(PS1 *Ps1, const char Cmd[CMD_BUFFER_SIZE], Bool8 EnableCmd)
 {
     if (STREQ(Cmd, STEP_CMD))
     {
@@ -618,11 +639,11 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[256], Bool8 EnableCmd)
     }
     else if (STREQ(Cmd, BREAKPOINT_CMD))
     {
-        Ps1->HasBreakpoint = EnableCmd;
+        Ps1->Dbg.HasBreakpoint = EnableCmd;
         if (EnableCmd)
         {
-            if (ParseUint(Cmd + sizeof(BREAKPOINT_CMD) - 1, NULL, &Ps1->BreakpointAddr))
-                printf("Enabled breakpoint at 0x%08x\n", Ps1->BreakpointAddr);
+            if (ParseUint(Cmd + sizeof(BREAKPOINT_CMD) - 1, NULL, &Ps1->Dbg.BreakpointAddr))
+                printf("Enabled breakpoint at 0x%08x\n", Ps1->Dbg.BreakpointAddr);
             else goto ExpectedAddr;
         }
         else
@@ -632,11 +653,11 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[256], Bool8 EnableCmd)
     }
     else if (STREQ(Cmd, BREAKPOINT_ON_READ_CMD))
     {
-        Ps1->HasReadWatch = EnableCmd;
+        Ps1->Dbg.HasReadWatch = EnableCmd;
         if (EnableCmd)
         {
-            if (ParseUint(Cmd + sizeof(BREAKPOINT_ON_READ_CMD) - 1, NULL, &Ps1->ReadWatch))
-                printf("Enabled breakpoint on read at 0x%08x\n", Ps1->ReadWatch);
+            if (ParseUint(Cmd + sizeof(BREAKPOINT_ON_READ_CMD) - 1, NULL, &Ps1->Dbg.ReadWatch))
+                printf("Enabled breakpoint on read at 0x%08x\n", Ps1->Dbg.ReadWatch);
             else goto ExpectedAddr;
         }
         else
@@ -646,11 +667,11 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[256], Bool8 EnableCmd)
     }
     else if (STREQ(Cmd, BREAKPOINT_ON_WRITE_CMD))
     {
-        Ps1->HasWriteWatch = EnableCmd;
+        Ps1->Dbg.HasWriteWatch = EnableCmd;
         if (EnableCmd)
         {
-            if (ParseUint(Cmd + sizeof(BREAKPOINT_ON_WRITE_CMD) - 1, NULL, &Ps1->WriteWatch))
-                printf("Enabled breakpoint on write at 0x%08x\n", Ps1->WriteWatch);
+            if (ParseUint(Cmd + sizeof(BREAKPOINT_ON_WRITE_CMD) - 1, NULL, &Ps1->Dbg.WriteWatch))
+                printf("Enabled breakpoint on write at 0x%08x\n", Ps1->Dbg.WriteWatch);
             else goto ExpectedAddr;
         }
         else
@@ -658,15 +679,29 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[256], Bool8 EnableCmd)
             printf("Disabled breakpoint on write\n");
         }
     }
-    else if (STREQ(Cmd, PEEK_CMD))
+    else if (STREQ(Cmd, BREAKPOINT_COP_CMD))
     {
-        u32 Addr;
-        if (ParseUint(Cmd + sizeof(PEEK_CMD) - 1, NULL, &Addr))
+        u32 CoprocessorNumber;
+        if (!ParseUint(Cmd + sizeof(BREAKPOINT_COP_CMD), NULL, &CoprocessorNumber) 
+        || (CoprocessorNumber != 0 && CoprocessorNumber != 2))
         {
-            MemoryInfo Location = Ps1_Read(Ps1, Addr, 4, true);
-            printf("%08x: %08x (%s)\n", Addr, Location.Data, Location.Name);
+            printf("Expected coprocessor number (0 or 2).\n");
+            goto Error;
         }
-        else goto ExpectedAddr;
+
+        if (CoprocessorNumber == 0)
+        {
+            Ps1->Dbg.HasCP0Watch = EnableCmd;
+            const char *EnableStr = "Disabled";
+            if (EnableCmd)
+                EnableStr = "Enabled";
+
+            printf("%s breakpoint on CP0 access.\n", EnableStr);
+        }
+        else
+        {
+            ASSERT(false && "COP2 is unimplemented");
+        }
     }
     else if (STREQ(Cmd, POKE_CMD))
     {
@@ -715,20 +750,84 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[256], Bool8 EnableCmd)
         /* disassembles the instructions */
         Ps1_Disasm(Ps1, Addr, InstructionCount);
     }
+    else if (STREQ(Cmd, DUMP_MEM_CMD))
+    {
+        /* parses cmd: dump <addr> <byte_count> */
+        const char *NextArg;
+        u32 Addr;
+        u32 ByteCount;
+        if (!ParseUint(Cmd + sizeof(DUMP_MEM_CMD), &NextArg, &Addr))
+            goto ExpectedAddr;
+        if (!ParseUint(NextArg, NULL, &ByteCount))
+        {
+            printf("Expected byte count.\n");
+            goto Error;
+        }
+
+        /* 'hexdump -C' style */
+        u32 BytesPerLine = 16;
+        u32 i = 0;
+        u8 ByteBuffer[256];
+        u8 ByteBufferSize = 0;
+        for (; i < ByteCount; i++)
+        {
+            MemoryInfo Mem = Ps1_Read(Ps1, Addr + i, DATA_BYTE, true);
+            if (i % BytesPerLine == 0)
+            {
+                if (i != 0)
+                {
+                    printf("  |");
+                    AsciiDump(ByteBuffer, ByteBufferSize);
+                    printf("|");
+                    ByteBufferSize = 0;
+                }
+                /* addr */
+                printf("\n%08x: ", (u32)(Addr + i));
+            }
+            ByteBuffer[ByteBufferSize++] = Mem.Data;
+            printf(" %02x", Mem.Data);
+        }
+        uint Leftover = BytesPerLine - (i % BytesPerLine);
+        if (Leftover == BytesPerLine)
+            Leftover = 0;
+
+        if (Leftover)
+        {
+            for (uint i = 0; i < Leftover; i++)
+                printf("   ");
+        }
+        printf("  |");
+        AsciiDump(ByteBuffer, ByteBufferSize);
+        if (Leftover)
+        {
+            for (uint i = 0; i < Leftover; i++)
+                printf(" ");
+        }
+        printf("|\n");
+    }
+    else if (STREQ(Cmd, VIEW_STATE_CMD))
+    {
+        DumpState(Ps1);
+    }
     else if (STREQ(Cmd, HELP_CMD))
     {
         printf(
             "Commands list:\n"
-            "\t"BREAKPOINT_CMD          " 0x123456:     Sets a breakpoint at address 0x123456\n"
-            "\t"BREAKPOINT_ON_READ_CMD  " 0x123456:     Halts the emulator when address 0x123456 was read\n"
-            "\t"BREAKPOINT_ON_WRITE_CMD " 0x123456:     Halts the emulator when address 0x123456 was written to\n"
-            "\t"PEEK_CMD                " 0x123456:     Reads a word (4 bytes) at address 0x123456\n"
-            "\t"POKE_CMD                " 0x123456 420: Writes the value 420 (4 bytes) to address 0x123456\n"
-            "\t"DISASSEMBLE_CMD         " 0x123456:     Disassembles instructions at 0x123456\n"
-            "\t"RUN_CYCLES_CMD          " 56:           Runs the emulator for 56 instructions\n"
-            "\t"RUN_CMD                 ":              Runs the emulator\n"
-            "\t"QUIT_CMD                ":              Exits the emulator\n"
-            "\t"HELP_CMD                ":              Shows this message\n"
+            "\t"STEP_CMD                ":          Advance 1 instruction\n"
+            "\t"BREAKPOINT_CMD          " addr:     Sets a breakpoint at addr\n"
+            "\t"BREAKPOINT_ON_READ_CMD  " addr:     Halts the emulator when addr was read\n"
+            "\t"BREAKPOINT_ON_WRITE_CMD " addr:     Halts the emulator when addr was written to\n"
+            "\t"BREAKPOINT_COP_CMD      " n:        Halts the emulator when coprocessor n (0 or 2) was written to or read from\n"
+            "\t"POKE_CMD                " addr n:   Writes the value n to addr\n"
+            "\t"DISASSEMBLE_CMD         " addr:     Disassembles instructions at addr\n"
+            "\t"DUMP_MEM_CMD            " addr n:   Dumps n bytes at addr\n"
+            "\t"RUN_CYCLES_CMD          " n:        Runs the emulator for n instructions\n"
+            "\t"RUN_CMD                 ":          Runs the emulator until a breakpoint is hit\n"
+            "\t"QUIT_CMD                ":          Exits the emulator\n"
+            "\t"HELP_CMD                ":          Shows this message\n"
+            "\t"VIEW_STATE_CMD          ":          Shows CPU and CP0 state\n"
+            "addr range: 0..0xFFFF_FFFF (can be an unsigned decimal)\n"
+            "n    range: 0..0xFFFF_FFFF (unless specified otherwise)\n"
             "Prefix breakpoint commands with '"DISABLE_CMD"' to disable them, \n"
             "\tex: '"DISABLE_CMD" "BREAKPOINT_CMD"' disables breakpoint\n"
         );
@@ -740,13 +839,15 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[256], Bool8 EnableCmd)
     }
     else if (STREQ(Cmd, RUN_CYCLES_CMD))
     {
-        Ps1->HasCycleCounterWatch = true;
-        Ps1->CyclesUntilSingleStep = atoi(Cmd + sizeof(RUN_CYCLES_CMD)); /* space is required */
+        Ps1->Dbg.HasCycleCounterWatch = true;
+        Ps1->Dbg.CyclesUntilSingleStep = atoi(Cmd + sizeof(RUN_CYCLES_CMD)); /* space is required */
         return 1;
     }
     else if (STREQ(Cmd, RUN_CMD))
     {
-        Ps1->SingleStep = false;
+        Ps1->Dbg.SingleStep = false;
+        Ps1->Dbg.LastReadAddr = -1;
+        Ps1->Dbg.LastWriteAddr = -1;
         return 1;
     }
 
@@ -759,14 +860,16 @@ Error:
     return 0;
 }
 
-static Bool8 GetCmdLine(PS1 *Ps1, const char *Prompt)
+static Bool8 GetCmdLine(PS1 *Ps1)
 {
-    printf("%s, type '"HELP_CMD"' to see a list of commands\n\n", Prompt);
     do {
-        char Input[256];
+        char Input[CMD_BUFFER_SIZE];
         char *Cmd = Input;
         printf(">> ");
         fgets(Cmd, sizeof Input, stdin);
+        if (Input[0] != '\n' && Input[0] != '\0')
+            memcpy(Ps1->Dbg.LastCmd, Input, CMD_BUFFER_SIZE);
+        else memcpy(Input, Ps1->Dbg.LastCmd, CMD_BUFFER_SIZE);
 
         Bool8 EnableCmd = !STREQ(Cmd, DISABLE_CMD);
         if (!EnableCmd)
@@ -783,26 +886,32 @@ static Bool8 GetCmdLine(PS1 *Ps1, const char *Prompt)
 
 static void Ps1_ManageWatchdogs(PS1 *Ps1)
 {
-    Bool8 ShouldChangeSingleStep = (Ps1->HasBreakpoint && Ps1->BreakpointAddr == Ps1->Cpu.PC)
-        || (Ps1->HasReadWatch && Ps1->LastReadAddr == Ps1->ReadWatch)
-        || (Ps1->HasWriteWatch && Ps1->LastWriteAddr == Ps1->WriteWatch) 
-        || (Ps1->HasRegWatch && Ps1->RegWatchValue != Ps1->Cpu.R[Ps1->RegWatchIndex]);
-    Ps1->SingleStep = ((Ps1->SingleStep ^ ShouldChangeSingleStep) & 1);
+    Ps1->Dbg.Cp0Changed = 0 != memcmp(&Ps1->Cpu.CP0, &Ps1->Dbg.LastCpuState.CP0, sizeof(Ps1->Cpu.CP0));
+    Ps1->Dbg.LastCpuState = Ps1->Cpu;
 
-    if (Ps1->HasCycleCounterWatch)
+    Bool8 ShouldChangeSingleStep = 
+        (Ps1->Dbg.HasBreakpoint && Ps1->Dbg.BreakpointAddr == Ps1->Cpu.PC)
+        || (Ps1->Dbg.HasReadWatch && Ps1->Dbg.LastReadAddr == Ps1->Dbg.ReadWatch)
+        || (Ps1->Dbg.HasWriteWatch && Ps1->Dbg.LastWriteAddr == Ps1->Dbg.WriteWatch) 
+        || (Ps1->Dbg.HasRegWatch && Ps1->Dbg.RegWatchValue != Ps1->Cpu.R[Ps1->Dbg.RegWatchIndex])
+        || (Ps1->Dbg.HasCP0Watch && Ps1->Dbg.Cp0Changed);
+    if (ShouldChangeSingleStep)
+        Ps1->Dbg.SingleStep = !Ps1->Dbg.SingleStep;
+
+    if (Ps1->Dbg.HasCycleCounterWatch)
     {
-        if (Ps1->CyclesUntilSingleStep == 0)
+        if (Ps1->Dbg.CyclesUntilSingleStep == 0)
         {
-            Ps1->SingleStep = true;
-            Ps1->HasCycleCounterWatch = false;
+            Ps1->Dbg.SingleStep = true;
+            Ps1->Dbg.HasCycleCounterWatch = false;
         }
         else
         {
-            Ps1->CyclesUntilSingleStep--;
+            Ps1->Dbg.CyclesUntilSingleStep--;
         }
     }
 
-    if (Ps1->HasMemWatch)
+    if (Ps1->Dbg.HasMemWatch)
     {
         ASSERT(false && "TODO");
     }
@@ -848,13 +957,14 @@ int main(int argc, char **argv)
         Ps1_VerifyAddr, 
         Ps1_VerifyAddr
     );
-    Ps1.SingleStep = true;
+    Ps1.Dbg.SingleStep = true;
+    printf("Type '"HELP_CMD"' to see a list of commands\n\n");
     do {
         Ps1_ManageWatchdogs(&Ps1);
-        if (Ps1.SingleStep)
+        if (Ps1.Dbg.SingleStep)
         {
-            DumpState(&Ps1);
-            if (!GetCmdLine(&Ps1, "Press Enter to cont..."))
+            Ps1_Disasm(&Ps1, Ps1.Cpu.PC, 1);
+            if (!GetCmdLine(&Ps1))
                 break;
         }
 
