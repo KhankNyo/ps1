@@ -37,6 +37,7 @@
 #define BREAKPOINT_ON_READ_CMD "R"
 #define BREAKPOINT_ON_WRITE_CMD "W"
 #define BREAKPOINT_COP_CMD "C"
+#define BREAKPOINT_EXECUTE_CMD "E"
 #define POKE_CMD "w"
 #define DISASSEMBLE_CMD "D"
 #define DUMP_MEM_CMD "d"
@@ -113,11 +114,13 @@ typedef struct Debugger
     Bool8 HasMemWatch;
     Bool8 HasCP0Watch;
     Bool8 Cp0Changed;
+    Bool8 HasInstructionWatch;
     u32 LastReadAddr, ReadWatch;
     u32 LastWriteAddr, WriteWatch;
     u32 BreakpointAddr;
     u32 CyclesUntilSingleStep;
     u32 RegWatchValue, RegWatchIndex;
+    u32 InstructionWatch;
 } Debugger;
 
 typedef struct PS1 
@@ -360,6 +363,8 @@ static MemoryInfo Ps1_Read(const PS1 *Ps1, u32 Addr, R3000A_DataSize Size, Bool8
 
 static const char *Ps1_Write(PS1 *Ps1, u32 Addr, u32 Data, R3000A_DataSize Size, Bool8 DebugWrite)
 {
+    Bool8 IsolateCache = 0 != (Ps1->Cpu.CP0.Status & (1 << 16));
+
     u32 PhysicalAddr = Ps1_TranslateAddr(Ps1, Addr);
     if (DebugWrite && ACCESS_BIOS_ROM(PhysicalAddr))
     {
@@ -371,9 +376,15 @@ static const char *Ps1_Write(PS1 *Ps1, u32 Addr, u32 Data, R3000A_DataSize Size,
     }
     if (ACCESS_RAM(PhysicalAddr))
     {
-        for (uint i = 0; i < (uint)Size && PhysicalAddr + i < Ps1->RamSize; i++)
+        if (!IsolateCache)
         {
-            Ps1->Ram[PhysicalAddr + i] = Data >> i*8;
+            for (uint i = 0; 
+                i < (uint)Size 
+                && PhysicalAddr + i < Ps1->RamSize; 
+                i++)
+            {
+                Ps1->Ram[PhysicalAddr + i] = Data >> i*8;
+            }
         }
         return sRamLiteral;
     }
@@ -703,6 +714,26 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[CMD_BUFFER_SIZE], Bool8 EnableC
             ASSERT(false && "COP2 is unimplemented");
         }
     }
+    else if (STREQ(Cmd, BREAKPOINT_EXECUTE_CMD))
+    {
+        u32 Instruction;
+        if (!ParseUint(Cmd + sizeof(BREAKPOINT_EXECUTE_CMD), NULL, &Instruction))
+        {
+            printf("Expexcted instruction code (in hex).\n");
+            goto Error;
+        }
+
+        Ps1->Dbg.HasInstructionWatch = EnableCmd;
+        if (EnableCmd)
+        {
+            Ps1->Dbg.InstructionWatch = Instruction;
+            printf("Enabled instruction watch.\n");
+        }
+        else
+        {
+            printf("Disabled Instruction watch.\n");
+        }
+    }
     else if (STREQ(Cmd, POKE_CMD))
     {
         const char *NextArg;
@@ -818,6 +849,7 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[CMD_BUFFER_SIZE], Bool8 EnableC
             "\t"BREAKPOINT_ON_READ_CMD  " addr:     Halts the emulator when addr was read\n"
             "\t"BREAKPOINT_ON_WRITE_CMD " addr:     Halts the emulator when addr was written to\n"
             "\t"BREAKPOINT_COP_CMD      " n:        Halts the emulator when coprocessor n (0 or 2) was written to or read from\n"
+            "\t"BREAKPOINT_EXECUTE_CMD  " n:        Halts the emulator when instruction n (0..0xFFFF_FFFF) is being executed\n"
             "\t"POKE_CMD                " addr n:   Writes the value n to addr\n"
             "\t"DISASSEMBLE_CMD         " addr:     Disassembles instructions at addr\n"
             "\t"DUMP_MEM_CMD            " addr n:   Dumps n bytes at addr\n"
@@ -894,7 +926,8 @@ static void Ps1_ManageWatchdogs(PS1 *Ps1)
         || (Ps1->Dbg.HasReadWatch && Ps1->Dbg.LastReadAddr == Ps1->Dbg.ReadWatch)
         || (Ps1->Dbg.HasWriteWatch && Ps1->Dbg.LastWriteAddr == Ps1->Dbg.WriteWatch) 
         || (Ps1->Dbg.HasRegWatch && Ps1->Dbg.RegWatchValue != Ps1->Cpu.R[Ps1->Dbg.RegWatchIndex])
-        || (Ps1->Dbg.HasCP0Watch && Ps1->Dbg.Cp0Changed);
+        || (Ps1->Dbg.HasCP0Watch && Ps1->Dbg.Cp0Changed)
+        || (Ps1->Dbg.HasInstructionWatch && Ps1->Cpu.Instruction[Ps1->Cpu.PipeStage] == Ps1->Dbg.InstructionWatch);
     if (ShouldChangeSingleStep)
         Ps1->Dbg.SingleStep = !Ps1->Dbg.SingleStep;
 
@@ -959,7 +992,8 @@ int main(int argc, char **argv)
     );
     Ps1.Dbg.SingleStep = true;
     printf("Type '"HELP_CMD"' to see a list of commands\n\n");
-    do {
+    while (1)
+    {
         Ps1_ManageWatchdogs(&Ps1);
         if (Ps1.Dbg.SingleStep)
         {
@@ -969,7 +1003,7 @@ int main(int argc, char **argv)
         }
 
         R3000A_StepClock(&Ps1.Cpu);
-    } while (1);
+    }
     Ps1_Destroy(&Ps1);
     return 0;
 
