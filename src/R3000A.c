@@ -717,62 +717,6 @@ static R3000A_StageStatus R3000A_Execute(R3000A *This)
     {
         *Rt = UnsignedImm << 16;
     } break;
-
-    case 020: /* COP0 */
-    {
-        switch (REG(Instruction, RS))
-        {
-        case 0x00:
-        case 0x01: /* mfc0 */
-        {
-            /* NOTE: mfc0 should be delayed by 1 cycle */
-            *Rt = CP0_Read(&This->CP0, REG(Instruction, RD));
-        } break;
-        case 0x04:
-        case 0x05: /* mtc0 */
-        {
-            CP0_Write(&This->CP0, REG(Instruction, RD), *Rt);
-            Rt = NULL;
-        } break;
-        case 0x10: /* rfe only */
-        {
-            if (0x10 == FUNCT(Instruction))
-            {
-                /* restore KUp, IEp and KUc, IEc */
-                MASKED_LOAD(This->CP0.Status, This->CP0.Status >> 2, 0xF);
-                Rt = NULL;
-            }
-        } break;
-        default: goto DifferentInstruction;
-        }
-    } break;
-    case 022: /* COP2 misc */
-    {
-        TODO("COP2 instructions");
-        switch (REG(Instruction, RS))
-        {
-        case 0x00: 
-        case 0x01: /* mfc2 */
-        {
-        } break;
-        case 0x02:
-        case 0x03: /* mtc2 */
-        {
-        } break;
-        case 0x04:
-        case 0x05: /* cfc2 */
-        {
-        } break;
-        case 0x06:
-        case 0x07: /* ctc2 */
-        {
-        } break;
-        default: goto DifferentInstruction; 
-        }
-        Rt = NULL;
-    } break;
-
-DifferentInstruction:
     default: return Status;
     }
 
@@ -941,6 +885,59 @@ StoreAddrError:
 static void R3000A_Writeback(R3000A *This)
 {
     (void)This;
+    u32 Instruction = R3000A_InstructionAt(This, WRITEBACK_STAGE);
+    switch (OP(Instruction))
+    {
+    case 020: /* COP0 */
+    {
+        u32 *Rt = &This->R[REG(Instruction, RT)];
+        switch (REG(Instruction, RS)) /* RS field contains opcode */
+        {
+        case 0x00:
+        case 0x01: /* mfc0 */
+        {
+            /* NOTE: mfc0 should be delayed by 1 cycle */
+            *Rt = CP0_Read(&This->CP0, REG(Instruction, RD));
+        } break;
+        case 0x04:
+        case 0x05: /* mtc0 */
+        {
+            CP0_Write(&This->CP0, REG(Instruction, RD), *Rt);
+        } break;
+        case 0x10: /* rfe only */
+        {
+            if (0x10 == FUNCT(Instruction))
+            {
+                /* restore KUp, IEp and KUc, IEc */
+                MASKED_LOAD(This->CP0.Status, This->CP0.Status >> 2, 0xF);
+            }
+        } break;
+        }
+    } break;
+    case 022: /* COP2 misc */
+    {
+        TODO("COP2 instructions");
+        switch (REG(Instruction, RS))
+        {
+        case 0x00: 
+        case 0x01: /* mfc2 */
+        {
+        } break;
+        case 0x02:
+        case 0x03: /* mtc2 */
+        {
+        } break;
+        case 0x04:
+        case 0x05: /* cfc2 */
+        {
+        } break;
+        case 0x06:
+        case 0x07: /* ctc2 */
+        {
+        } break;
+        }
+    } break;
+    }
 }
 
 

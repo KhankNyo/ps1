@@ -58,11 +58,11 @@ BreakEnd:
 
 
 
-; Exception handling routine at 0x8000_0080, 31 instructions (124 bytes)
+; Exception handling routine at 0x8000_0080, 37 instructions (148 bytes)
 ; destroys k0, k1
 .jumpNop 0
 .branchNop 0
-.loadNop 1
+.loadNop 0
 .org EXCEPTION_VEC
     ; see if exception is enabled
     la $k1, TestExcept_Enable
@@ -80,18 +80,23 @@ BreakEnd:
     addu $k1, $k0
 
     ; increment the exception counter
-    lw $k0, 0($k1)                          ; delay slot handled by the assembler 
+    lw $k0, 0($k1) 
+        nop
     addiu $k0, 1
-    sw $k0, 0($k1)
+    mfc0 $k0, $cause                        ; load $k0 from cause (1 instruction delay)
+        sw $k0, 0($k1)                      ; store k0 before new value is loaded from the ins above 
+        nop                                 ; 2 instruction delay slot for mfc0 if next ins is a branch/jump 
 
+    ; k0 now contains $cause
     ; now patch the opcode, check if it's in a branch delay slot
-    mfc0 $k0, $cause
     bltz $k0, Exception_InBranchDelaySlot   ; BD is bit 31, which is the sign bit, Cause will be < 0 if BD is set
-        mfc0 $k0, $epc                      ; get the faulting instruction addr
+        mfc0 $k0, $epc                      ; load k0 with faulting instruction addr 
+        nop                                 ; wait for the load
+        sw $zero, 0($k0)                    ; patch the instruction with a nop
         j Exception_DonePatching
-            sw $zero, 0($k0)                ; patch the instruction with a nop
 Exception_InBranchDelaySlot:
-    sw $zero, 4($k0)                        ; patch the ins in the delay slot with a nop
+        nop                                 ; jump delay slot and load delay slot for k0
+    sw $zero, 4($k0)                        ; patch the instruction in the delay slot with a nop
 Exception_DonePatching:
     rfe                                     ; restore kernel and interrupt pending flags (untested)
     jr $k0
@@ -104,7 +109,8 @@ Exception_Trap:
         ori $a0, Exception_Unexpected_Msg & 0xFFFF
     ; prints epc 
     jr $k1
-        mfc0 $a0, $epc
+        mfc0 $a0, $epc                      ; the printing takes place 2 instructions after the start of PrintHex routine,
+                                            ; so loading a0 with epc here is fine 
 Exception_TrapInf:
     bra Exception_TrapInf
         nop
