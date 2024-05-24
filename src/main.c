@@ -497,8 +497,8 @@ static void Ps1_Disasm(const PS1 *Ps1, u32 LogicalAddr, u32 InstructionCount)
 
         const char *Pointer = "    ";
         if (CurrentAddr == Ps1->Cpu.PC)
-            Pointer = " PC> ";
-        printf("%s%08x: %08x    %s\n", Pointer, CurrentAddr, Location.Data, Mnemonic);
+            Pointer = "PC> ";
+        printf("%s%08x | %08x    %s\n", Pointer, CurrentAddr, Location.Data, Mnemonic);
     }
 }
 
@@ -547,7 +547,6 @@ static void DumpState(const PS1 *Ps1)
     const R3000A *Mips = &Ps1->Cpu;
     int RegisterCount = STATIC_ARRAY_SIZE(Mips->R);
     int RegisterBoxPerLine = 4;
-    int y = 0;
 
     /* dump CP0 regs */
     puts("\n========== CP0 Registers ==========");
@@ -569,7 +568,7 @@ static void DumpState(const PS1 *Ps1)
 
     /* dump CPU regs */
     puts("\n========== CPU Registers ==========");
-    for (y = 1; y < 1 + RegisterCount / RegisterBoxPerLine; y++)
+    for (int y = 1; y < 1 + RegisterCount / RegisterBoxPerLine; y++)
     {
         for (int x = 0; x < RegisterBoxPerLine; x++)
         {
@@ -583,7 +582,26 @@ static void DumpState(const PS1 *Ps1)
         }
         printf("\n");
     }
-    printf("PC=%08x\n", Mips->PC);
+
+    /* dump pipeline */
+    printf("\nPipeline: \n");
+    for (int i = 0; i < R3000A_PIPESTAGE_COUNT; i++)
+    {
+        char Op[64];
+        R3000A_Disasm(
+            Mips->Instruction[i], 
+            Mips->PCSave[i], 
+            DISASM_IMM16_AS_HEX, 
+            Op, 
+            sizeof Op
+        );
+        const char *Pointer = "    ";
+        if (Mips->PC == Mips->PCSave[i])
+            Pointer = "PC>";
+        
+        printf("%s %08x | %08x   %s\n", Pointer, Mips->PCSave[i], Mips->Instruction[i], Op);
+    }
+
 #undef DISPLAY_REGISTER
 }
 
@@ -961,15 +979,33 @@ static void Ps1_ManageWatchdogs(PS1 *Ps1)
     Ps1->Dbg.Cp0Changed = 0 != memcmp(&Ps1->Cpu.CP0, &Ps1->Dbg.LastCpuState.CP0, sizeof(Ps1->Cpu.CP0));
     Ps1->Dbg.LastCpuState = Ps1->Cpu;
 
-    Bool8 ShouldChangeSingleStep = 
-        (Ps1->Dbg.HasBreakpoint && Ps1->Dbg.BreakpointAddr == Ps1->Cpu.PC)
-        || (Ps1->Dbg.HasReadWatch && Ps1->Dbg.LastReadAddr == Ps1->Dbg.ReadWatch)
-        || (Ps1->Dbg.HasWriteWatch && Ps1->Dbg.LastWriteAddr == Ps1->Dbg.WriteWatch) 
-        || (Ps1->Dbg.HasRegWatch && Ps1->Dbg.RegWatchValue != Ps1->Cpu.R[Ps1->Dbg.RegWatchIndex])
-        || (Ps1->Dbg.HasCP0Watch && Ps1->Dbg.Cp0Changed)
-        || (Ps1->Dbg.HasInstructionWatch && Ps1->Cpu.Instruction[Ps1->Cpu.PipeStage] == Ps1->Dbg.InstructionWatch);
-    if (ShouldChangeSingleStep)
-        Ps1->Dbg.SingleStep = !Ps1->Dbg.SingleStep;
+    if (!Ps1->Dbg.SingleStep)
+    {
+        Bool8 BreakpointFlags[] = {
+            (Ps1->Dbg.HasBreakpoint && Ps1->Dbg.BreakpointAddr == Ps1->Cpu.PC),
+            (Ps1->Dbg.HasReadWatch && Ps1->Dbg.LastReadAddr == Ps1->Dbg.ReadWatch),
+            (Ps1->Dbg.HasWriteWatch && Ps1->Dbg.LastWriteAddr == Ps1->Dbg.WriteWatch),
+            (Ps1->Dbg.HasRegWatch && Ps1->Dbg.RegWatchValue != Ps1->Cpu.R[Ps1->Dbg.RegWatchIndex]),
+            (Ps1->Dbg.HasCP0Watch && Ps1->Dbg.Cp0Changed),
+            (Ps1->Dbg.HasInstructionWatch && Ps1->Cpu.Instruction[Ps1->Cpu.PipeStage] == Ps1->Dbg.InstructionWatch),
+        };
+        const char *BreakpointName[] = {
+            "Breakpoint",
+            "Read watch",
+            "Write watch",
+            "Register watch",
+            "CP0 watch",
+            "Instruction watch",
+        };
+        for (uint i = 0; i < STATIC_ARRAY_SIZE(BreakpointFlags); i++)
+        {
+            if (BreakpointFlags[i])
+            {
+                printf("%s triggered\n", BreakpointName[i]);
+                Ps1->Dbg.SingleStep = true;
+            }
+        }
+    }
 
     if (Ps1->Dbg.HasCycleCounterWatch)
     {
