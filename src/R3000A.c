@@ -314,22 +314,13 @@ static Bool8 R3000A_Decode(R3000A *This)
          * Bits 17..19 are ignored, no exception is raised 
          * http://problemkaputt.de/psx-spx.htm#cpujumpopcodes
          */
-        Bool8 ShouldBranch = false;
-        switch (REG(Instruction, RT) & 0x11) /* NOTE: looks at RT reg field */
+        if (Instruction & (1 << 20))
         {
-        case 0x00: /* bltz */ ShouldBranch = (i32)Rs < 0; break;
-        case 0x01: /* bgez */ ShouldBranch = (i32)Rs >= 0; break;
-        case 0x10: /* bltzal */
-        {
-            ShouldBranch = (i32)Rs < 0;
             This->R[31] = NextInstructionAddr;
-        } break;
-        case 0x11: /* bgezal */
-        {
-            ShouldBranch = (i32)Rs >= 0; 
-            This->R[31] = NextInstructionAddr;
-        } break;
         }
+        Bool8 ShouldBranch = ((i32)Rs < 0);
+        if (Instruction & (1 << 16))
+            ShouldBranch = !ShouldBranch;
 
         BRANCH_IF(ShouldBranch);
         IsBranchingInstruction = true;

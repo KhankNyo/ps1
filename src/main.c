@@ -46,6 +46,7 @@
 #define QUIT_CMD "q"
 #define HELP_CMD "h"
 #define STEP_CMD "n"
+#define SET_LINE_CMD "l"
 #define VIEW_STATE_CMD "v"
 
 
@@ -103,6 +104,7 @@ typedef struct DisassembledInstruction
 typedef struct Debugger 
 {
     R3000A LastCpuState;
+    u32 BaseDisasmAddr;
 
     char LastCmd[CMD_BUFFER_SIZE];
     Bool8 SingleStep;
@@ -121,6 +123,7 @@ typedef struct Debugger
     u32 CyclesUntilSingleStep;
     u32 RegWatchValue, RegWatchIndex;
     u32 InstructionWatch;
+    u32 LineCount;
 } Debugger;
 
 typedef struct PS1 
@@ -152,6 +155,8 @@ static const char *sUnknownLiteral = "Unknown";
 static const char *sCacheCtrlLiteral = "Cache Ctrl";
 static const char *sMemCtrlLiteral = "Mem Ctrl";
 static const char *sRamSizeLiteral = "RAM_SIZE";
+static const char *sIntStatusLiteral = "I_STAT";
+static const char *sIntMaskLiteral = "I_MASK";
 
 
 static u32 Ps1_TranslateAddr(const PS1 *Ps1, u32 Addr)
@@ -354,6 +359,14 @@ static MemoryInfo Ps1_Read(const PS1 *Ps1, u32 Addr, R3000A_DataSize Size, Bool8
     {
         Info.Name = sCacheCtrlLiteral;
     }
+    else if (PhysicalAddr == 0x1F801070) /* Interrupt status */
+    {
+        Info.Name = sIntStatusLiteral;
+    }
+    else if (PhysicalAddr == 0x1F801074) /* Interrupt mask */
+    {
+        Info.Name = sIntMaskLiteral;
+    }
     else 
     {
         Info.Name = sUnknownLiteral;
@@ -422,6 +435,14 @@ static const char *Ps1_Write(PS1 *Ps1, u32 Addr, u32 Data, R3000A_DataSize Size,
     {
         /* nop */
         return sSPUCtrlLiteral;
+    }
+    if (PhysicalAddr == 0x1F801070) /* Interrupt status */
+    {
+        return sIntStatusLiteral;
+    }
+    if (PhysicalAddr == 0x1F801074) /* Interrupt mask */
+    {
+        return sIntMaskLiteral;
     }
     
     return sUnknownLiteral;
@@ -836,6 +857,24 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[CMD_BUFFER_SIZE], Bool8 EnableC
         }
         printf("|\n");
     }
+    else if (STREQ(Cmd, SET_LINE_CMD))
+    {
+        u32 Lines;
+        if (!ParseUint(Cmd + sizeof(SET_LINE_CMD), NULL, &Lines))
+        {
+            printf("Expected line count.\n");
+            goto Error;
+        }
+        if (Lines > 0)
+        {
+            printf("Set disassembly line count to %d (was %d)\n", Lines, Ps1->Dbg.LineCount);
+            Ps1->Dbg.LineCount = Lines;
+        }
+        else
+        {
+            printf("Invalid line count.\n");
+        }
+    }
     else if (STREQ(Cmd, VIEW_STATE_CMD))
     {
         DumpState(Ps1);
@@ -858,6 +897,7 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[CMD_BUFFER_SIZE], Bool8 EnableC
             "\t"QUIT_CMD                ":          Exits the emulator\n"
             "\t"HELP_CMD                ":          Shows this message\n"
             "\t"VIEW_STATE_CMD          ":          Shows CPU and CP0 state\n"
+            "\t"SET_LINE_CMD            " n:        Disassemble n lines for each step command\n"
             "addr range: 0..0xFFFF_FFFF (can be an unsigned decimal)\n"
             "n    range: 0..0xFFFF_FFFF (unless specified otherwise)\n"
             "Prefix breakpoint commands with '"DISABLE_CMD"' to disable them, \n"
@@ -991,13 +1031,21 @@ int main(int argc, char **argv)
         Ps1_VerifyAddr
     );
     Ps1.Dbg.SingleStep = true;
+    Ps1.Dbg.LineCount = 1;
     printf("Type '"HELP_CMD"' to see a list of commands\n\n");
     while (1)
     {
         Ps1_ManageWatchdogs(&Ps1);
         if (Ps1.Dbg.SingleStep)
         {
-            Ps1_Disasm(&Ps1, Ps1.Cpu.PC, 1);
+            if (!IN_RANGE(
+                Ps1.Dbg.BaseDisasmAddr, 
+                Ps1.Cpu.PC, 
+                Ps1.Dbg.BaseDisasmAddr + (Ps1.Dbg.LineCount - 1)*4))
+            {
+                Ps1.Dbg.BaseDisasmAddr = Ps1.Cpu.PC;
+            }
+            Ps1_Disasm(&Ps1, Ps1.Dbg.BaseDisasmAddr, Ps1.Dbg.LineCount);
             if (!GetCmdLine(&Ps1))
                 break;
         }
