@@ -47,6 +47,7 @@
 #define HELP_CMD "h"
 #define STEP_CMD "n"
 #define SET_LINE_CMD "l"
+#define SHOW_STACK_CMD "s"
 #define VIEW_STATE_CMD "v"
 
 
@@ -161,16 +162,13 @@ static const char *sIntMaskLiteral = "I_MASK";
 
 static u32 Ps1_TranslateAddr(const PS1 *Ps1, u32 Addr)
 {
-    u32 PhysicalAddr = Addr;
-    if (IN_RANGE(KSEG0, Addr, KSEG1 - 1)) /* kseg 0 */
-    {
-        PhysicalAddr -= KSEG0;
-    }
-    else if (IN_RANGE(KSEG1, Addr, 0xFFFE0000 - 1)) /* kseg 1 */
-    {
-        PhysicalAddr -= KSEG1;
-    }
-    return PhysicalAddr;
+    static const u32 MaskTable[8] = {
+        -1, -1, -1, -1, /* KUSEG */
+        0x7FFFFFFF,     /* KSEG0 */
+        0x1FFFFFFF,     /* KSEG1 */
+        -1, -1,         /* KSEG2 */
+    };
+    return Addr & MaskTable[Addr >> 29];
 }
 
 
@@ -885,6 +883,29 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[CMD_BUFFER_SIZE], Bool8 EnableC
         }
         printf("|\n");
     }
+    else if (STREQ(Cmd, SHOW_STACK_CMD))
+    {
+        u32 ElementCount;
+        if (!ParseUint(Cmd + sizeof(SHOW_STACK_CMD), NULL, &ElementCount))
+        {
+            ElementCount = (u32)-1;
+        }
+
+        u32 SP = Ps1->Cpu.R[29] & 0x00FFFFFF;
+        u32 i = SP;
+        printf("Stack: \n");
+        while (i != 0x00200000 && ElementCount != 0)
+        {
+            MemoryInfo StackEntry = Ps1_Read(Ps1, i, DATA_WORD, true);
+            const char *Pointer = "   ";
+            if (i == SP)
+                Pointer = "SP>";
+            printf("%s %08x | 0x%08x\n", Pointer, i, StackEntry.Data);
+
+            i += sizeof(u32);
+            ElementCount -= 1;
+        }
+    }
     else if (STREQ(Cmd, SET_LINE_CMD))
     {
         u32 Lines;
@@ -920,6 +941,7 @@ static int ParseCommand(PS1 *Ps1, const char Cmd[CMD_BUFFER_SIZE], Bool8 EnableC
             "\t"POKE_CMD                " addr n:   Writes the value n to addr\n"
             "\t"DISASSEMBLE_CMD         " addr:     Disassembles instructions at addr\n"
             "\t"DUMP_MEM_CMD            " addr n:   Dumps n bytes at addr\n"
+            "\t"SHOW_STACK_CMD          " (n):      Dumps n elements of the stack starting from SP (if n is omitted, dumps the whole stack)\n"
             "\t"RUN_CYCLES_CMD          " n:        Runs the emulator for n instructions\n"
             "\t"RUN_CMD                 ":          Runs the emulator until a breakpoint is hit\n"
             "\t"QUIT_CMD                ":          Exits the emulator\n"
