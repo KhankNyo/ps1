@@ -117,11 +117,11 @@ typedef struct Debugger
     Bool8 HasCP0Watch;
     Bool8 Cp0Changed;
     Bool8 HasInstructionWatch;
-    u32 LastReadAddr, ReadWatch;
-    u32 LastWriteAddr, WriteWatch;
+    u32 LastReadAddr, LastReadValue, LastReadSize, ReadWatch;
+    u32 LastWriteAddr, LastWriteValue, LastWriteSize, WriteWatch;
     u32 BreakpointAddr;
     u32 CyclesUntilSingleStep;
-    u32 RegWatchValue, RegWatchIndex;
+    u32 RegWatchValue, OldRegValue, RegWatchIndex;
     u32 InstructionWatch;
     u32 LineCount;
 } Debugger;
@@ -451,8 +451,10 @@ static const char *Ps1_Write(PS1 *Ps1, u32 Addr, u32 Data, R3000A_DataSize Size,
 static u32 Ps1_ReadFn(void *UserData, u32 Addr, R3000A_DataSize Size)
 {
     PS1 *Ps1 = UserData;
-    Ps1->Dbg.LastReadAddr = Addr;
     MemoryInfo Location = Ps1_Read(Ps1, Addr, Size, false);
+    Ps1->Dbg.LastReadAddr = Addr;
+    Ps1->Dbg.LastReadValue = Location.Data;
+    Ps1->Dbg.LastReadSize = Size;
 
     if (Location.Name != sBiosRomLiteral 
     && Location.Name != sRamLiteral)
@@ -466,6 +468,8 @@ static void Ps1_WriteFn(void *UserData, u32 Addr, u32 Data, R3000A_DataSize Size
 {
     PS1 *Ps1 = UserData;
     Ps1->Dbg.LastWriteAddr = Addr;
+    Ps1->Dbg.LastWriteValue = Data;
+    Ps1->Dbg.LastWriteSize = Size;
     const char *LocationName = Ps1_Write(Ps1, Addr, Data, Size, false);
     if (LocationName != sRamLiteral
     && LocationName != sBiosRomLiteral)
@@ -582,9 +586,19 @@ static void DumpState(const PS1 *Ps1)
         }
         printf("\n");
     }
+    DISPLAY_REGISTER(Hi, "HI=%08x", Mips->Hi);
+    printf("\n");
+    DISPLAY_REGISTER(Lo, "LO=%08x", Mips->Lo);
 
     /* dump pipeline */
-    printf("\nPipeline: \n");
+    printf("\n========== Pipeline ==========\n");
+    static const char *StageName[] = { "f>", "d ", "e ", "m ", "w " };
+    const char *Stages[R3000A_PIPESTAGE_COUNT] = { 0 };
+    for (int i = 0; i < R3000A_PIPESTAGE_COUNT; i++)
+    {
+        Stages[(Mips->PipeStage + i) % R3000A_PIPESTAGE_COUNT] = StageName[i];
+    }
+
     for (int i = 0; i < R3000A_PIPESTAGE_COUNT; i++)
     {
         char Op[64];
@@ -595,11 +609,7 @@ static void DumpState(const PS1 *Ps1)
             Op, 
             sizeof Op
         );
-        const char *Pointer = "    ";
-        if (Mips->PC == Mips->PCSave[i])
-            Pointer = "PC>";
-        
-        printf("%s %08x | %08x   %s\n", Pointer, Mips->PCSave[i], Mips->Instruction[i], Op);
+        printf("%s %08x | %08x   %s\n", Stages[i], Mips->PCSave[i], Mips->Instruction[i], Op);
     }
 
 #undef DISPLAY_REGISTER
@@ -981,29 +991,55 @@ static void Ps1_ManageWatchdogs(PS1 *Ps1)
 
     if (!Ps1->Dbg.SingleStep)
     {
-        Bool8 BreakpointFlags[] = {
-            (Ps1->Dbg.HasBreakpoint && Ps1->Dbg.BreakpointAddr == Ps1->Cpu.PC),
-            (Ps1->Dbg.HasReadWatch && Ps1->Dbg.LastReadAddr == Ps1->Dbg.ReadWatch),
-            (Ps1->Dbg.HasWriteWatch && Ps1->Dbg.LastWriteAddr == Ps1->Dbg.WriteWatch),
-            (Ps1->Dbg.HasRegWatch && Ps1->Dbg.RegWatchValue != Ps1->Cpu.R[Ps1->Dbg.RegWatchIndex]),
-            (Ps1->Dbg.HasCP0Watch && Ps1->Dbg.Cp0Changed),
-            (Ps1->Dbg.HasInstructionWatch && Ps1->Cpu.Instruction[Ps1->Cpu.PipeStage] == Ps1->Dbg.InstructionWatch),
-        };
-        const char *BreakpointName[] = {
-            "Breakpoint",
-            "Read watch",
-            "Write watch",
-            "Register watch",
-            "CP0 watch",
-            "Instruction watch",
-        };
-        for (uint i = 0; i < STATIC_ARRAY_SIZE(BreakpointFlags); i++)
+        Bool8 Breakpoint = (Ps1->Dbg.HasBreakpoint && Ps1->Dbg.BreakpointAddr == Ps1->Cpu.PC);
+        Bool8 ReadWatch = (Ps1->Dbg.HasReadWatch && Ps1->Dbg.LastReadAddr == Ps1->Dbg.ReadWatch);
+        Bool8 WriteWatch = (Ps1->Dbg.HasWriteWatch && Ps1->Dbg.LastWriteAddr == Ps1->Dbg.WriteWatch);
+        Bool8 RegisterWatch = (Ps1->Dbg.HasRegWatch && Ps1->Dbg.RegWatchValue != Ps1->Cpu.R[Ps1->Dbg.RegWatchIndex]);
+        Bool8 CP0Watch = (Ps1->Dbg.HasCP0Watch && Ps1->Dbg.Cp0Changed);
+        Bool8 InstructionWatch = 
+            (Ps1->Dbg.HasInstructionWatch && Ps1->Cpu.Instruction[Ps1->Cpu.PipeStage] == Ps1->Dbg.InstructionWatch);
+        Ps1->Dbg.SingleStep = 
+            Breakpoint || ReadWatch || WriteWatch || RegisterWatch || CP0Watch || InstructionWatch;
+
+        if (Breakpoint)
         {
-            if (BreakpointFlags[i])
-            {
-                printf("%s triggered\n", BreakpointName[i]);
-                Ps1->Dbg.SingleStep = true;
-            }
+            printf("Breakpoint at 0x%08x triggered\n", Ps1->Dbg.BreakpointAddr);
+        }
+        if (ReadWatch)
+        {
+            printf("Read watch at 0x%08x triggered, value: 0x%08x (%d bytes)\n", 
+                Ps1->Dbg.LastReadAddr, Ps1->Dbg.LastReadValue, Ps1->Dbg.LastReadSize
+            );
+        }
+        if (WriteWatch)
+        {
+            printf("Write watch at 0x%08x triggered, value: 0x%08x (%d bytes)\n", 
+                Ps1->Dbg.LastWriteAddr, Ps1->Dbg.LastWriteValue, Ps1->Dbg.LastWriteSize
+            );
+        }
+        if (RegisterWatch)
+        {
+            printf("Register watch triggered, old: 0x%08x, new: 0x%08x\n", 
+                Ps1->Dbg.OldRegValue, Ps1->Dbg.RegWatchValue
+            );
+        }
+        if (CP0Watch)
+        {
+            printf("CP0 watch triggered\n");
+        }
+        if (InstructionWatch)
+        {
+            char Disassembly[64];
+            R3000A_Disasm(
+                Ps1->Dbg.InstructionWatch, 
+                Ps1->Cpu.PCSave[Ps1->Cpu.PipeStage], 
+                DISASM_IMM16_AS_HEX, 
+                Disassembly, 
+                sizeof Disassembly
+            );
+            printf("Instruction watch triggered: 0x%08x  %s\n", 
+                Ps1->Dbg.InstructionWatch, Disassembly
+            );
         }
     }
 
