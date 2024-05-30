@@ -69,12 +69,7 @@ if "clean"=="%1" (
             popd
         )
         pushd %BIN_DIR%
-
-            cl %MSVC_COMP% %MSVC_INC% /FeGuiR3000A.exe "%SRC_DIR%\Win32_GuiR3000A.c" ^
-                /link gdi32.lib opengl32.lib user32.lib kernel32.lib shell32.lib comdlg32.lib
-
             cl %MSVC_COMP% %MSVC_INC% %UNITY_BUILD_FILE% /Fe%APPNAME%
-            cl %MSVC_COMP% %MSVC_INC% /DSTANDALONE "%SRC_DIR%\R3000A.c" /FeR3000A.exe
             cl %MSVC_COMP% %MSVC_INC% /DSTANDALONE "%SRC_DIR%\Disassembler.c" /FeDisassembler.exe
             cl %MSVC_COMP% %MSVC_INC% /DSTANDALONE "%SRC_DIR%\Assembler.c" /FeAssembler.exe
         popd 
@@ -89,11 +84,8 @@ if "clean"=="%1" (
                     -c "%EXTERN_DIR%\glew\glew.c" "%EXTERN_DIR%\bin\glew.o"
             popd
         )
-        %CC% %CC_COMP% %CC_INC% "%SRC_DIR%\Win32_GuiR3000A.c" -o "%BIN_DIR%\GuiR3000A.exe" ^
-            -lgdi32 -lopengl32 -lshell32 -lcomdlg32
 
         %CC% %CC_COMP% %CC_INC% %UNITY_BUILD_FILE% -o "%BIN_DIR%\%APPNAME%"
-        %CC% %CC_COMP% %CC_INC% -DSTANDALONE "%SRC_DIR%\R3000A.c" -o "%BIN_DIR%\R3000A.exe"
         %CC% %CC_COMP% %CC_INC% -DSTANDALONE "%SRC_DIR%\Disassembler.c" -o "%BIN_DIR%\Disassembler.exe"
         %CC% %CC_COMP% %CC_INC% -DSTANDALONE "%SRC_DIR%\Assembler.c" -o "%BIN_DIR%\Assembler.exe"
     )

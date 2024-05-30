@@ -8,7 +8,7 @@
 
 
 
-static const char *sR3000A_BeautifulRegisterName[32] = {
+static const char *sBeautifulRegisterName[32] = {
     "zero", 
     "at", 
     "v0", "v1", 
@@ -20,7 +20,7 @@ static const char *sR3000A_BeautifulRegisterName[32] = {
     "gp", "sp", "fp", /* uhhh TODO: this could be s8 */
     "ra",
 };
-static const char *sR3000A_RegisterName[32] = {
+static const char *sRegisterName[32] = {
     "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
     "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23",
@@ -28,7 +28,7 @@ static const char *sR3000A_RegisterName[32] = {
 };
 
 
-static int R3000A_DisasmSpecial(u32 Instruction, const char **RegName, char *OutBuffer, iSize OutBufferSize)
+static int DisassembleSpecial(u32 Instruction, const char **RegName, char *OutBuffer, iSize OutBufferSize)
 {
     uint Group = FUNCT_GROUP(Instruction);
     uint Mode = FUNCT_MODE(Instruction);
@@ -138,7 +138,7 @@ UnknownOpcode:
 
 
 
-int R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iSize OutBufferSize)
+int Disassemble(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iSize OutBufferSize)
 {
     /*
      * https://stuff.mit.edu/afs/sipb/contrib/doc/specs/ic/cpu/mips/r3051.pdf
@@ -146,9 +146,30 @@ int R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
      *      table 2.10: Opcode Encoding
      * */
 
+#define DISASM_LOADSTORE(mnemonic) do {\
+        i32 Offset = (i32)I16(Instruction);\
+        const char *Rt = RegName[REG(Instruction, RT)];\
+        const char *Base = RegName[REG(Instruction, RS)];\
+        if (Flags & DISASM_HEX_OFFSET) {\
+            const char *OffsetSign = "";\
+            if (Offset < 0) {\
+                OffsetSign = "-";\
+                Offset = -Offset;\
+            }\
+            return snprintf(OutBuffer, OutBufferSize, "%s %s, %s%04x(%s)", \
+                mnemonic, Rt, \
+                OffsetSign, Offset, Base\
+            );\
+        } else {\
+            return snprintf(OutBuffer, OutBufferSize, "%s %s, %d(%s)", \
+                mnemonic, Rt, Offset, Base\
+            );\
+        }\
+    } while (0)
+
     const char **RegName = Flags & DISASM_BEAUTIFUL_REGNAME? 
-        sR3000A_BeautifulRegisterName 
-        : sR3000A_RegisterName;
+        sBeautifulRegisterName 
+        : sRegisterName;
     uint OpcodeGroup = OP_GROUP(Instruction);
     uint OpcodeMode = OP_MODE(Instruction);
     CurrentPC &= ~0x0003;
@@ -160,7 +181,7 @@ int R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
         {
         case 0: /* special */
         {
-            return R3000A_DisasmSpecial(Instruction, RegName, OutBuffer, OutBufferSize);
+            return DisassembleSpecial(Instruction, RegName, OutBuffer, OutBufferSize);
         } break;
         case 1: /* bcond */
         {
@@ -170,12 +191,12 @@ int R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
             const char *Rs = RegName[REG(Instruction, RS)];
             const char *Mnemonic = "???";
 
-            switch (RtBits)
+            switch (RtBits & 0x11)
             {
-            case 000: Mnemonic = "bltz"; break;
-            case 001: Mnemonic = "bgez"; break;
-            case 020: Mnemonic = "bltzal"; break;
-            case 021: Mnemonic = "bgezal"; break;
+            case 0x00: Mnemonic = "bltz"; break;
+            case 0x01: Mnemonic = "bgez"; break;
+            case 0x10: Mnemonic = "bltzal"; break;
+            case 0x11: Mnemonic = "bgezal"; break;
             default: goto UnknownOpcode;
             }
 
@@ -311,8 +332,7 @@ int R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
         }
         else if (OpcodeMode == 2) /* CP2 */
         {
-            //TODO("Disassemble CP2");
-            return 0;
+            TODO("Disassemble CP2");
         }
         else goto UnknownOpcode;
     } break;
@@ -322,15 +342,10 @@ int R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
             "lb", "lh", "lwl", "lw",
             "lbu", "lhu", "lwr", "???"
         };
-        const char *Base = RegName[REG(Instruction, RS)];
-        const char *Rt = RegName[REG(Instruction, RT)];
-        i32 Offset = (i32)(i16)(Instruction & 0xFFFF);
         if (OpcodeMode == 7)
             goto UnknownOpcode;
 
-        return snprintf(OutBuffer, OutBufferSize, "%s %s, %d(%s)", 
-            MnemonicTable[OpcodeMode], Rt, Offset, Base
-        );
+        DISASM_LOADSTORE(MnemonicTable[OpcodeMode]);
     } break;
     case 5: /* store */
     {
@@ -338,22 +353,30 @@ int R3000A_Disasm(u32 Instruction, u32 CurrentPC, u32 Flags, char *OutBuffer, iS
             "sb", "sh", "swl", "sw",
             "???", "???", "swr", "???"
         };
-        const char *Base = RegName[REG(Instruction, RS)];
-        const char *Rt = RegName[REG(Instruction, RT)];
-        u32 Offset = (i32)(i16)(Instruction & 0xFFFF);
         if (OpcodeMode == 7 || OpcodeMode == 4 || OpcodeMode == 5)
             goto UnknownOpcode;
 
-        return snprintf(OutBuffer, OutBufferSize, "%s %s, %d(%s)", 
-            MnemonicTable[OpcodeMode], Rt, Offset, Base
-        );
+        DISASM_LOADSTORE(MnemonicTable[OpcodeMode]);
+    } break;
+
+    case 6: /* load (coprocessor) */
+    {
+        if (OpcodeMode == 2) /* cop2 */
+        {
+            DISASM_LOADSTORE("lwc2");
+        }
+        else goto UnknownOpcode;
+    } break;
+    case 7: /* store (coprocessor) */
+    {
+        if (OpcodeMode == 2) /* cop2 */
+        {
+            DISASM_LOADSTORE("swc2");
+        }
+        else goto UnknownOpcode;
     } break;
 
 UnknownOpcode:
-    case 3:
-    /* since the ps1 does not have these instruction, disassemble them as unknowns */
-    case 6: /* load (coprocessor) */
-    case 7: /* store (coprocessor) */
     default:
     {
         return snprintf(OutBuffer, OutBufferSize, "???");
@@ -410,7 +433,7 @@ int main(int argc, char **argv)
     for (iSize i = 0; i < InstructionCount; i++)
     {
         char Line[64];
-        R3000A_Disasm(
+        Disassemble(
             Program[i], 
             i*4, 
             Flags, 

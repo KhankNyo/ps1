@@ -1,6 +1,0 @@
-the reason for the bug is probably because jal and lw:
-lw r31, ...  f d e M w      ; writes to R31 AFTER jal 
-jal ...        f D e m w    ; writes to R31 BEFORE lw 
-
-in reality, all writes are in order for mips
-
