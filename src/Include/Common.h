@@ -47,18 +47,20 @@ typedef struct StringView
 #define MB (1024*1024)
 
 
-#define TODO(Msg) do {\
-    fprintf(stderr, "TODO in function %s of %s on line %d: \n"Msg"\n", __func__, __FILE__, __LINE__);\
+#define LOG(...) fprintf(stderr, __VA_ARGS__)
+#define TODO(...) do {\
+    LOG("TODO in function %s of %s on line %d: \n", __func__, __FILE__, __LINE__);\
+    LOG(__VA_ARGS__);\
     abort();\
 } while (0)
 #define UNREACHABLE(Msg) do {\
-    fprintf(stderr, "Unreachable in function %s of %s on line %d: \n"Msg"\n", __func__, __FILE__, __LINE__);\
+    LOG("Unreachable in function %s of %s on line %d: \n"Msg"\n", __func__, __FILE__, __LINE__);\
     abort();\
 } while (0)
 #ifdef DEBUG
 #   define ASSERT(expr) do {\
         if (!(expr)) {\
-            fprintf(stderr, "ASSERTION FAILED in "__FILE__\
+            LOG("ASSERTION FAILED in "__FILE__\
                 " in function '%s'"\
                 " on line "STRFY(__LINE__)": \n"\
                 "\t"STRFY(expr), \
@@ -84,6 +86,9 @@ typedef struct StringView
 #define FUNCT_MODE(ins) ((ins) & 0x7)
 #define FUNCT_GROUP(ins) (((ins) >> 3) & 0x7)
 #define SHAMT(ins) (((ins) >> 6) & 0x1F)
+#define U16(ins) ((ins) & 0xFFFF)
+#define I16(ins) (i16)U16(ins)
+#define U26(ins) ((ins) & 0x03FFFFFF)
 
 
 #endif /* COMMON_H */ 
