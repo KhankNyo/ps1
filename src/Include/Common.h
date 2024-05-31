@@ -49,13 +49,14 @@ typedef struct StringView
 
 #define LOG(...) fprintf(stderr, __VA_ARGS__)
 #define TODO(...) do {\
-    LOG("TODO in function %s of %s on line %d: \n", __func__, __FILE__, __LINE__);\
+    LOG("TODO in %s in %s on line %d: \n", __FILE__, __func__, __LINE__);\
     LOG(__VA_ARGS__);\
-    abort();\
+    exit(1);\
 } while (0)
-#define UNREACHABLE(Msg) do {\
-    LOG("Unreachable in function %s of %s on line %d: \n"Msg"\n", __func__, __FILE__, __LINE__);\
-    abort();\
+#define UNREACHABLE(...) do {\
+    LOG("UNREACHABLE in %s in %s on line %d: \n", __FILE__, __func__, __LINE__);\
+    LOG(__VA_ARGS__);\
+    exit(1);\
 } while (0)
 #ifdef DEBUG
 #   define ASSERT(expr) do {\
@@ -66,7 +67,7 @@ typedef struct StringView
                 "\t"STRFY(expr), \
                 __func__\
             );\
-            abort();\
+            exit(1);\
         }\
     } while (0)
 #else

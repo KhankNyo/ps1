@@ -5,6 +5,277 @@
 #include "CPU.h"
 #include "Ps1.h"
 
+
+
+void DMA_Reset(DMA *Dma, PS1 *Bus)
+{
+    *Dma = (DMA) {
+        .PriorityCtrlReg = 0x07654321,
+        .Bus = Bus,
+        .Chanels[DMA_PORT_OTC].Ctrl.Decrement = 1, /* OTC always decrement */
+    };
+}
+
+u32 DMA_Read32(DMA *Dma, u32 Offset)
+{
+    u32 Data = 0;
+    u32 Major = (Offset >> 4) & 0x7;
+    u32 Minor = (Offset & 0xF);
+    if (Major == 7) /* master ctrl regs */
+    {
+        switch (Minor)
+        {
+        case 0: /* Priority Ctrl */
+        {
+            Data = Dma->PriorityCtrlReg;
+        } break;
+        case 4: /* Interrupt Ctrl */
+        {
+            Data = Dma->InterruptCtrlReg.Unknown
+                | (u32)Dma->InterruptCtrlReg.ForceIRQ << 15
+                | (u32)Dma->InterruptCtrlReg.IRQChanelEnable << 16 
+                | (u32)Dma->InterruptCtrlReg.IRQMasterEnable << 23 
+                | (u32)Dma->InterruptCtrlReg.IRQChanelFlags << 24 
+                | (u32)Dma->InterruptCtrlReg.IRQMasterFlag << 31;
+        } break;
+        }
+    }
+    else /* per channel regs (0..6) */
+    {
+        DMA_Port Port = Major;
+        const DMA_Chanel *Chanel = &Dma->Chanels[Port];
+        switch (Minor)
+        {
+        case 0: /* Base Addr Regs */
+        {
+            Data = Chanel->BaseAddr;
+        } break;
+        case 4: /* Block Ctrl Regs */
+        {
+            Data = (u32)Chanel->BlockSize
+                | (u32)Chanel->BlockAmount << 16;
+        } break;
+        case 8: /* Chanel Ctrl Regs */
+        {
+            Data = Chanel->Ctrl.RamToDevice
+                | (u32)Chanel->Ctrl.Decrement << 1
+                | (u32)Chanel->Ctrl.ChoppingEnable << 2
+                | (u32)Chanel->Ctrl.SyncMode << 9
+                | (u32)Chanel->Ctrl.ChoppingDMAWindow << 16 
+                | (u32)Chanel->Ctrl.ChoppingCPUWindow << 20 
+                | (u32)Chanel->Ctrl.Enable << 24 
+                | (u32)Chanel->Ctrl.ManualTrigger << 28 
+                | (u32)Chanel->Ctrl.Unknown << 29;
+        } break;
+        default:
+        {
+            TODO("DMA read32: offset 0x%0x", Offset);
+        } break;
+        }
+    }
+    return Data;
+}
+
+void DMA_Write32(DMA *Dma, u32 Offset, u32 Data)
+{
+    u32 Major = (Offset >> 4) & 0x7;
+    u32 Minor = Offset & 0xF;
+    if (Major == 7) /* master ctrl regs */
+    {
+        switch (Minor)
+        {
+        case 0: /* Priority Ctrl */
+        {
+            Dma->PriorityCtrlReg = Data;
+        } break;
+        case 4: /* Interrupt Ctrl */
+        {
+            Dma->InterruptCtrlReg.Unknown = Data;
+            Dma->InterruptCtrlReg.ForceIRQ = Data >> 15;
+            Dma->InterruptCtrlReg.IRQChanelEnable = Data >> 16;
+            Dma->InterruptCtrlReg.IRQMasterEnable = Data >> 23;
+
+            /* writing 1 to a flag resets it, flag value stays otherwise */
+            Dma->InterruptCtrlReg.IRQChanelFlags &= ~(Data >> 24);
+
+#if 0 /* TODO: move this somwhere else? */
+            Dma->InterruptCtrlReg.IRQMasterFlag = 
+                Dma->InterruptCtrlReg.ForceIRQ 
+                || (Dma->InterruptCtrlReg.IRQMasterEnable && Dma->InterruptCtrlReg.IRQChanelFlags);
+#endif 
+        } break;
+        default:
+        {
+            TODO("DMA write32: offset 0x%x <- %08x", Offset, Data);
+        } break;
+        }
+    }
+    else /* per channel regs */
+    {
+        DMA_Port Port = Major;
+        DMA_Chanel *Chanel = &Dma->Chanels[Port];
+        switch (Minor)
+        {
+        case 0: /* Base Addr Regs */
+        {
+            Chanel->BaseAddr = Data & 0xFFFFFF;
+        } break;
+        case 4: /* Block Ctrl Regs */
+        {
+            Chanel->BlockSize = Data & 0xFFFF;
+            Chanel->BlockAmount = Data >> 16;
+        } break;
+        case 8: /* Chanel Ctrl Regs */
+        {
+            if (Port == DMA_PORT_OTC) /* only bits 24, 28, 30 are R/W */
+            {
+                Chanel->Ctrl.Enable = Data >> 24;
+                Chanel->Ctrl.ManualTrigger = Data >> 28;
+                Chanel->Ctrl.Unknown = (Data >> 29) & 0x2;
+            }
+            else
+            {
+                Chanel->Ctrl.Enable = Data;
+                Chanel->Ctrl.Decrement = Data >> 1;
+                Chanel->Ctrl.ChoppingEnable = Data >> 2;
+                Chanel->Ctrl.SyncMode = Data >> 9;
+                Chanel->Ctrl.ChoppingDMAWindow = Data >> 16;
+                Chanel->Ctrl.ChoppingCPUWindow = Data >> 20;
+                Chanel->Ctrl.Enable = Data >> 24;
+                Chanel->Ctrl.ManualTrigger = Data >> 28;
+                Chanel->Ctrl.Unknown = Data >> 29;
+            }
+
+            if (DMA_IsChanelActive(&Chanel->Ctrl))
+            {
+                PS1_DoDMATransfer(Dma->Bus, Port);
+            }
+        } break;
+        default:
+        {
+            TODO("DMA write32: offset 0x%x <- %08x", Offset, Data);
+        } break;
+        }
+    }
+}
+
+u32 DMA_GetChanelTransferSize(const DMA_Chanel *Chanel)
+{
+    switch ((DMA_SyncMode)Chanel->Ctrl.SyncMode)
+    {
+    case DMA_SYNCMODE_MANUAL:
+    {
+        return Chanel->BlockSize;
+    } break;
+    case DMA_SYNCMODE_REQUEST:
+    {
+        return (u32)Chanel->BlockAmount * (u32)Chanel->BlockSize;
+    } break;
+    default:
+    case DMA_SYNCMODE_LINKEDLIST:
+    {
+        UNREACHABLE("linked list mode does not have transfer size");
+        return 0;
+    } break;
+    }
+}
+
+void DMA_SetTransferFinishedState(DMA_Chanel *Chanel)
+{
+    Chanel->Ctrl.Enable = 0;
+    Chanel->Ctrl.ManualTrigger = 0;
+}
+
+void PS1_Reset(PS1 *Ps1)
+{
+    CPU_Reset(&Ps1->Cpu, Ps1);
+    DMA_Reset(&Ps1->Dma, Ps1);
+}
+
+static void PS1_DoDMATransferBlock(PS1 *Ps1, DMA_Port Port)
+{
+    DMA_Chanel *Chanel = &Ps1->Dma.Chanels[Port];
+    int Increment = 
+        Chanel->Ctrl.Decrement
+        ? -4 : 4;
+    u32 Addr = Chanel->BaseAddr;
+    u32 WordsLeft = DMA_GetChanelTransferSize(Chanel);
+    if (Chanel->Ctrl.RamToDevice)
+    {
+        LOG("[DMA Transfer]: ram to device(%d):\n"
+            "    Addr: %08x..%08x\n"
+            "    Incr: %d\n"
+            "    Size: %08x (%d) words\n",
+            Port, 
+            Addr, Addr + Increment*WordsLeft,
+            Increment,
+            WordsLeft, WordsLeft
+        );
+        TODO("Ram to device DMA transfer");
+    }
+    else
+    {
+        LOG("[DMA Transfer]: device(%d) to ram:\n"
+            "    Addr: %08x..%08x\n"
+            "    Incr: %d\n"
+            "    Size: %08x (%d) words\n",
+            Port, 
+            Addr, Addr + Increment*WordsLeft,
+            Increment,
+            WordsLeft, WordsLeft
+        );
+        do {
+            /* from Mednafen, addr does wrap, ignore 2 LSB's */
+            u32 CurrentAddr = Addr & 0x1FFFFC;
+
+            u32 SrcWord = 0;
+            switch (Port)
+            {
+            case DMA_PORT_OTC:
+            {
+                /* current entry = prev entry */
+                SrcWord = (Addr - 4) & 0x1FFFFC;
+                if (WordsLeft == 1) /* last entry */
+                    SrcWord = 0xFFFFFF;
+            } break;
+            default:
+            {
+                TODO("DMA port %d", Port);
+            } break;
+            }
+            PS1_Write32(Ps1, CurrentAddr, SrcWord);
+
+            Addr += Increment;
+            WordsLeft--;
+        } while (WordsLeft != 0);
+    }
+
+    DMA_SetTransferFinishedState(Chanel);
+}
+
+void PS1_DoDMATransfer(PS1 *Ps1, DMA_Port Port)
+{
+    DMA_SyncMode SyncMode = Ps1->Dma.Chanels[Port].Ctrl.SyncMode; 
+    switch (SyncMode)
+    {
+    case DMA_SYNCMODE_MANUAL:
+    case DMA_SYNCMODE_REQUEST:
+    {
+        PS1_DoDMATransferBlock(Ps1, Port);
+    } break;
+    case DMA_SYNCMODE_LINKEDLIST:
+    {
+        TODO("linked list syncmode");
+    } break;
+    default:
+    {
+        UNREACHABLE("unknown syncmode: %d", SyncMode);
+    } break;
+    }
+}
+
+
+
 typedef struct 
 {
     Bool8 Valid;
@@ -185,8 +456,8 @@ u32 PS1_Read32(PS1 *Ps1, u32 LogicalAddr)
     }
     else if ((Translation = InDMARange(PhysicalAddr)).Valid)
     {
-        /* nop */
         RegionName = "DMA";
+        Data = DMA_Read32(&Ps1->Dma, Translation.Offset);
     }
     else if ((Translation = InGPURange(PhysicalAddr)).Valid)
     {
@@ -194,8 +465,16 @@ u32 PS1_Read32(PS1 *Ps1, u32 LogicalAddr)
         RegionName = "GPU";
         if (Translation.Offset == 4) /* GPU STAT */
         {
-            Data = 0x10000000;
+            /* hack to prevent bios from spinning */
+            /* set bit 28 (Ready for DMA Block),
+             *     bit 27 (Ready to send VRAM to CPU),
+             *     bit 26 (Ready for Cmd Word) */
+            Data = 0x1C000000; 
         }
+    }
+    else if ((Translation = InTimerRange(PhysicalAddr)).Valid)
+    {
+        RegionName = "timer";
     }
     else
     {
@@ -346,8 +625,8 @@ void PS1_Write32(PS1 *Ps1, u32 LogicalAddr, u32 Data)
     }
     else if ((Translation = InDMARange(PhysicalAddr)).Valid)
     {
-        /* nop */
         RegionName = "DMA";
+        DMA_Write32(&Ps1->Dma, Translation.Offset, Data);
     }
     else if ((Translation = InGPURange(PhysicalAddr)).Valid)
     {
@@ -438,6 +717,7 @@ int main(int argc, char **argv)
     Ps1.Ram = Ps1.Bios + PS1_BIOS_SIZE;
     ASSERT(Ps1.Bios != NULL);
 
+
     const char* FileName = argv[1];
     FILE* f = fopen(FileName, "rb");
     ASSERT(f && "failed to read file");
@@ -455,7 +735,7 @@ int main(int argc, char **argv)
     }
     fclose(f);
 
-    CPU_Reset(&Ps1.Cpu, &Ps1);
+    PS1_Reset(&Ps1);
     while (1)
     {
         CPU_Clock(&Ps1.Cpu);
