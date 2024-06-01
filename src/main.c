@@ -135,7 +135,7 @@ void DMA_Write32(DMA *Dma, u32 Offset, u32 Data)
             }
             else
             {
-                Chanel->Ctrl.Enable = Data;
+                Chanel->Ctrl.RamToDevice = Data;
                 Chanel->Ctrl.Decrement = Data >> 1;
                 Chanel->Ctrl.ChoppingEnable = Data >> 2;
                 Chanel->Ctrl.SyncMode = Data >> 9;
@@ -184,6 +184,7 @@ void DMA_SetTransferFinishedState(DMA_Chanel *Chanel)
 {
     Chanel->Ctrl.Enable = 0;
     Chanel->Ctrl.ManualTrigger = 0;
+    /* TODO: also set interrupt */
 }
 
 void PS1_Reset(PS1 *Ps1)
@@ -211,9 +212,27 @@ static void PS1_DoDMATransferBlock(PS1 *Ps1, DMA_Port Port)
             Increment,
             WordsLeft, WordsLeft
         );
-        TODO("Ram to device DMA transfer");
+        do {
+            u32 CurrentAddr = (Addr % PS1_RAM_SIZE) & ~0x3;
+            u32 Data;
+            PS1_Ram_Read32(Ps1, CurrentAddr, &Data);
+            switch (Port)
+            {
+            case DMA_PORT_GPU:
+            {
+                //LOG("      | %08x\n", Data);
+            } break;
+            default:
+            {
+                TODO("DMA for ram to device %d", Port);
+            } break;
+            }
+
+            Addr += Increment;
+            WordsLeft--;
+        } while (WordsLeft != 0);
     }
-    else
+    else /* device to ram */
     {
         LOG("[DMA Transfer]: device(%d) to ram:\n"
             "    Addr: %08x..%08x\n"
@@ -225,8 +244,8 @@ static void PS1_DoDMATransferBlock(PS1 *Ps1, DMA_Port Port)
             WordsLeft, WordsLeft
         );
         do {
-            /* from Mednafen, addr does wrap, ignore 2 LSB's */
-            u32 CurrentAddr = Addr & 0x1FFFFC;
+            /* wrap addr to ram size, ignore 2 LSB's */
+            u32 CurrentAddr = (Addr % PS1_RAM_SIZE) & ~0x3;
 
             u32 SrcWord = 0;
             switch (Port)
@@ -234,20 +253,57 @@ static void PS1_DoDMATransferBlock(PS1 *Ps1, DMA_Port Port)
             case DMA_PORT_OTC:
             {
                 /* current entry = prev entry */
-                SrcWord = (Addr - 4) & 0x1FFFFC;
+                SrcWord = (Addr - 4) % PS1_RAM_SIZE;
                 if (WordsLeft == 1) /* last entry */
                     SrcWord = 0xFFFFFF;
             } break;
             default:
             {
-                TODO("DMA port %d", Port);
+                TODO("DMA device %d to ram", Port);
             } break;
             }
-            PS1_Write32(Ps1, CurrentAddr, SrcWord);
+            PS1_Ram_Write32(Ps1, CurrentAddr, SrcWord);
 
             Addr += Increment;
             WordsLeft--;
         } while (WordsLeft != 0);
+    }
+
+    DMA_SetTransferFinishedState(Chanel);
+}
+
+static void PS1_DoDMATransferLinkedList(PS1 *Ps1, DMA_Port Port)
+{
+    DMA_Chanel *Chanel = &Ps1->Dma.Chanels[Port];
+    ASSERT(Port == DMA_PORT_GPU && "is this ok?");
+    if (Chanel->Ctrl.RamToDevice == 0)
+    {
+        TODO("Invalid transfer direction for linked list mode: device to ram\n");
+    }
+
+    u32 Addr = (Chanel->BaseAddr % PS1_RAM_SIZE) & ~0x3;
+    LOG("[DMA Transfer]: linked-list @ %08x\n", Addr);
+    while (1)
+    {
+        u32 Header;
+        PS1_Ram_Read32(Ps1, Addr, &Header);
+
+        uint SizeWords = Header >> 24;
+        for (uint WordCount = SizeWords; WordCount; WordCount--)
+        {
+            Addr = (Addr + sizeof(u32)) % PS1_RAM_SIZE;
+            u32 GPUCommand;
+            PS1_Ram_Read32(Ps1, Addr, &GPUCommand);
+            LOG("    GPUCMD: %08x\n", GPUCommand);
+        }
+
+        /* last packet, low 24 bits are set to 1, but we only check the msb, 
+         * that's how mednafen does the check 
+         * (probably how the hardware does it too? Or just optimization?) */
+        if (Header & 0x800000)
+            break;
+
+        Addr = (Header % PS1_RAM_SIZE) & ~0x3;
     }
 
     DMA_SetTransferFinishedState(Chanel);
@@ -265,7 +321,7 @@ void PS1_DoDMATransfer(PS1 *Ps1, DMA_Port Port)
     } break;
     case DMA_SYNCMODE_LINKEDLIST:
     {
-        TODO("linked list syncmode");
+        PS1_DoDMATransferLinkedList(Ps1, Port);
     } break;
     default:
     {
@@ -431,10 +487,7 @@ u32 PS1_Read32(PS1 *Ps1, u32 LogicalAddr)
         u32 Offset = Translation.Offset;
         ASSERT(Offset + 4 <= PS1_RAM_SIZE && Offset < Offset + 4);
 
-        Data = Ps1->Ram[Offset + 0];
-        Data |= (u32)Ps1->Ram[Offset + 1] << 8;
-        Data |= (u32)Ps1->Ram[Offset + 2] << 16;
-        Data |= (u32)Ps1->Ram[Offset + 3] << 24;
+        PS1_Ram_Read32(Ps1, Offset, &Data);
         return Data; /* no log */
     }
     else if ((Translation = InMemCtrl1Range(PhysicalAddr)).Valid)
@@ -458,6 +511,7 @@ u32 PS1_Read32(PS1 *Ps1, u32 LogicalAddr)
     {
         RegionName = "DMA";
         Data = DMA_Read32(&Ps1->Dma, Translation.Offset);
+        return Data;
     }
     else if ((Translation = InGPURange(PhysicalAddr)).Valid)
     {
@@ -578,10 +632,7 @@ void PS1_Write32(PS1 *Ps1, u32 LogicalAddr, u32 Data)
         u32 Offset = Translation.Offset;
         ASSERT(Offset + 4 <= PS1_RAM_SIZE && Offset < Offset + 4);
 
-        Ps1->Ram[Offset + 0] = Data >> 0;
-        Ps1->Ram[Offset + 1] = Data >> 8;
-        Ps1->Ram[Offset + 2] = Data >> 16;
-        Ps1->Ram[Offset + 3] = Data >> 24;
+        PS1_Ram_Write32(Ps1, Offset, Data);
         return; /*  ram log is unnecessary since there is going to be a lot of ram write */
     }
     else if ((Translation = InMemCtrl1Range(PhysicalAddr)).Valid)
@@ -626,7 +677,9 @@ void PS1_Write32(PS1 *Ps1, u32 LogicalAddr, u32 Data)
     else if ((Translation = InDMARange(PhysicalAddr)).Valid)
     {
         RegionName = "DMA";
+        LOG("%s: [%08x] <- %08x\n", RegionName, LogicalAddr, Data);
         DMA_Write32(&Ps1->Dma, Translation.Offset, Data);
+        return;
     }
     else if ((Translation = InGPURange(PhysicalAddr)).Valid)
     {

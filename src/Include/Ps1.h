@@ -88,6 +88,12 @@ struct PS1
 };
 
 void PS1_DoDMATransfer(PS1 *, DMA_Port Chanel);
+#define PS1_Ram_Write32(ps1_ptr, addr, u32val) do {\
+    u32 v = u32val;\
+    memcpy((ps1_ptr)->Ram + (addr), &v, sizeof(u32));\
+} while (0) 
+#define PS1_Ram_Read32(ps1_ptr, addr, out_u32ptr) \
+    memcpy(out_u32ptr, (ps1_ptr)->Ram + (addr), sizeof(u32));
 u32 PS1_Read32(PS1 *, u32 Addr);
 u16 PS1_Read16(PS1 *, u32 Addr);
 u8 PS1_Read8(PS1 *, u32 Addr);

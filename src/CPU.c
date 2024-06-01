@@ -856,7 +856,7 @@ static void CPU_Swl(CPU *Cpu, u32 Instruction)
         (PrevData & (0xFFFFFF00 << (ShiftCount)*8))
         | (Rt >> (3 - ShiftCount)*8);
 
-    PS1_Write32(Cpu->Bus, Addr, Data);
+    PS1_Write32(Cpu->Bus, AlignedAddr, Data);
 }
 
 /* store word to the right part of memory (on a little endian memory diagram)
@@ -884,7 +884,7 @@ static void CPU_Swr(CPU *Cpu, u32 Instruction)
         (PrevData & (0x00FFFFFF >> (3 - ShiftCount)*8)) 
         | (Rt << (ShiftCount)*8);
 
-    PS1_Write32(Cpu->Bus, Addr, Data);
+    PS1_Write32(Cpu->Bus, AlignedAddr, Data);
 }
 
 static void CPU_LwC2(CPU *Cpu, u32 Instruction)
