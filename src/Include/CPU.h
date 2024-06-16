@@ -3,7 +3,6 @@
 
 #include "Common.h"
 
-typedef struct PS1 PS1;
 
 typedef enum 
 {

@@ -18,6 +18,9 @@ typedef uint8_t Bool8;
 typedef intptr_t iSize;
 typedef unsigned uint;
 
+typedef struct PS1 PS1;
+
+
 #ifndef false
 #  define false 0
 #endif /* false */

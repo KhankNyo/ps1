@@ -6,329 +6,197 @@
 #include "Ps1.h"
 
 
-
-void DMA_Reset(DMA *Dma, PS1 *Bus)
+void GPU_Reset(GPU *Gpu, PS1 *Bus)
 {
-    *Dma = (DMA) {
-        .PriorityCtrlReg = 0x07654321,
+    *Gpu = (GPU) {
         .Bus = Bus,
-        .Chanels[DMA_PORT_OTC].Ctrl.Decrement = 1, /* OTC always decrement */
+
+        .Status = (GPUStat) {
+            .DisplayDisable = 1,
+            .VideoMode = 0, /* NTSC */
+        },
+
+        .TextureWindowMaskX = 0,
+        .TextureWindowMaskY = 0,
+        .TextureWindowOffsetX = 0,
+        .TextureWindowOffsetY = 0,
+
+        .DrawingAreaLeft = 0,
+        .DrawingAreaRight = 0,
+        .DrawingAreaTop = 0,
+        .DrawingAreaBottom = 0,
+
+        .DisplayHorizontalStart = 0x100,
+        .DisplayHorizontalEnd = 0xC00,
+        .DisplayLineStart = 0x10,
+        .DisplayLineEnd = 0x100,
     };
+
+    /* TODO: clear fifo */
+    /* TODO: clear GPU cache */
 }
 
-u32 DMA_Read32(DMA *Dma, u32 Offset)
+u32 GPU_ReadGPU(GPU *Gpu)
 {
-    u32 Data = 0;
-    u32 Major = (Offset >> 4) & 0x7;
-    u32 Minor = (Offset & 0xF);
-    if (Major == 7) /* master ctrl regs */
-    {
-        switch (Minor)
-        {
-        case 0: /* Priority Ctrl */
-        {
-            Data = Dma->PriorityCtrlReg;
-        } break;
-        case 4: /* Interrupt Ctrl */
-        {
-            Data = Dma->InterruptCtrlReg.Unknown
-                | (u32)Dma->InterruptCtrlReg.ForceIRQ << 15
-                | (u32)Dma->InterruptCtrlReg.IRQChanelEnable << 16 
-                | (u32)Dma->InterruptCtrlReg.IRQMasterEnable << 23 
-                | (u32)Dma->InterruptCtrlReg.IRQChanelFlags << 24 
-                | (u32)Dma->InterruptCtrlReg.IRQMasterFlag << 31;
-        } break;
-        }
-    }
-    else /* per channel regs (0..6) */
-    {
-        DMA_Port Port = Major;
-        const DMA_Chanel *Chanel = &Dma->Chanels[Port];
-        switch (Minor)
-        {
-        case 0: /* Base Addr Regs */
-        {
-            Data = Chanel->BaseAddr;
-        } break;
-        case 4: /* Block Ctrl Regs */
-        {
-            Data = (u32)Chanel->BlockSize
-                | (u32)Chanel->BlockAmount << 16;
-        } break;
-        case 8: /* Chanel Ctrl Regs */
-        {
-            Data = Chanel->Ctrl.RamToDevice
-                | (u32)Chanel->Ctrl.Decrement << 1
-                | (u32)Chanel->Ctrl.ChoppingEnable << 2
-                | (u32)Chanel->Ctrl.SyncMode << 9
-                | (u32)Chanel->Ctrl.ChoppingDMAWindow << 16 
-                | (u32)Chanel->Ctrl.ChoppingCPUWindow << 20 
-                | (u32)Chanel->Ctrl.Enable << 24 
-                | (u32)Chanel->Ctrl.ManualTrigger << 28 
-                | (u32)Chanel->Ctrl.Unknown << 29;
-        } break;
-        default:
-        {
-            TODO("DMA read32: offset 0x%0x", Offset);
-        } break;
-        }
-    }
-    return Data;
+    /* TODO: implement this */
+    return 0;
 }
 
-void DMA_Write32(DMA *Dma, u32 Offset, u32 Data)
+u32 GPU_ReadStatus(GPU *Gpu)
 {
-    u32 Major = (Offset >> 4) & 0x7;
-    u32 Minor = Offset & 0xF;
-    if (Major == 7) /* master ctrl regs */
-    {
-        switch (Minor)
-        {
-        case 0: /* Priority Ctrl */
-        {
-            Dma->PriorityCtrlReg = Data;
-        } break;
-        case 4: /* Interrupt Ctrl */
-        {
-            Dma->InterruptCtrlReg.Unknown = Data;
-            Dma->InterruptCtrlReg.ForceIRQ = Data >> 15;
-            Dma->InterruptCtrlReg.IRQChanelEnable = Data >> 16;
-            Dma->InterruptCtrlReg.IRQMasterEnable = Data >> 23;
+    u32 Value = 0;
+    Value |= (u32)Gpu->Status.TexturePageX << 0;
+    Value |= (u32)Gpu->Status.TexturePageY << 4;
+    Value |= (u32)Gpu->Status.SemiTransparency << 5;
+    Value |= (u32)Gpu->Status.TextureDepth << 7;
+    Value |= (u32)Gpu->Status.DitherEnable << 9;
+    Value |= (u32)Gpu->Status.DrawEnable << 10;
+    Value |= (u32)Gpu->Status.SetMaskBitOnDraw << 11;
+    Value |= (u32)Gpu->Status.PreserveMaskedPixel << 12;
+    Value |= (u32)Gpu->Status.Field << 13;
 
-            /* writing 1 to a flag resets it, flag value stays otherwise */
-            Dma->InterruptCtrlReg.IRQChanelFlags &= ~(Data >> 24);
+    /* bit 14: distortion, not supported */
+    // Value |= 1 << 14;
+    Value |= (u32)Gpu->Status.TextureDisable << 15;
+    Value |= (u32)Gpu->Status.HorizontalResolution << 16;
+    Value |= (u32)Gpu->Status.VerticalResolution << 19;
+    Value |= (u32)Gpu->Status.VideoMode << 20;
+    Value |= (u32)Gpu->Status.DisplayRGB24 << 21;
+    Value |= (u32)Gpu->Status.InterlaceEnable << 22;
+    Value |= (u32)Gpu->Status.DisplayDisable << 23;
+    Value |= (u32)Gpu->Status.Interrupt << 24;
 
-#if 0 /* TODO: move this somwhere else? */
-            Dma->InterruptCtrlReg.IRQMasterFlag = 
-                Dma->InterruptCtrlReg.ForceIRQ 
-                || (Dma->InterruptCtrlReg.IRQMasterEnable && Dma->InterruptCtrlReg.IRQChanelFlags);
-#endif 
-        } break;
-        default:
-        {
-            TODO("DMA write32: offset 0x%x <- %08x", Offset, Data);
-        } break;
-        }
-    }
-    else /* per channel regs */
-    {
-        DMA_Port Port = Major;
-        DMA_Chanel *Chanel = &Dma->Chanels[Port];
-        switch (Minor)
-        {
-        case 0: /* Base Addr Regs */
-        {
-            Chanel->BaseAddr = Data & 0xFFFFFF;
-        } break;
-        case 4: /* Block Ctrl Regs */
-        {
-            Chanel->BlockSize = Data & 0xFFFF;
-            Chanel->BlockAmount = Data >> 16;
-        } break;
-        case 8: /* Chanel Ctrl Regs */
-        {
-            if (Port == DMA_PORT_OTC) /* only bits 24, 28, 30 are R/W */
-            {
-                Chanel->Ctrl.Enable = Data >> 24;
-                Chanel->Ctrl.ManualTrigger = Data >> 28;
-                Chanel->Ctrl.Unknown = (Data >> 29) & 0x2;
-            }
-            else
-            {
-                Chanel->Ctrl.RamToDevice = Data;
-                Chanel->Ctrl.Decrement = Data >> 1;
-                Chanel->Ctrl.ChoppingEnable = Data >> 2;
-                Chanel->Ctrl.SyncMode = Data >> 9;
-                Chanel->Ctrl.ChoppingDMAWindow = Data >> 16;
-                Chanel->Ctrl.ChoppingCPUWindow = Data >> 20;
-                Chanel->Ctrl.Enable = Data >> 24;
-                Chanel->Ctrl.ManualTrigger = Data >> 28;
-                Chanel->Ctrl.Unknown = Data >> 29;
-            }
+    /* TODO: this is a hack: pretend that the GPU is always ready for now. */
+    Gpu->Status.ReadyToSend = 1;
+    Gpu->Status.ReadyToReceiveCmdWord = 1;
+    Gpu->Status.ReadyToReceiveDMABlock = 1;
+    Value |= (u32)Gpu->Status.ReadyToReceiveCmdWord << 26; /* Ready to Receive CMD Word */
+    Value |= (u32)Gpu->Status.ReadyToSend << 27; /* Ready to send */
+    Value |= (u32)Gpu->Status.ReadyToReceiveDMABlock << 28; /* Ready to receive DMA Block */
 
-            if (DMA_IsChanelActive(&Chanel->Ctrl))
-            {
-                PS1_DoDMATransfer(Dma->Bus, Port);
-            }
-        } break;
-        default:
-        {
-            TODO("DMA write32: offset 0x%x <- %08x", Offset, Data);
-        } break;
-        }
-    }
-}
+    Value |= (u32)Gpu->Status.DMADirection << 29;
 
-u32 DMA_GetChanelTransferSize(const DMA_Chanel *Chanel)
-{
-    switch ((DMA_SyncMode)Chanel->Ctrl.SyncMode)
+    /* bit 31 is enabled during odd line in interlaced mode while not being in vblank */
+    Value |= 0 << 31;
+
+    /* bit 25 depends on DMA direction (29..30) */
+    u32 DMARequest = 0;
+    switch (Gpu->Status.DMADirection)
     {
-    case DMA_SYNCMODE_MANUAL:
+    case 0: /* off, always 0 */
     {
-        return Chanel->BlockSize;
+        DMARequest = 0;
     } break;
-    case DMA_SYNCMODE_REQUEST:
+    case 1: /* fifo, fifo status (1/0 = empty/full) */
     {
-        return (u32)Chanel->BlockAmount * (u32)Chanel->BlockSize;
+        DMARequest = 1; /* TODO: hack: set to always empty for now */
     } break;
-    default:
-    case DMA_SYNCMODE_LINKEDLIST:
+    case 2: /* GPU to GP0, copy bit 28 */
     {
-        UNREACHABLE("linked list mode does not have transfer size");
-        return 0;
+        DMARequest = Gpu->Status.ReadyToReceiveDMABlock;
+    } break;
+    case 3: /* GP0 to CPU, copy bit 27 */
+    {
+        DMARequest = Gpu->Status.ReadyToSend;
     } break;
     }
+    Value |= DMARequest << 25;
+
+    return Value;
 }
 
-void DMA_SetTransferFinishedState(DMA_Chanel *Chanel)
+static void GP0_SetDrawMode(GPU *Gpu, u32 Instruction);
+static void GP1_SetDisplayMode(GPU *Gpu, u32 Instruction);
+
+void GPU_WriteGP0(GPU *Gpu, u32 Data)
 {
-    Chanel->Ctrl.Enable = 0;
-    Chanel->Ctrl.ManualTrigger = 0;
-    /* TODO: also set interrupt */
-}
-
-void PS1_Reset(PS1 *Ps1)
-{
-    CPU_Reset(&Ps1->Cpu, Ps1);
-    DMA_Reset(&Ps1->Dma, Ps1);
-}
-
-static void PS1_DoDMATransferBlock(PS1 *Ps1, DMA_Port Port)
-{
-    DMA_Chanel *Chanel = &Ps1->Dma.Chanels[Port];
-    int Increment = 
-        Chanel->Ctrl.Decrement
-        ? -4 : 4;
-    u32 Addr = Chanel->BaseAddr;
-    u32 WordsLeft = DMA_GetChanelTransferSize(Chanel);
-    if (Chanel->Ctrl.RamToDevice)
+    u8 Command = Data >> 24;
+    switch (Command)
     {
-        LOG("[DMA Transfer]: ram to device(%d):\n"
-            "    Addr: %08x..%08x\n"
-            "    Incr: %d\n"
-            "    Size: %08x (%d) words\n",
-            Port, 
-            Addr, Addr + Increment*WordsLeft,
-            Increment,
-            WordsLeft, WordsLeft
-        );
-        do {
-            u32 CurrentAddr = (Addr % PS1_RAM_SIZE) & ~0x3;
-            u32 Data;
-            PS1_Ram_Read32(Ps1, CurrentAddr, &Data);
-            switch (Port)
-            {
-            case DMA_PORT_GPU:
-            {
-                //LOG("      | %08x\n", Data);
-            } break;
-            default:
-            {
-                TODO("DMA for ram to device %d", Port);
-            } break;
-            }
-
-            Addr += Increment;
-            WordsLeft--;
-        } while (WordsLeft != 0);
-    }
-    else /* device to ram */
+    case 0x00: /* nop */ break;
+    case 0xE1: /* set drawing mode (status reg and misc) */
     {
-        LOG("[DMA Transfer]: device(%d) to ram:\n"
-            "    Addr: %08x..%08x\n"
-            "    Incr: %d\n"
-            "    Size: %08x (%d) words\n",
-            Port, 
-            Addr, Addr + Increment*WordsLeft,
-            Increment,
-            WordsLeft, WordsLeft
-        );
-        do {
-            /* wrap addr to ram size, ignore 2 LSB's */
-            u32 CurrentAddr = (Addr % PS1_RAM_SIZE) & ~0x3;
-
-            u32 SrcWord = 0;
-            switch (Port)
-            {
-            case DMA_PORT_OTC:
-            {
-                /* current entry = prev entry */
-                SrcWord = (Addr - 4) % PS1_RAM_SIZE;
-                if (WordsLeft == 1) /* last entry */
-                    SrcWord = 0xFFFFFF;
-            } break;
-            default:
-            {
-                TODO("DMA device %d to ram", Port);
-            } break;
-            }
-            PS1_Ram_Write32(Ps1, CurrentAddr, SrcWord);
-
-            Addr += Increment;
-            WordsLeft--;
-        } while (WordsLeft != 0);
-    }
-
-    DMA_SetTransferFinishedState(Chanel);
-}
-
-static void PS1_DoDMATransferLinkedList(PS1 *Ps1, DMA_Port Port)
-{
-    DMA_Chanel *Chanel = &Ps1->Dma.Chanels[Port];
-    ASSERT(Port == DMA_PORT_GPU && "is this ok?");
-    if (Chanel->Ctrl.RamToDevice == 0)
-    {
-        TODO("Invalid transfer direction for linked list mode: device to ram\n");
-    }
-
-    u32 Addr = (Chanel->BaseAddr % PS1_RAM_SIZE) & ~0x3;
-    LOG("[DMA Transfer]: linked-list @ %08x\n", Addr);
-    while (1)
-    {
-        u32 Header;
-        PS1_Ram_Read32(Ps1, Addr, &Header);
-
-        uint SizeWords = Header >> 24;
-        for (uint WordCount = SizeWords; WordCount; WordCount--)
-        {
-            Addr = (Addr + sizeof(u32)) % PS1_RAM_SIZE;
-            u32 GPUCommand;
-            PS1_Ram_Read32(Ps1, Addr, &GPUCommand);
-            LOG("    GPUCMD: %08x\n", GPUCommand);
-        }
-
-        /* last packet, low 24 bits are set to 1, but we only check the msb, 
-         * that's how mednafen does the check 
-         * (probably how the hardware does it too? Or just optimization?) */
-        if (Header & 0x800000)
-            break;
-
-        Addr = (Header % PS1_RAM_SIZE) & ~0x3;
-    }
-
-    DMA_SetTransferFinishedState(Chanel);
-}
-
-void PS1_DoDMATransfer(PS1 *Ps1, DMA_Port Port)
-{
-    DMA_SyncMode SyncMode = Ps1->Dma.Chanels[Port].Ctrl.SyncMode; 
-    switch (SyncMode)
-    {
-    case DMA_SYNCMODE_MANUAL:
-    case DMA_SYNCMODE_REQUEST:
-    {
-        PS1_DoDMATransferBlock(Ps1, Port);
+        GP0_SetDrawMode(Gpu, Data);
     } break;
-    case DMA_SYNCMODE_LINKEDLIST:
+    case 0xE3: /* set drawing area top left */
     {
-        PS1_DoDMATransferLinkedList(Ps1, Port);
+        Gpu->DrawingAreaTop = (Data >> 10) & 0x3FF;
+        Gpu->DrawingAreaLeft = (Data >> 0) & 0x3FF;
+    } break;
+    case 0xE4: /* set drawing area bottom right */
+    {
+        Gpu->DrawingAreaBottom = (Data >> 10) & 0x3FF;
+        Gpu->DrawingAreaRight = (Data >> 0) & 0x3FF;
     } break;
     default:
     {
-        UNREACHABLE("unknown syncmode: %d", SyncMode);
+        TODO("Unhandled GP0 opcode: %08x\n", Data);
     } break;
     }
 }
+
+void GPU_WriteGP1(GPU *Gpu, u32 Data)
+{
+    u8 Command = Data >> 24;
+    switch (Command)
+    {
+    case 0x00: /* soft reset */ 
+    {
+        GPU_Reset(Gpu, Gpu->Bus);
+        Gpu->Status.InterlaceEnable = 1;
+    } break;
+    case 0x08: /* set display mode */
+    {
+        GP1_SetDisplayMode(Gpu, Data);
+    } break;
+    case 0x04: /* set DMA direction */
+    {
+        LOG("dma dir: %08x\n", Data);
+        Gpu->Status.DMADirection = Data;
+    } break;
+    default:
+    {
+        TODO("Unhandled GP1 opcode: %08x", Data);
+    } break;
+    }
+}
+
+static void GP0_SetDrawMode(GPU *Gpu, u32 Instruction)
+{
+    Gpu->Status.TexturePageX = Instruction >> 0;
+    Gpu->Status.TexturePageY = Instruction >> 4;
+    Gpu->Status.SemiTransparency = Instruction >> 5;
+    Gpu->Status.TextureDepth = Instruction >> 7;
+    Gpu->Status.DitherEnable = Instruction >> 9;
+    Gpu->Status.DrawEnable = Instruction >> 10;
+    Gpu->Status.TextureDisable = Instruction >> 11;
+
+    Gpu->TexturedRectangleXFlip = Instruction >> 12;
+    Gpu->TexturedRectangleYFlip = Instruction >> 13;
+}
+
+
+static void GP1_SetDisplayMode(GPU *Gpu, u32 Instruction)
+{
+    u32 HorRes = (Instruction >> 6) & 0x1;
+    HorRes |= (Instruction & 3) << 1;
+    Gpu->Status.HorizontalResolution = HorRes;
+    Gpu->Status.VerticalResolution = Instruction >> 2;
+    Gpu->Status.VideoMode = Instruction >> 3;
+    Gpu->Status.DisplayRGB24 = Instruction >> 4;
+    Gpu->Status.InterlaceEnable = Instruction >> 5;
+
+    /* bit 7 (Reverse flag 14) is unused here, catch the moment if it's set */
+    if (Instruction & (1 << 7))
+    {
+        TODO("Implement bit 14 of GPUStat\n");
+    }
+}
+
+
+
+
+
 
 
 
@@ -460,6 +328,155 @@ static TranslatedAddr InGPURange(u32 PhysicalAddr)
 
 
 
+static void PS1_DoDMATransferBlock(PS1 *Ps1, DMA_Port Port)
+{
+    DMA_Chanel *Chanel = &Ps1->Dma.Chanels[Port];
+    int Increment = 
+        Chanel->Ctrl.Decrement
+        ? -4 : 4;
+    u32 Addr = Chanel->BaseAddr;
+    u32 WordsLeft = DMA_GetChanelTransferSize(Chanel);
+    if (Chanel->Ctrl.RamToDevice)
+    {
+        LOG("[DMA Transfer]: ram to device(%d):\n"
+            "    Addr: %08x..%08x\n"
+            "    Incr: %d\n"
+            "    Size: %08x (%d) words\n",
+            Port, 
+            Addr, Addr + Increment*WordsLeft,
+            Increment,
+            WordsLeft, WordsLeft
+        );
+        do {
+            u32 CurrentAddr = (Addr % PS1_RAM_SIZE) & ~0x3;
+            u32 Data;
+            PS1_Ram_Read32(Ps1, CurrentAddr, &Data);
+            switch (Port)
+            {
+            case DMA_PORT_GPU:
+            {
+                //LOG("      | %08x\n", Data);
+            } break;
+            default:
+            {
+                TODO("DMA for ram to device %d", Port);
+            } break;
+            }
+
+            Addr += Increment;
+            WordsLeft--;
+        } while (WordsLeft != 0);
+    }
+    else /* device to ram */
+    {
+        LOG("[DMA Transfer]: device(%d) to ram:\n"
+            "    Addr: %08x..%08x\n"
+            "    Incr: %d\n"
+            "    Size: %08x (%d) words\n",
+            Port, 
+            Addr, Addr + Increment*WordsLeft,
+            Increment,
+            WordsLeft, WordsLeft
+        );
+        do {
+            /* wrap addr to ram size, ignore 2 LSB's */
+            u32 CurrentAddr = (Addr % PS1_RAM_SIZE) & ~0x3;
+
+            u32 SrcWord = 0;
+            switch (Port)
+            {
+            case DMA_PORT_OTC: /* clear linked list */
+            {
+                /* current entry = prev entry */
+                SrcWord = (Addr - 4) % PS1_RAM_SIZE;
+                if (WordsLeft == 1) /* last entry */
+                    SrcWord = 0xFFFFFF;
+            } break;
+            default:
+            {
+                TODO("DMA device %d to ram", Port);
+            } break;
+            }
+            PS1_Ram_Write32(Ps1, CurrentAddr, SrcWord);
+
+            Addr += Increment;
+            WordsLeft--;
+        } while (WordsLeft != 0);
+    }
+
+    DMA_SetTransferFinishedState(Chanel);
+}
+
+static void PS1_DoDMATransferLinkedList(PS1 *Ps1, DMA_Port Port)
+{
+    DMA_Chanel *Chanel = &Ps1->Dma.Chanels[Port];
+    ASSERT(Port == DMA_PORT_GPU && "is this ok?");
+    if (Chanel->Ctrl.RamToDevice == 0)
+    {
+        TODO("Invalid transfer direction for linked list mode: device to ram\n");
+    }
+
+    u32 Addr = (Chanel->BaseAddr % PS1_RAM_SIZE) & ~0x3;
+    LOG("[DMA Transfer]: linked-list @ %08x\n", Addr);
+    while (1)
+    {
+        u32 Header;
+        PS1_Ram_Read32(Ps1, Addr, &Header);
+
+        uint SizeWords = Header >> 24;
+        for (uint WordCount = SizeWords; WordCount; WordCount--)
+        {
+            Addr = (Addr + sizeof(u32)) % PS1_RAM_SIZE;
+            u32 GPUCommand;
+            PS1_Ram_Read32(Ps1, Addr, &GPUCommand);
+            GPU_WriteGP0(&Ps1->Gpu, GPUCommand);
+        }
+
+        /* last packet, low 24 bits are set to 1, but we only check the msb, 
+         * that's how mednafen does the check 
+         * (probably how the hardware does it too? Or just optimization?) */
+        if (Header & 0x800000)
+            break;
+
+        Addr = (Header % PS1_RAM_SIZE) & ~0x3;
+    }
+
+    DMA_SetTransferFinishedState(Chanel);
+}
+
+
+
+void PS1_Reset(PS1 *Ps1)
+{
+    CPU_Reset(&Ps1->Cpu, Ps1);
+    GPU_Reset(&Ps1->Gpu, Ps1);
+    DMA_Reset(&Ps1->Dma, Ps1);
+}
+
+
+void PS1_DoDMATransfer(PS1 *Ps1, DMA_Port Port)
+{
+    DMA_SyncMode SyncMode = Ps1->Dma.Chanels[Port].Ctrl.SyncMode; 
+    switch (SyncMode)
+    {
+    case DMA_SYNCMODE_MANUAL:
+    case DMA_SYNCMODE_REQUEST:
+    {
+        PS1_DoDMATransferBlock(Ps1, Port);
+    } break;
+    case DMA_SYNCMODE_LINKEDLIST:
+    {
+        PS1_DoDMATransferLinkedList(Ps1, Port);
+    } break;
+    default:
+    {
+        UNREACHABLE("unknown syncmode: %d", SyncMode);
+    } break;
+    }
+}
+
+
+
 u32 PS1_Read32(PS1 *Ps1, u32 LogicalAddr)
 {
     if (LogicalAddr & 3)
@@ -515,15 +532,15 @@ u32 PS1_Read32(PS1 *Ps1, u32 LogicalAddr)
     }
     else if ((Translation = InGPURange(PhysicalAddr)).Valid)
     {
-        /* nop */
-        RegionName = "GPU";
-        if (Translation.Offset == 4) /* GPU STAT */
+        if (PhysicalAddr == 0x1F801810) /* GPUREAD register, read only */
         {
-            /* hack to prevent bios from spinning */
-            /* set bit 28 (Ready for DMA Block),
-             *     bit 27 (Ready to send VRAM to CPU),
-             *     bit 26 (Ready for Cmd Word) */
-            Data = 0x1C000000; 
+            RegionName = "GPUREAD";
+            Data = GPU_ReadGPU(&Ps1->Gpu);
+        }
+        else /* GPUSTAT register, read only */
+        {
+            RegionName = "GPUSTAT";
+            Data = GPU_ReadStatus(&Ps1->Gpu);
         }
     }
     else if ((Translation = InTimerRange(PhysicalAddr)).Valid)
@@ -684,7 +701,16 @@ void PS1_Write32(PS1 *Ps1, u32 LogicalAddr, u32 Data)
     else if ((Translation = InGPURange(PhysicalAddr)).Valid)
     {
         /* nop */
-        RegionName = "GPU";
+        if (PhysicalAddr == 0x1F801810) /* GP0 register (write only) */
+        {
+            RegionName = "GP0";
+            GPU_WriteGP0(&Ps1->Gpu, Data);
+        }
+        else /* GP1 register, write only */
+        {
+            RegionName = "GP1";
+            GPU_WriteGP1(&Ps1->Gpu, Data);
+        }
     }
     else
     {

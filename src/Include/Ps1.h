@@ -3,77 +3,64 @@
 
 #include "Common.h"
 #include "CPU.h"
+#include "DMA.h"
 
-
-typedef enum 
-{
-    DMA_PORT_MDEC_IN = 0,
-    DMA_PORT_MDEC_OUT,
-    DMA_PORT_GPU,
-    DMA_PORT_CDROM,
-    DMA_PORT_SPU,
-    DMA_PORT_PIO,
-    DMA_PORT_OTC,
-} DMA_Port;
-
-typedef enum 
-{
-    DMA_SYNCMODE_MANUAL = 0,
-    DMA_SYNCMODE_REQUEST,
-    DMA_SYNCMODE_LINKEDLIST,
-} DMA_SyncMode;
-
-typedef struct
-{
-    unsigned RamToDevice:1;         /* 0 */
-    unsigned Decrement:1;           /* 1 */
-    unsigned ChoppingEnable:1;      /* 2 */
-    unsigned SyncMode:2;            /* 9..10: 0=Manual, 1=Request, 2=LinkedList (GPU) */
-    unsigned ChoppingDMAWindow:3;   /* 16..18: shift count for num words */
-    unsigned ChoppingCPUWindow:3;   /* 20..22: shift count for num cycles */
-    unsigned Enable:1;              /* 24: also called Start/Busy */
-    unsigned ManualTrigger:1;       /* 28 */
-    unsigned Unknown:2;             /* 29..30 */
-} DMA_ChanelCtrl;
 
 typedef struct 
 {
-    unsigned Unknown:5;
-    unsigned ForceIRQ:1;
-    unsigned IRQChanelEnable:7;
-    unsigned IRQMasterEnable:1;
-    unsigned IRQChanelFlags:7;
-    unsigned IRQMasterFlag:1;
-} DMA_InterruptCtrl;
+    /* single bit: 1/0 */
+    unsigned TexturePageX:4;            /* 0..3 N*64 */
+    unsigned TexturePageY:1;            /* 4    256/0 */
+    unsigned SemiTransparency:2;        /* 5..6 */
+    unsigned TextureDepth:2;            /* 7..8 0=4, 1=8, 2=15, 3=reserved bits */
+    unsigned DitherEnable:1;            /* 9    enable/disable dither 24 bit RGB to 15 bit RGB */
+    unsigned DrawEnable:1;              /* 10   enable/disable drawing to display area */
+    unsigned SetMaskBitOnDraw:1;        /* 11   set/don't set mask bit (15) when drawing a pixel*/
+    unsigned PreserveMaskedPixel:1;     /* 12   always/don't draw to pixel with mask bit (15) */
+    unsigned Field:1;                   /* 13   always 1 when GP1(08h).5=0 */
+    // unsigned ReverseFlags:1;         /* 14   */
+    unsigned TextureDisable:1;          /* 15   disable/enable texture */
+    unsigned HorizontalResolution:3;    /* 16.18 xx1: 368; 000: 256; 010: 320; 100: 512; 110: 640 */
+    unsigned VerticalResolution:1;      /* 19    480/240 */
+    unsigned VideoMode:1;               /* 20   PAL/NTSC */
+    unsigned DisplayRGB24:1;            /* 21   24/15 bbp */
+    unsigned InterlaceEnable:1;         /* 22   enable/disable interlacing */
+    unsigned DisplayDisable:1;          /* 23   disable/enable display */
+    unsigned Interrupt:1;               /* 24   IRQ/off */
+    /* bit 25 is derived from other bits, no need to store it */
+    unsigned ReadyToReceiveCmdWord:1;   /* 26 */
+    unsigned ReadyToSend:1;             /* 27 */
+    unsigned ReadyToReceiveDMABlock:1;  /* 28 */
+    unsigned DMADirection:2;            /* 29..30  00: off; 01: fifo; 10: CPU to GP0; 11: GPURead to CPU */
+} GPUStat;
 
 typedef struct 
 {
-    u32 BaseAddr;           /* DADR */
-
-    u16 BlockSize;          /* DBCR */
-    u16 BlockAmount;
-
-    DMA_ChanelCtrl Ctrl;   /* DCHCR */
-} DMA_Chanel;
-
-typedef struct
-{
-    DMA_Chanel Chanels[7];
-
-    u32 PriorityCtrlReg;                /* DPCR */
-    DMA_InterruptCtrl InterruptCtrlReg; /* DICR */
-
+    GPUStat Status;
     PS1 *Bus;
-} DMA;
 
-static inline Bool8 DMA_IsChanelActive(const DMA_ChanelCtrl *Chanel)
-{
-    /* only need to check trigger bit when sync mode is 0 (manual) */
-    Bool8 TriggerSet = 
-        Chanel->SyncMode != DMA_SYNCMODE_MANUAL
-        || Chanel->ManualTrigger;
-    return Chanel->Enable && TriggerSet;
-}
+    Bool8 TexturedRectangleXFlip;
+    Bool8 TexturedRectangleYFlip;
+
+    u8 TextureWindowMaskX;
+    u8 TextureWindowMaskY;
+    u8 TextureWindowOffsetX;
+    u8 TextureWindowOffsetY;
+
+    u16 DrawingAreaLeft;
+    u16 DrawingAreaRight;
+    u16 DrawingAreaTop;
+    u16 DrawingAreaBottom;
+    i16 DrawingOffsetX;
+    i16 DrawingOffsetY;
+
+    u16 DisplayVRAMStartX;
+    u16 DisplayVRAMStartY;
+    u16 DisplayHorizontalStart;
+    u16 DisplayHorizontalEnd;
+    u16 DisplayLineStart;
+    u16 DisplayLineEnd;
+} GPU;
 
 
 
@@ -84,6 +71,7 @@ struct PS1
     u8 *Bios;
     u8 *Ram;
     CPU Cpu;
+    GPU Gpu;
     DMA Dma;
 };
 
