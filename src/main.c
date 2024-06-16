@@ -142,6 +142,7 @@ void GPU_WriteGP1(GPU *Gpu, u32 Data)
     {
     case 0x00: /* soft reset */ 
     {
+        /* NOTE: this piece of code is buggy when compiled with tcc */
         GPU_Reset(Gpu, Gpu->Bus);
         Gpu->Status.InterlaceEnable = 1;
     } break;
