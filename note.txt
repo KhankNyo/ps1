@@ -1,0 +1,1 @@
+DO NOT use tcc if you're using bitfields, there's probably a bug because when inlining a function, the emulator behaves differently compared to the same piece of code factored out as a function. GCC does not produce a difference. 
