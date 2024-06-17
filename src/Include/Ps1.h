@@ -4,6 +4,7 @@
 #include "Common.h"
 #include "CPU.h"
 #include "DMA.h"
+#include <wchar.h>
 
 
 typedef struct 
@@ -34,8 +35,13 @@ typedef struct
     unsigned DMADirection:2;            /* 29..30  00: off; 01: fifo; 10: CPU to GP0; 11: GPURead to CPU */
 } GPUStat;
 
-typedef struct 
+typedef struct GPU
 {
+    u32 CommandBuffer[16];
+    uint CommandBufferSize;
+    uint CommandWordsRemain;
+    void (*CommandBufferFn)(struct GPU *);
+
     GPUStat Status;
     PS1 *Bus;
 

@@ -13,6 +13,7 @@ void GPU_Reset(GPU *Gpu, PS1 *Bus)
 
         .Status = (GPUStat) {
             .DisplayDisable = 1,
+            .TextureDisable = 1,
             .VideoMode = 0, /* NTSC */
         },
 
@@ -26,7 +27,7 @@ void GPU_Reset(GPU *Gpu, PS1 *Bus)
         .DrawingAreaTop = 0,
         .DrawingAreaBottom = 0,
 
-        .DisplayHorizontalStart = 0x100,
+        .DisplayHorizontalStart = 0x200,
         .DisplayHorizontalEnd = 0xC00,
         .DisplayLineStart = 0x10,
         .DisplayLineEnd = 0x100,
@@ -105,33 +106,53 @@ u32 GPU_ReadStatus(GPU *Gpu)
     return Value;
 }
 
-static void GP0_SetDrawMode(GPU *Gpu, u32 Instruction);
+static void GP0_Nop(GPU *Gpu);
+static void GP0_SetDrawMode(GPU *Gpu);
+static void GP0_SetTextureWindow(GPU *Gpu);
+static void GP0_SetDrawingTopLeft(GPU *Gpu);
+static void GP0_SetDrawingBottomRight(GPU *Gpu);
+static void GP0_SetDrawingOffset(GPU *Gpu);
+static void GP0_SetMaskBits(GPU *Gpu);
+
 static void GP1_SetDisplayMode(GPU *Gpu, u32 Instruction);
 
 void GPU_WriteGP0(GPU *Gpu, u32 Data)
 {
-    u8 Command = Data >> 24;
-    switch (Command)
+    if (Gpu->CommandBufferSize == 0)
     {
-    case 0x00: /* nop */ break;
-    case 0xE1: /* set drawing mode (status reg and misc) */
-    {
-        GP0_SetDrawMode(Gpu, Data);
-    } break;
-    case 0xE3: /* set drawing area top left */
-    {
-        Gpu->DrawingAreaTop = (Data >> 10) & 0x3FF;
-        Gpu->DrawingAreaLeft = (Data >> 0) & 0x3FF;
-    } break;
-    case 0xE4: /* set drawing area bottom right */
-    {
-        Gpu->DrawingAreaBottom = (Data >> 10) & 0x3FF;
-        Gpu->DrawingAreaRight = (Data >> 0) & 0x3FF;
-    } break;
-    default:
-    {
-        TODO("Unhandled GP0 opcode: %08x\n", Data);
-    } break;
+        u8 Command = Data >> 24;
+        switch (Command)
+        {
+        case 0x00: /* nop */ 
+        {
+            Gpu->CommandWordsRemain = 1;
+        } break;
+        case 0xE1: /* set drawing mode (status reg and misc) */
+        {
+            GP0_SetDrawMode(Gpu, Data);
+        } break;
+        case 0xE2: /* Texture window setting */
+        {
+            GP0_SetTextureWindow(Gpu, Data);
+        } break;
+        case 0xE3: /* set drawing area top left */
+        {
+        } break;
+        case 0xE4: /* set drawing area bottom right */
+        {
+        } break;
+        case 0xE5: /* set drawing offset */
+        {
+            GP0_SetDrawingOffset(Gpu, Data);
+        } break;
+        case 0xE6: /* set mask bits */
+        {
+        } break;
+        default:
+        {
+            TODO("Unhandled GP0 opcode: %08x\n", Data);
+        } break;
+        }
     }
 }
 
@@ -152,8 +173,22 @@ void GPU_WriteGP1(GPU *Gpu, u32 Data)
     } break;
     case 0x04: /* set DMA direction */
     {
-        LOG("dma dir: %08x\n", Data);
         Gpu->Status.DMADirection = Data;
+    } break;
+    case 0x05: /* set start of display area */
+    {
+        Gpu->DisplayVRAMStartX = Data & 0x3FE; /* halfword aligned (nowhere in docs??) */
+        Gpu->DisplayVRAMStartY = (Data >> 10) & 0x3FF;
+    } break;
+    case 0x06: /* set horizontal display range */
+    {
+        Gpu->DisplayHorizontalStart = Data & 0xFFF;
+        Gpu->DisplayHorizontalEnd = (Data >> 12) & 0xFFF;
+    } break;
+    case 0x07: /* set vertical display range */
+    {
+        Gpu->DisplayLineStart = Data & 0xFFF;
+        Gpu->DisplayLineEnd = (Data >> 12) & 0xFFF;
     } break;
     default:
     {
@@ -162,8 +197,17 @@ void GPU_WriteGP1(GPU *Gpu, u32 Data)
     }
 }
 
-static void GP0_SetDrawMode(GPU *Gpu, u32 Instruction)
+
+static void GP0_Nop(GPU *Gpu)
 {
+    (void)Gpu;
+    /* NOP */
+}
+
+
+static void GP0_SetDrawMode(GPU *Gpu)
+{
+    u32 Instruction = Gpu->CommandBuffer[0];
     Gpu->Status.TexturePageX = Instruction >> 0;
     Gpu->Status.TexturePageY = Instruction >> 4;
     Gpu->Status.SemiTransparency = Instruction >> 5;
@@ -175,6 +219,46 @@ static void GP0_SetDrawMode(GPU *Gpu, u32 Instruction)
     Gpu->TexturedRectangleXFlip = Instruction >> 12;
     Gpu->TexturedRectangleYFlip = Instruction >> 13;
 }
+
+static void GP0_SetDrawingOffset(GPU *Gpu)
+{
+    u32 Instruction = Gpu->CommandBuffer[0];
+    i16 X = (i16)(Instruction << 5) >> 5; /* bits 0..10 */
+    i16 Y = (i16)(Instruction >> 5) >> 5; /* bits 11..21 */
+    Gpu->DrawingOffsetX = X;
+    Gpu->DrawingOffsetY = Y;
+}
+
+static void GP0_SetDrawingTopLeft(GPU *Gpu)
+{
+    u32 Instruction = Gpu->CommandBuffer[0];
+    Gpu->DrawingAreaTop = (Instruction >> 10) & 0x3FF;
+    Gpu->DrawingAreaLeft = (Instruction >> 0) & 0x3FF;
+}
+
+static void GP0_SetDrawingBottomRight(GPU *Gpu)
+{
+    u32 Instruction = Gpu->CommandBuffer[0];
+    Gpu->DrawingAreaBottom = (Instruction >> 10) & 0x3FF;
+    Gpu->DrawingAreaRight = (Instruction >> 0) & 0x3FF;
+}
+
+static void GP0_SetTextureWindow(GPU *Gpu)
+{
+    u32 Instruction = Gpu->CommandBuffer[0];
+    Gpu->TextureWindowMaskX = Instruction & 0x1F;
+    Gpu->TextureWindowMaskY = (Instruction >> 5) & 0x1F;
+    Gpu->TextureWindowOffsetX = (Instruction >> 10) & 0x1F;
+    Gpu->TextureWindowOffsetY = (Instruction >> 15) & 0x1F;
+}
+
+static void GP0_SetMaskBits(GPU *Gpu)
+{
+    u32 Instruction = Gpu->CommandBuffer[0];
+    Gpu->Status.SetMaskBitOnDraw = Instruction & 1;
+    Gpu->Status.PreserveMaskedPixel = Instruction & 2;
+}
+
 
 
 static void GP1_SetDisplayMode(GPU *Gpu, u32 Instruction)
