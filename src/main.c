@@ -10,6 +10,7 @@ void GPU_Reset(GPU *Gpu, PS1 *Bus)
 {
     *Gpu = (GPU) {
         .Bus = Bus,
+        .GP0Mode = GP0_COMMAND,
 
         .Status = (GPUStat) {
             .DisplayDisable = 1,
@@ -60,7 +61,8 @@ u32 GPU_ReadStatus(GPU *Gpu)
     // Value |= 1 << 14;
     Value |= (u32)Gpu->Status.TextureDisable << 15;
     Value |= (u32)Gpu->Status.HorizontalResolution << 16;
-    Value |= (u32)Gpu->Status.VerticalResolution << 19;
+    //Value |= (u32)Gpu->Status.VerticalResolution << 19;
+    Value |= (u32)0 << 19; /* TODO: hack: use 240 bit vertical res to work around infinite loop in bios */
     Value |= (u32)Gpu->Status.VideoMode << 20;
     Value |= (u32)Gpu->Status.DisplayRGB24 << 21;
     Value |= (u32)Gpu->Status.InterlaceEnable << 22;
@@ -106,53 +108,83 @@ u32 GPU_ReadStatus(GPU *Gpu)
     return Value;
 }
 
-static void GP0_Nop(GPU *Gpu);
 static void GP0_SetDrawMode(GPU *Gpu);
 static void GP0_SetTextureWindow(GPU *Gpu);
 static void GP0_SetDrawingTopLeft(GPU *Gpu);
 static void GP0_SetDrawingBottomRight(GPU *Gpu);
 static void GP0_SetDrawingOffset(GPU *Gpu);
 static void GP0_SetMaskBits(GPU *Gpu);
+static void GP0_RenderQuadMonoOpaque(GPU *Gpu);
+static void GP0_ClearTextureCache(GPU *Gpu);
+static void GP0_LoadImage(GPU *Gpu);
 
 static void GP1_SetDisplayMode(GPU *Gpu, u32 Instruction);
 
 void GPU_WriteGP0(GPU *Gpu, u32 Data)
 {
-    if (Gpu->CommandBufferSize == 0)
+    if (Gpu->CommandBufferSize >= Gpu->CommandWordsRemain)
     {
+        Gpu->CommandBufferSize = 0;
+        Gpu->CommandWordsRemain = 1;
         u8 Command = Data >> 24;
         switch (Command)
         {
         case 0x00: /* nop */ 
         {
-            Gpu->CommandWordsRemain = 1;
+            Gpu->CommandBufferFn = NULL;
+        } break;
+        case 0x01: /* clear texture cache */
+        {
+            Gpu->CommandBufferFn = GP0_ClearTextureCache;
         } break;
         case 0xE1: /* set drawing mode (status reg and misc) */
         {
-            GP0_SetDrawMode(Gpu, Data);
+            Gpu->CommandBufferFn = GP0_SetDrawMode;
         } break;
         case 0xE2: /* Texture window setting */
         {
-            GP0_SetTextureWindow(Gpu, Data);
+            Gpu->CommandBufferFn = GP0_SetTextureWindow;
         } break;
         case 0xE3: /* set drawing area top left */
         {
+            Gpu->CommandBufferFn = GP0_SetDrawingTopLeft;
         } break;
         case 0xE4: /* set drawing area bottom right */
         {
+            Gpu->CommandBufferFn = GP0_SetDrawingBottomRight;
         } break;
         case 0xE5: /* set drawing offset */
         {
-            GP0_SetDrawingOffset(Gpu, Data);
+            Gpu->CommandBufferFn = GP0_SetDrawingOffset;
         } break;
         case 0xE6: /* set mask bits */
         {
+            Gpu->CommandBufferFn = GP0_SetMaskBits;
+        } break;
+
+        case 0x28: /* render quad mono opaque */
+        {
+            Gpu->CommandBufferFn = GP0_RenderQuadMonoOpaque;
+            Gpu->CommandWordsRemain += 4;
+        } break;
+        case 0xA0: /* load image */
+        {
+            Gpu->CommandBufferFn = GP0_LoadImage;
+            Gpu->CommandWordsRemain += 2;
         } break;
         default:
         {
             TODO("Unhandled GP0 opcode: %08x\n", Data);
         } break;
         }
+    }
+
+    Gpu->CommandBuffer[Gpu->CommandBufferSize++] = Data;
+    if (Gpu->CommandBufferSize == Gpu->CommandWordsRemain 
+    && NULL != Gpu->CommandBufferFn)
+    {
+        Gpu->CommandBufferFn(Gpu);
+        Gpu->CommandBufferFn = NULL;
     }
 }
 
@@ -195,13 +227,6 @@ void GPU_WriteGP1(GPU *Gpu, u32 Data)
         TODO("Unhandled GP1 opcode: %08x", Data);
     } break;
     }
-}
-
-
-static void GP0_Nop(GPU *Gpu)
-{
-    (void)Gpu;
-    /* NOP */
 }
 
 
@@ -257,6 +282,41 @@ static void GP0_SetMaskBits(GPU *Gpu)
     u32 Instruction = Gpu->CommandBuffer[0];
     Gpu->Status.SetMaskBitOnDraw = Instruction & 1;
     Gpu->Status.PreserveMaskedPixel = Instruction & 2;
+}
+
+static void GP0_RenderQuadMonoOpaque(GPU *Gpu)
+{
+    (void)Gpu;
+    LOG("[Renderer]: Quad Mono Opaque: %d words\n", Gpu->CommandBufferSize);
+    /* TODO: implement */
+}
+
+static void GP0_ClearTextureCache(GPU *Gpu)
+{
+    (void)Gpu;
+    /* TODO: implement */
+}
+
+static void GP0_LoadImage(GPU *Gpu)
+{
+    /* 
+     * 0: Command
+     * 1: dst: YYYYXXXX, x in halfwords 
+     * 2: width + height: HHHHWWWW, w in halfwords
+     * there will be padding if number of halfword transfered is odd
+     */
+    u32 SizeParam = Gpu->CommandBuffer[2];
+
+    /* width * height */
+    u32 ImageSizeHalf = (SizeParam & 0xFFFF) * (SizeParam >> 16); 
+
+    /* round up to even multiple of halfword, divide by 2 (sizeof(word)/sizeof(halfword)) */
+    u32 ImageSizeWord = (ImageSizeHalf + 1) / 2;
+
+    /* set up GP0 port for image transfer mode */
+    Gpu->GP0Mode = GP0_LOAD_IMAGE;
+    Gpu->CommandWordsRemain = ImageSizeWord;
+    /* TODO: do something with the dst param? */
 }
 
 

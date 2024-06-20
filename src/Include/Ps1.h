@@ -35,12 +35,19 @@ typedef struct
     unsigned DMADirection:2;            /* 29..30  00: off; 01: fifo; 10: CPU to GP0; 11: GPURead to CPU */
 } GPUStat;
 
+typedef enum GP0Mode 
+{
+    GP0_COMMAND,
+    GP0_LOAD_IMAGE,
+} GP0Mode;
+
 typedef struct GPU
 {
     u32 CommandBuffer[16];
     uint CommandBufferSize;
     uint CommandWordsRemain;
     void (*CommandBufferFn)(struct GPU *);
+    GP0Mode GP0Mode;
 
     GPUStat Status;
     PS1 *Bus;
