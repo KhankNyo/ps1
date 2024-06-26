@@ -43,6 +43,7 @@ typedef enum GP0Mode
 
 typedef struct GPU
 {
+    /* command buffer is for multi-word commands, longest possible command does not exceed 16 words */
     u32 CommandBuffer[16];
     uint CommandBufferSize;
     uint CommandWordsRemain;

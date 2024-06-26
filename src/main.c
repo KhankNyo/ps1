@@ -122,7 +122,7 @@ static void GP1_SetDisplayMode(GPU *Gpu, u32 Instruction);
 
 void GPU_WriteGP0(GPU *Gpu, u32 Data)
 {
-    if (Gpu->CommandBufferSize >= Gpu->CommandWordsRemain)
+    if (0 == Gpu->CommandWordsRemain)
     {
         Gpu->CommandBufferSize = 0;
         Gpu->CommandWordsRemain = 1;
@@ -179,12 +179,35 @@ void GPU_WriteGP0(GPU *Gpu, u32 Data)
         }
     }
 
-    Gpu->CommandBuffer[Gpu->CommandBufferSize++] = Data;
-    if (Gpu->CommandBufferSize == Gpu->CommandWordsRemain 
-    && NULL != Gpu->CommandBufferFn)
+
+    switch (Gpu->GP0Mode)
     {
-        Gpu->CommandBufferFn(Gpu);
-        Gpu->CommandBufferFn = NULL;
+    case GP0_COMMAND:
+    {
+        ASSERT(Gpu->CommandWordsRemain);
+        /* push the data word into a temp buffer, execute when sufficient amount of words have been fetched for a command */
+        Gpu->CommandBuffer[Gpu->CommandBufferSize++] = Data;
+        Gpu->CommandWordsRemain--;
+
+        if (0 == Gpu->CommandWordsRemain 
+        && NULL != Gpu->CommandBufferFn)
+        {
+            Gpu->CommandBufferFn(Gpu);
+            Gpu->CommandBufferFn = NULL;
+        }
+    } break;
+    case GP0_LOAD_IMAGE:
+    {
+        if (Gpu->CommandWordsRemain) /* then load the image data */
+        {
+            Gpu->CommandWordsRemain--;
+            Gpu->CommandBufferSize = 0;
+        }
+        else /* finished loading image data, switch back to command mode */
+        {
+            Gpu->GP0Mode = GP0_COMMAND;
+        }
+    } break;
     }
 }
 
@@ -195,7 +218,7 @@ void GPU_WriteGP1(GPU *Gpu, u32 Data)
     {
     case 0x00: /* soft reset */ 
     {
-        /* NOTE: this piece of code is buggy when compiled with tcc */
+        /* NOTE: this piece of code is buggy when compiled with tcc, probably a bitfield bug */
         GPU_Reset(Gpu, Gpu->Bus);
         Gpu->Status.InterlaceEnable = 1;
     } break;
@@ -300,6 +323,7 @@ static void GP0_ClearTextureCache(GPU *Gpu)
 static void GP0_LoadImage(GPU *Gpu)
 {
     /* 
+     * Command breakdown (3 words)
      * 0: Command
      * 1: dst: YYYYXXXX, x in halfwords 
      * 2: width + height: HHHHWWWW, w in halfwords
@@ -316,7 +340,9 @@ static void GP0_LoadImage(GPU *Gpu)
     /* set up GP0 port for image transfer mode */
     Gpu->GP0Mode = GP0_LOAD_IMAGE;
     Gpu->CommandWordsRemain = ImageSizeWord;
-    /* TODO: do something with the dst param? */
+    /* TODO: implement the copy when VRAM is added (using dst param) */
+    LOG("img transfer\n");
+
 }
 
 
@@ -475,19 +501,26 @@ static TranslatedAddr InGPURange(u32 PhysicalAddr)
 
 static void PS1_DoDMATransferBlock(PS1 *Ps1, DMA_Port Port)
 {
+    static const char *DMADeviceName[] = {
+        "MDECin", "MDECout",
+        "GPU", "CDROM",
+        "SPU", "PIO",
+        "OTC"
+    };
     DMA_Chanel *Chanel = &Ps1->Dma.Chanels[Port];
     int Increment = 
         Chanel->Ctrl.Decrement
         ? -4 : 4;
     u32 Addr = Chanel->BaseAddr;
     u32 WordsLeft = DMA_GetChanelTransferSize(Chanel);
+
     if (Chanel->Ctrl.RamToDevice)
     {
-        LOG("[DMA Transfer]: ram to device(%d):\n"
+        LOG("[DMA Transfer]: ram to device %d (%s):\n"
             "    Addr: %08x..%08x\n"
             "    Incr: %d\n"
             "    Size: %08x (%d) words\n",
-            Port, 
+            Port, DMADeviceName[Port], 
             Addr, Addr + Increment*WordsLeft,
             Increment,
             WordsLeft, WordsLeft
@@ -500,11 +533,12 @@ static void PS1_DoDMATransferBlock(PS1 *Ps1, DMA_Port Port)
             {
             case DMA_PORT_GPU:
             {
+                //GPU_WriteGP0(&Ps1->Gpu, Data);
                 //LOG("      | %08x\n", Data);
             } break;
             default:
             {
-                TODO("DMA for ram to device %d", Port);
+                TODO("DMA from ram to device %d (%s)", Port, DMADeviceName[Port]);
             } break;
             }
 
@@ -514,11 +548,11 @@ static void PS1_DoDMATransferBlock(PS1 *Ps1, DMA_Port Port)
     }
     else /* device to ram */
     {
-        LOG("[DMA Transfer]: device(%d) to ram:\n"
+        LOG("[DMA Transfer]: device %d (%s) to ram:\n"
             "    Addr: %08x..%08x\n"
             "    Incr: %d\n"
             "    Size: %08x (%d) words\n",
-            Port, 
+            Port, DMADeviceName[Port], 
             Addr, Addr + Increment*WordsLeft,
             Increment,
             WordsLeft, WordsLeft
@@ -539,7 +573,7 @@ static void PS1_DoDMATransferBlock(PS1 *Ps1, DMA_Port Port)
             } break;
             default:
             {
-                TODO("DMA device %d to ram", Port);
+                TODO("DMA transfer from device %d (%s) to ram", Port, DMADeviceName[Port]);
             } break;
             }
             PS1_Ram_Write32(Ps1, CurrentAddr, SrcWord);
@@ -629,7 +663,6 @@ u32 PS1_Read32(PS1 *Ps1, u32 LogicalAddr)
         TODO("unaligned load32: %08x", LogicalAddr);
     }
 
-    const char *RegionName = "Unknown";
     u32 Data = 0;
     u32 PhysicalAddr = PS1_GetPhysicalAddr(LogicalAddr);
     TranslatedAddr Translation = InBiosRange(PhysicalAddr);
@@ -644,7 +677,7 @@ u32 PS1_Read32(PS1 *Ps1, u32 LogicalAddr)
         Data |= (u32)Ps1->Bios[Offset + 3] << 24;
         return Data; /* no log */
     }
-    else if ((Translation = InRamRange(PhysicalAddr)).Valid)
+    if ((Translation = InRamRange(PhysicalAddr)).Valid)
     {
         u32 Offset = Translation.Offset;
         ASSERT(Offset + 4 <= PS1_RAM_SIZE && Offset < Offset + 4);
@@ -652,7 +685,9 @@ u32 PS1_Read32(PS1 *Ps1, u32 LogicalAddr)
         PS1_Ram_Read32(Ps1, Offset, &Data);
         return Data; /* no log */
     }
-    else if ((Translation = InMemCtrl1Range(PhysicalAddr)).Valid)
+
+    LOG("Read32 [%08x] ", LogicalAddr);
+    if ((Translation = InMemCtrl1Range(PhysicalAddr)).Valid)
     {
         TODO("Handle reading memctrl1: %08x\n", LogicalAddr);
     }
@@ -667,43 +702,41 @@ u32 PS1_Read32(PS1 *Ps1, u32 LogicalAddr)
     else if ((Translation = InInterruptCtrlRange(PhysicalAddr)).Valid)
     {
         /* nop */
-        RegionName = "interrupt ctrl";
+        LOG("(interrupt ctrl): %08x\n", Data);
     }
     else if ((Translation = InDMARange(PhysicalAddr)).Valid)
     {
-        RegionName = "DMA";
         Data = DMA_Read32(&Ps1->Dma, Translation.Offset);
+        LOG("(DMA): %08x\n", Data);
         return Data;
     }
     else if ((Translation = InGPURange(PhysicalAddr)).Valid)
     {
         if (PhysicalAddr == 0x1F801810) /* GPUREAD register, read only */
         {
-            RegionName = "GPUREAD";
             Data = GPU_ReadGPU(&Ps1->Gpu);
+            LOG("(GPUREAD): %08x\n", Data);
         }
         else /* GPUSTAT register, read only */
         {
-            RegionName = "GPUSTAT";
             Data = GPU_ReadStatus(&Ps1->Gpu);
+            LOG("(GPUSTAT): %08x\n", Data);
         }
     }
     else if ((Translation = InTimerRange(PhysicalAddr)).Valid)
     {
-        RegionName = "timer";
+        LOG("(timer): %08x\n", Data);
     }
     else
     {
-        TODO("read32: [%08x] -> %08x\n", LogicalAddr, Data);
+        TODO("\nRead32 unknown region [%08x]\n", PhysicalAddr);
     }
-    LOG("%s: [%08x] -> %08x\n", RegionName, LogicalAddr, Data);
     return Data;
 }
 
 u16 PS1_Read16(PS1 *Ps1, u32 LogicalAddr)
 {
     u32 Data = 0;
-    const char *RegionName = "Unknown";
     if (LogicalAddr & 1)
     {
         TODO("read16 unaligned: %08x\n", LogicalAddr);
@@ -713,61 +746,57 @@ u16 PS1_Read16(PS1 *Ps1, u32 LogicalAddr)
     TranslatedAddr Translation = InRamRange(PhysicalAddr);
     if (Translation.Valid)
     {
-        RegionName = "ram";
         u32 Offset = Translation.Offset;
         ASSERT(Offset + 2 <= PS1_RAM_SIZE && Offset + 2 > Offset);
 
         Data = Ps1->Ram[Offset + 0];
         Data |= (u16)Ps1->Ram[Offset + 1] << 8;
-        return Data;
+        return Data; /* no log */
     }
-    else if ((Translation = InInterruptCtrlRange(PhysicalAddr)).Valid)
+    if ((Translation = InSPURange(PhysicalAddr)).Valid)
+    {
+        return Data; /* too much logging from spu */
+    }
+
+    LOG("Read16 [%08x] ", LogicalAddr);
+    if ((Translation = InInterruptCtrlRange(PhysicalAddr)).Valid)
     {
         /* nop */
-        RegionName = "interrupt ctrl";
-    }
-    else if ((Translation = InSPURange(PhysicalAddr)).Valid)
-    {
-        RegionName = "SPU";
-        return Data; /* too much logging from spu */
+        LOG("(interrupt ctrl): TODO\n");
     }
     else
     {
-        TODO("read16: [%08x]\n", LogicalAddr);
+        TODO("(unknown region)\n");
     }
-
-    LOG("%s: [%08x] -> %04x\n", RegionName, LogicalAddr, Data);
     return Data;
 }
 
 u8 PS1_Read8(PS1 *Ps1, u32 LogicalAddr)
 {
-    const char *RegionName = "Unknown";
     u8 Data = 0;
     u32 PhysicalAddr = PS1_GetPhysicalAddr(LogicalAddr);
     TranslatedAddr Translation = InBiosRange(PhysicalAddr);
     if (Translation.Valid)
     {
-        RegionName = "bios";
         Data = Ps1->Bios[Translation.Offset];
         return Data; /*  no log for bios (too many reads) */
     }
     else if ((Translation = InRamRange(PhysicalAddr)).Valid)
     {
-        RegionName = "ram";
         Data = Ps1->Ram[Translation.Offset];
         return Data; /*  too much ram reads */
     }
-    else if ((Translation = InExpansion1Range(PhysicalAddr)).Valid)
+
+    LOG("Read8 [%08x] ", LogicalAddr);
+    if ((Translation = InExpansion1Range(PhysicalAddr)).Valid)
     {
-        RegionName = "expansion 1";
+        LOG("(Expansion 1)\n");
         Data = 0xFF;
     }
     else
     {
-        TODO("Ps1 read8: [%08x]", LogicalAddr);
+        LOG("(UNknown region)\n");
     }
-    LOG("%s: [%08x] -> %02x\n", RegionName, LogicalAddr, Data);
     return Data;
 }
 
@@ -785,21 +814,21 @@ void PS1_Write32(PS1 *Ps1, u32 LogicalAddr, u32 Data)
         TODO("unaligned write32: [%08x] <- %08x", LogicalAddr, Data);
     }
 
-    const char *RegionName = "Unknown";
     u32 PhysicalAddr = PS1_GetPhysicalAddr(LogicalAddr);
     TranslatedAddr Translation = InRamRange(PhysicalAddr);
     if (Translation.Valid)
     {
-        RegionName = "ram";
         u32 Offset = Translation.Offset;
         ASSERT(Offset + 4 <= PS1_RAM_SIZE && Offset < Offset + 4);
 
         PS1_Ram_Write32(Ps1, Offset, Data);
         return; /*  ram log is unnecessary since there is going to be a lot of ram write */
     }
-    else if ((Translation = InMemCtrl1Range(PhysicalAddr)).Valid)
+
+    LOG("Write32 [%08x] ", LogicalAddr);
+    if ((Translation = InMemCtrl1Range(PhysicalAddr)).Valid)
     {
-        RegionName = "mem ctrl";
+        LOG("(memctrl)\n");
         switch (Translation.Offset)
         {
         case 0: /*  Expansion 1 base */
@@ -814,32 +843,32 @@ void PS1_Write32(PS1 *Ps1, u32 LogicalAddr, u32 Data)
     }
     else if ((Translation = InMemCtrl2Range(PhysicalAddr)).Valid)
     {
-        RegionName = "mem ctrl 2";
+        LOG("(memctrl 2)\n");
         if (Data != 0x00000B88)
         {
-            LOG("Unexpected RAM_SIZE value: %08x (expected %08x)\n", Data, 0x00000B88);
+            LOG("\nUnexpected RAM_SIZE value: %08x (expected %08x)\n", Data, 0x00000B88);
             ASSERT(Data == 0x00000B88);
         }
     }
     else if ((Translation = InCacheCtrlRange(PhysicalAddr)).Valid)
     {
         /* nop */
-        RegionName = "cache ctrl";
+        LOG("(cache ctrl)\n");
     }
     else if ((Translation = InInterruptCtrlRange(PhysicalAddr)).Valid)
     {
         /* nop */
-        RegionName = "interrupt ctrl";
+        LOG("(interrupt ctrl)\n");
     }
     else if ((Translation = InTimerRange(PhysicalAddr)).Valid)
     {
         /* nop */
-        RegionName = "timer";
+        LOG("(timer)\n");
     }
     else if ((Translation = InDMARange(PhysicalAddr)).Valid)
     {
-        RegionName = "DMA";
-        LOG("%s: [%08x] <- %08x\n", RegionName, LogicalAddr, Data);
+        /* no log, too much data */
+        LOG("(DMA): %08x\n", Data);
         DMA_Write32(&Ps1->Dma, Translation.Offset, Data);
         return;
     }
@@ -848,20 +877,19 @@ void PS1_Write32(PS1 *Ps1, u32 LogicalAddr, u32 Data)
         /* nop */
         if (PhysicalAddr == 0x1F801810) /* GP0 register (write only) */
         {
-            RegionName = "GP0";
+            LOG("(GP0): %08x\n", Data);
             GPU_WriteGP0(&Ps1->Gpu, Data);
         }
         else /* GP1 register, write only */
         {
-            RegionName = "GP1";
+            LOG("(GP1): %08x\n", Data);
             GPU_WriteGP1(&Ps1->Gpu, Data);
         }
     }
     else
     {
-        TODO("Ps1 write32: [%08x] <- %08x", LogicalAddr, Data);
+        TODO("(unknown) <- %08x", Data);
     }
-    LOG("%s: [%08x] <- %08x\n", RegionName, LogicalAddr, Data);
 }
 
 void PS1_Write16(PS1 *Ps1, u32 LogicalAddr, u16 Data)
@@ -871,12 +899,10 @@ void PS1_Write16(PS1 *Ps1, u32 LogicalAddr, u16 Data)
         TODO("Unaligned write16: [%08x] <- %04x", LogicalAddr, Data);
     }
 
-    const char *RegionName = "Unknown";
     u32 PhysicalAddr = PS1_GetPhysicalAddr(LogicalAddr);
     TranslatedAddr Translation = InRamRange(PhysicalAddr);
     if (Translation.Valid)
     {
-        RegionName = "ram";
         u32 Offset = Translation.Offset;
         ASSERT(Offset + 2 > Offset && Offset + 2 <= PS1_RAM_SIZE);
 
@@ -886,44 +912,43 @@ void PS1_Write16(PS1 *Ps1, u32 LogicalAddr, u16 Data)
     }
     else if ((Translation = InSPURange(PhysicalAddr)).Valid)
     {
-        RegionName = "SPU";
         return; /* too much logging from spu */
     }
-    else if ((Translation = InInterruptCtrlRange(PhysicalAddr)).Valid)
+
+    LOG("Write16 [%08x] ", LogicalAddr);
+    if ((Translation = InInterruptCtrlRange(PhysicalAddr)).Valid)
     {
-        RegionName = "interrupt ctrl";
+        LOG("(interrupt ctrl): %08x\n", Data);
     }
     else if ((Translation = InTimerRange(PhysicalAddr)).Valid)
     {
-        RegionName = "timer";
+        LOG("(timer): %08x\n", Data);
     }
     else
     {
         TODO("write16: [%08x] <- %04x", LogicalAddr, Data);
     }
-    LOG("%s: [%08x] <- %04x\n", RegionName, LogicalAddr, Data);
 }
 
 void PS1_Write8(PS1 *Ps1, u32 LogicalAddr, u8 Data)
 {
-    const char *RegionName = "Unknown";
     u32 PhysicalAddr = PS1_GetPhysicalAddr(LogicalAddr);
     TranslatedAddr Translation = InRamRange(PhysicalAddr);
     if (Translation.Valid)
     {
-        RegionName = "ram";
         Ps1->Ram[Translation.Offset] = Data;
         return; /*  too much ram writes */
     }
-    else if ((Translation = InExpansion2Range(PhysicalAddr)).Valid)
+
+    LOG("Write8 [%08x] ", LogicalAddr);
+    if ((Translation = InExpansion2Range(PhysicalAddr)).Valid)
     {
-        RegionName = "expansion 2";
+        LOG("(expansion 2): %08x\n", Data);
     }
     else
     {
         TODO("write8: [%08x] <- %02x", LogicalAddr, Data);
     }
-    LOG("%s: [%08x] <- %02x\n", RegionName, LogicalAddr, Data);
 }
 
 
