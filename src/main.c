@@ -179,7 +179,6 @@ void GPU_WriteGP0(GPU *Gpu, u32 Data)
         }
     }
 
-
     switch (Gpu->GP0Mode)
     {
     case GP0_COMMAND:
@@ -192,20 +191,18 @@ void GPU_WriteGP0(GPU *Gpu, u32 Data)
         if (0 == Gpu->CommandWordsRemain 
         && NULL != Gpu->CommandBufferFn)
         {
+            LOG("[GP0 Cmd]: %08x\n", Gpu->CommandBuffer[0]);
             Gpu->CommandBufferFn(Gpu);
             Gpu->CommandBufferFn = NULL;
         }
     } break;
     case GP0_LOAD_IMAGE:
     {
-        if (Gpu->CommandWordsRemain) /* then load the image data */
-        {
-            Gpu->CommandWordsRemain--;
-            Gpu->CommandBufferSize = 0;
-        }
-        else /* finished loading image data, switch back to command mode */
+        Gpu->CommandWordsRemain--;
+        if (0 == Gpu->CommandWordsRemain) /* done transfering, switch back to command mode */
         {
             Gpu->GP0Mode = GP0_COMMAND;
+            Gpu->CommandBufferSize = 0;
         }
     } break;
     }
@@ -222,9 +219,9 @@ void GPU_WriteGP1(GPU *Gpu, u32 Data)
         GPU_Reset(Gpu, Gpu->Bus);
         Gpu->Status.InterlaceEnable = 1;
     } break;
-    case 0x08: /* set display mode */
+    case 0x03: /* display enable */
     {
-        GP1_SetDisplayMode(Gpu, Data);
+        Gpu->Status.DisplayDisable = Data & 1;
     } break;
     case 0x04: /* set DMA direction */
     {
@@ -244,6 +241,10 @@ void GPU_WriteGP1(GPU *Gpu, u32 Data)
     {
         Gpu->DisplayLineStart = Data & 0xFFF;
         Gpu->DisplayLineEnd = (Data >> 12) & 0xFFF;
+    } break;
+    case 0x08: /* set display mode */
+    {
+        GP1_SetDisplayMode(Gpu, Data);
     } break;
     default:
     {
@@ -341,7 +342,7 @@ static void GP0_LoadImage(GPU *Gpu)
     Gpu->GP0Mode = GP0_LOAD_IMAGE;
     Gpu->CommandWordsRemain = ImageSizeWord;
     /* TODO: implement the copy when VRAM is added (using dst param) */
-    LOG("img transfer\n");
+    LOG("img transfer: %d words\n", ImageSizeWord);
 
 }
 
@@ -533,7 +534,7 @@ static void PS1_DoDMATransferBlock(PS1 *Ps1, DMA_Port Port)
             {
             case DMA_PORT_GPU:
             {
-                //GPU_WriteGP0(&Ps1->Gpu, Data);
+                GPU_WriteGP0(&Ps1->Gpu, Data);
                 //LOG("      | %08x\n", Data);
             } break;
             default:
