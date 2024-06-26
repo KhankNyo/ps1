@@ -6,6 +6,8 @@
 #include "Ps1.h"
 
 
+static void GP1_ResetCommandBuffer(GPU *Gpu);
+
 void GPU_Reset(GPU *Gpu, PS1 *Bus)
 {
     *Gpu = (GPU) {
@@ -28,13 +30,14 @@ void GPU_Reset(GPU *Gpu, PS1 *Bus)
         .DrawingAreaTop = 0,
         .DrawingAreaBottom = 0,
 
+        /* magic values */
         .DisplayHorizontalStart = 0x200,
         .DisplayHorizontalEnd = 0xC00,
         .DisplayLineStart = 0x10,
         .DisplayLineEnd = 0x100,
     };
 
-    /* TODO: clear fifo */
+    GP1_ResetCommandBuffer(Gpu);
     /* TODO: clear GPU cache */
 }
 
@@ -116,9 +119,14 @@ static void GP0_SetDrawingOffset(GPU *Gpu);
 static void GP0_SetMaskBits(GPU *Gpu);
 static void GP0_RenderQuadMonoOpaque(GPU *Gpu);
 static void GP0_ClearTextureCache(GPU *Gpu);
-static void GP0_LoadImage(GPU *Gpu);
+static void GP0_LoadRectangle(GPU *Gpu);
+static void GP0_StoreRectangle(GPU *Gpu);
+static void GP0_RenderShadedQuad(GPU *Gpu);
+static void GP0_RenderShadedTri(GPU *Gpu);
+static void GP0_RenderTexturedQuad(GPU *Gpu);
 
 static void GP1_SetDisplayMode(GPU *Gpu, u32 Instruction);
+
 
 void GPU_WriteGP0(GPU *Gpu, u32 Data)
 {
@@ -167,9 +175,30 @@ void GPU_WriteGP0(GPU *Gpu, u32 Data)
             Gpu->CommandBufferFn = GP0_RenderQuadMonoOpaque;
             Gpu->CommandWordsRemain += 4;
         } break;
-        case 0xA0: /* load image */
+        case 0x38: /* render shaded quad */
         {
-            Gpu->CommandBufferFn = GP0_LoadImage;
+            Gpu->CommandBufferFn = GP0_RenderShadedQuad;
+            Gpu->CommandWordsRemain += 7;
+        } break;
+        case 0x30: /* render shaded triangle */
+        {
+            Gpu->CommandBufferFn = GP0_RenderShadedTri;
+            Gpu->CommandWordsRemain += 5;
+        } break;
+        case 0x2C: /* render textured quad */
+        {
+            Gpu->CommandBufferFn = GP0_RenderTexturedQuad;
+            Gpu->CommandWordsRemain += 6;
+        } break;
+
+        case 0xC0: /* store rectangle (GPU to CPU) */
+        {
+            Gpu->CommandBufferFn = GP0_StoreRectangle;
+            Gpu->CommandWordsRemain += 2;
+        } break;
+        case 0xA0: /* load rectangle (CPU to GPU) */
+        {
+            Gpu->CommandBufferFn = GP0_LoadRectangle;
             Gpu->CommandWordsRemain += 2;
         } break;
         default:
@@ -218,6 +247,14 @@ void GPU_WriteGP1(GPU *Gpu, u32 Data)
         /* NOTE: this piece of code is buggy when compiled with tcc, probably a bitfield bug */
         GPU_Reset(Gpu, Gpu->Bus);
         Gpu->Status.InterlaceEnable = 1;
+    } break;
+    case 0x01: /* clear fifo */
+    {
+        GP1_ResetCommandBuffer(Gpu);
+    } break;
+    case 0x02: /* interrupt acknowledge */
+    {
+        Gpu->Status.Interrupt = 0;
     } break;
     case 0x03: /* display enable */
     {
@@ -321,30 +358,71 @@ static void GP0_ClearTextureCache(GPU *Gpu)
     /* TODO: implement */
 }
 
-static void GP0_LoadImage(GPU *Gpu)
+static void GP0_LoadRectangle(GPU *Gpu)
 {
     /* 
      * Command breakdown (3 words)
      * 0: Command
-     * 1: dst: YYYYXXXX, x in halfwords 
-     * 2: width + height: HHHHWWWW, w in halfwords
-     * there will be padding if number of halfword transfered is odd
+     * 1: Dst: YYYYXXXX, X in halfwords 
+     * 2: Width + height: HHHHWWWW, W in halfwords
+     * ...: Data (DMA from RAM to GP0 port)
+     * size (height*width) is padded to words boundary while counting in halfwords
      */
     u32 SizeParam = Gpu->CommandBuffer[2];
 
     /* width * height */
-    u32 ImageSizeHalf = (SizeParam & 0xFFFF) * (SizeParam >> 16); 
+    u32 RectangleSizeHalf = (SizeParam & 0xFFFF) * (SizeParam >> 16); 
 
     /* round up to even multiple of halfword, divide by 2 (sizeof(word)/sizeof(halfword)) */
-    u32 ImageSizeWord = (ImageSizeHalf + 1) / 2;
+    u32 RectangleSizeWord = (RectangleSizeHalf + 1) / 2;
 
     /* set up GP0 port for image transfer mode */
     Gpu->GP0Mode = GP0_LOAD_IMAGE;
-    Gpu->CommandWordsRemain = ImageSizeWord;
-    /* TODO: implement the copy when VRAM is added (using dst param) */
-    LOG("img transfer: %d words\n", ImageSizeWord);
+    Gpu->CommandWordsRemain = RectangleSizeWord;
 
+    /* TODO: implement the copy when VRAM is added (using dst param) */
+    LOG("Load rectangle size %d words\n", RectangleSizeWord);
 }
+
+static void GP0_StoreRectangle(GPU *Gpu)
+{
+    /* 
+     * Command breakdown (3 words)
+     * 0: Command 
+     * 1: Src: YYYYXXXX, X in halfwords
+     * 2: Width + height: HHHHWWWW, W in halfwords
+     * ...: Data (DMA or GPUREAD to RAM)
+     * size (height*width) is padded to words boundary while counting in halfwords
+     * */
+    u32 SizeParam = Gpu->CommandBuffer[2];
+    u32 RectangleSizeHalf = (SizeParam & 0xFFFF) * (SizeParam >> 16);
+    u32 RectangleSizeWord = (RectangleSizeHalf + 1) / 2;
+
+    /* TODO: implement copy when implementing VRAM */
+    LOG("Store rectangle size %d words\n", RectangleSizeWord);
+}
+
+static void GP0_RenderShadedQuad(GPU *Gpu)
+{
+    (void)Gpu;
+    LOG("[Renderer]: Draw shaded quad\n");
+}
+
+static void GP0_RenderShadedTri(GPU *Gpu)
+{
+    (void)Gpu;
+    LOG("[Renderer]: Draw shaded triangle\n");
+}
+
+static void GP0_RenderTexturedQuad(GPU *Gpu)
+{
+    (void)Gpu;
+    LOG("[Renderer]: Draw textured quad\n");
+}
+
+
+
+
 
 
 
@@ -363,6 +441,14 @@ static void GP1_SetDisplayMode(GPU *Gpu, u32 Instruction)
     {
         TODO("Implement bit 14 of GPUStat\n");
     }
+}
+
+static void GP1_ResetCommandBuffer(GPU *Gpu)
+{
+    Gpu->CommandBufferSize = 0;
+    Gpu->CommandWordsRemain = 0;
+    Gpu->GP0Mode = GP0_COMMAND;
+    /* TODO: clear fifo */
 }
 
 
