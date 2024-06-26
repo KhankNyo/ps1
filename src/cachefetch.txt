@@ -1,0 +1,37 @@
+
+
+u32 Fetch(Cpu)
+{
+    u32 PC = Cpu.PC;
+
+    if (PC < 0xA000_0000 && Cpu.iCache.IsEnable) /* has cache */
+    {
+        u32 Tag                 = (PC & 0x7FFF_F000);       /* tag,    bits 12..31 */
+        u32 Line                = (PC & 0x0000_0FF0);       /* line,   bits 4..11 */
+        u32 Offset              = (PC & 0x0000_000C);       /* offset, bits 2..3 */
+        ICacheLine &Cacheline   = Cpu.iCache.Lines[Line];   /* ease typing */
+
+        if (Cacheline.TagAndOffset & 0x7FFF_F000 != Tag     /* are the tags different? */
+        || Cacheline.TagAndOffset & 0x0000_0FFC > Offset)   /* is the minimum offset in the line greater than what our PC currently has? */
+            /* if so, cache miss */
+        {
+            Cpu.FinishAllLoads();
+            Cpu.Bus.Clock(7 - Valid);
+            Cacheline.TagAndOffset = PC & 0x7FFF_F00C;
+
+            for (int i = Offset; i < 4; i++)
+            {
+                Cacheline.Instruction[i] = Cpu.Bus.Load32(PC);
+                PC += 4;
+            }
+        }
+
+        return Cacheline.Instruction[Offset];
+    }
+    else /* uncached */
+    {
+        Cpu.FinishAllLoads();
+        Cpu.Bus.Clock(4);
+        return Cpu.Bus.Load32(PC);
+    }
+}
